@@ -12,8 +12,8 @@ from langchain_ollama import ChatOllama
 
 # --- Local Imports ---
 from config import DEFAULT_MODEL, SESSIONS_DIR, STORAGE_DIR, CHROMA_DIR, GRAPH_FILE
-from database_bridge import LoadDatabase, ClearMemory
-from lightrag import LightRAG
+from database_api import LoadDatabase, ClearMemory
+from lightrag_local import LightRAG
 
 app = FastAPI(title="AURA Edge API")
 
