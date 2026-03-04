@@ -9,9 +9,28 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from pydantic import BaseModel
 from pypdf import PdfReader
 
-from lightrag_local import LightRAG, QueryParam
 from security import require_auth, require_ip_allowlist
-from aura_db import init_db, doc_set_owner, doc_get_owner, doc_delete_owner, doc_move_owner
+from aura_db import (
+    init_db,
+    doc_set_owner,
+    doc_get_owner,
+    doc_delete_owner,
+    doc_move_owner,
+)
+
+# ---------------------------
+# Optional RAG import (so /api/documents still works on Azure even if RAG deps missing)
+# ---------------------------
+try:
+    from lightrag_local import LightRAG, QueryParam  # type: ignore
+
+    _RAG_AVAILABLE = True
+    _RAG_IMPORT_ERR = ""
+except Exception as e:
+    LightRAG = None  # type: ignore
+    QueryParam = None  # type: ignore
+    _RAG_AVAILABLE = False
+    _RAG_IMPORT_ERR = str(e)
 
 router = APIRouter(tags=["database"])
 init_db()
@@ -23,19 +42,27 @@ BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_ABS = (os.getenv("AURA_DOCUMENTS_DIR", "") or "").strip()
 DBS_ABS = (os.getenv("AURA_DATABASES_DIR", "") or "").strip()
 
-# Backwards compatibility (your previous code)
+# Backwards compatibility
 DOCS_REL_OR_ABS = (os.getenv("AURA_DOCS_DIR", "storage/documents") or "").strip()
 DB_REL_OR_ABS = (os.getenv("AURA_DB_DIR", "storage/databases") or "").strip()
 
 if DOCS_ABS:
     DOCUMENTS_DIR = DOCS_ABS
 else:
-    DOCUMENTS_DIR = DOCS_REL_OR_ABS if os.path.isabs(DOCS_REL_OR_ABS) else os.path.join(BACKEND_DIR, DOCS_REL_OR_ABS)
+    DOCUMENTS_DIR = (
+        DOCS_REL_OR_ABS
+        if os.path.isabs(DOCS_REL_OR_ABS)
+        else os.path.join(BACKEND_DIR, DOCS_REL_OR_ABS)
+    )
 
 if DBS_ABS:
     RAG_ROOT_DIR = DBS_ABS
 else:
-    RAG_ROOT_DIR = DB_REL_OR_ABS if os.path.isabs(DB_REL_OR_ABS) else os.path.join(BACKEND_DIR, DB_REL_OR_ABS)
+    RAG_ROOT_DIR = (
+        DB_REL_OR_ABS
+        if os.path.isabs(DB_REL_OR_ABS)
+        else os.path.join(BACKEND_DIR, DB_REL_OR_ABS)
+    )
 
 DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2:3b")
 DEFAULT_EMBED = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
@@ -48,18 +75,22 @@ DEFAULT_TOP_K = int(os.getenv("AURA_TOP_K", "4"))
 os.makedirs(DOCUMENTS_DIR, exist_ok=True)
 os.makedirs(RAG_ROOT_DIR, exist_ok=True)
 
+
 # ---------------------------
 # Auth helpers
 # ---------------------------
 def _role(payload: Dict[str, Any]) -> str:
     return str(payload.get("role") or "").lower()
 
+
 def _email(payload: Dict[str, Any]) -> str:
     return str(payload.get("sub") or "").strip().lower()
+
 
 def require_any_user(request: Request) -> Dict[str, Any]:
     require_ip_allowlist(request)
     return require_auth(request)
+
 
 def require_admin(request: Request) -> Dict[str, Any]:
     require_ip_allowlist(request)
@@ -68,12 +99,14 @@ def require_admin(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="Admin only")
     return p
 
+
 def require_admin_or_ta(request: Request) -> Dict[str, Any]:
     require_ip_allowlist(request)
     p = require_auth(request)
     if _role(p) not in ("admin", "ta"):
         raise HTTPException(status_code=403, detail="Admin or TA only")
     return p
+
 
 def require_owner_or_admin(request: Request, rel_path: str) -> Dict[str, Any]:
     """
@@ -97,6 +130,7 @@ def require_owner_or_admin(request: Request, rel_path: str) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="TA can only modify files they uploaded")
     return p
 
+
 # ---------------------------
 # Path helpers
 # ---------------------------
@@ -108,16 +142,20 @@ def _safe_join(root: str, rel: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid path")
     return full
 
+
 def _db_dir(db_name: str) -> str:
     if not db_name or any(c in db_name for c in r'\/:*?"<>|'):
         raise HTTPException(status_code=400, detail="Invalid database name")
     return os.path.join(RAG_ROOT_DIR, db_name)
 
+
 def _db_config_path(db_name: str) -> str:
     return os.path.join(_db_dir(db_name), "db.json")
 
+
 def _db_workdir(db_name: str) -> str:
     return _db_dir(db_name)
+
 
 def _load_db_config(db_name: str) -> Dict[str, Any]:
     p = _db_config_path(db_name)
@@ -126,10 +164,12 @@ def _load_db_config(db_name: str) -> Dict[str, Any]:
     with open(p, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def _save_db_config(db_name: str, cfg: Dict[str, Any]):
     os.makedirs(_db_dir(db_name), exist_ok=True)
     with open(_db_config_path(db_name), "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+
 
 def _read_pdf(path: str) -> str:
     try:
@@ -143,9 +183,11 @@ def _read_pdf(path: str) -> str:
     except Exception:
         return ""
 
+
 def _read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
+
 
 def _chunk_text(text: str, max_chars: int = 2400, overlap: int = 250) -> List[str]:
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -164,6 +206,7 @@ def _chunk_text(text: str, max_chars: int = 2400, overlap: int = 250) -> List[st
         i = max(0, j - overlap)
     return chunks
 
+
 def _walk_tree(root: str) -> Dict[str, Any]:
     def build(node_path: str) -> Dict[str, Any]:
         name = os.path.basename(node_path) or "documents"
@@ -173,15 +216,28 @@ def _walk_tree(root: str) -> Dict[str, Any]:
                 children.append(build(os.path.join(node_path, item)))
             return {"name": name, "type": "dir", "children": children}
         return {"name": name, "type": "file"}
+
     return build(root)
 
+
 # ---------------------------
-# RAG cache
+# RAG helpers / cache (guarded)
 # ---------------------------
-_RAG_CACHE: Dict[str, Tuple[LightRAG, float]] = {}
+def _require_rag():
+    if not _RAG_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=f"RAG backend not available (lightrag_local import failed): {_RAG_IMPORT_ERR}",
+        )
+
+
+_RAG_CACHE: Dict[str, Tuple[Any, float]] = {}
 _RAG_CACHE_TTL_S = float(os.getenv("AURA_RAG_CACHE_TTL_S", "3600"))
 
-def _get_rag(db_name: str) -> LightRAG:
+
+def _get_rag(db_name: str):
+    _require_rag()
+
     now = time.time()
     hit = _RAG_CACHE.get(db_name)
     if hit:
@@ -190,7 +246,7 @@ def _get_rag(db_name: str) -> LightRAG:
             return rag
 
     cfg = _load_db_config(db_name)
-    rag = LightRAG(
+    rag = LightRAG(  # type: ignore[misc]
         working_dir=_db_workdir(db_name),
         llm_model_name=str(cfg.get("llm_model") or DEFAULT_LLM),
         embed_model_name=str(cfg.get("embed_model") or DEFAULT_EMBED),
@@ -199,8 +255,10 @@ def _get_rag(db_name: str) -> LightRAG:
     _RAG_CACHE[db_name] = (rag, now)
     return rag
 
+
 def _invalidate_rag(db_name: str):
     _RAG_CACHE.pop(db_name, None)
+
 
 # ---------------------------
 # Models
@@ -208,18 +266,22 @@ def _invalidate_rag(db_name: str):
 class MkdirRequest(BaseModel):
     path: str
 
+
 class MoveRequest(BaseModel):
     src: str
     dst: str
+
 
 class CreateDBRequest(BaseModel):
     name: str
     folders: List[str] = []
 
+
 class BuildDBRequest(BaseModel):
     name: str
     folders: Optional[List[str]] = None
     force: bool = True
+
 
 class ChatRequest(BaseModel):
     db: str
@@ -227,13 +289,15 @@ class ChatRequest(BaseModel):
     mode: Optional[str] = None
     top_k: Optional[int] = None
 
+
 # ---------------------------
-# Endpoints
+# Endpoints: Documents (always available)
 # ---------------------------
 @router.get("/api/documents/tree")
 def documents_tree(request: Request):
     require_any_user(request)
     return {"root": "documents", "path": DOCUMENTS_DIR, "tree": _walk_tree(DOCUMENTS_DIR)}
+
 
 @router.post("/api/documents/mkdir")
 def documents_mkdir(req: MkdirRequest, request: Request):
@@ -241,6 +305,7 @@ def documents_mkdir(req: MkdirRequest, request: Request):
     full = _safe_join(DOCUMENTS_DIR, req.path)
     os.makedirs(full, exist_ok=True)
     return {"ok": True, "created": req.path}
+
 
 @router.post("/api/documents/upload")
 async def documents_upload(request: Request, path: str = "", files: List[UploadFile] = File(...)):
@@ -264,6 +329,7 @@ async def documents_upload(request: Request, path: str = "", files: List[UploadF
 
     return {"ok": True, "saved": saved, "path": path}
 
+
 @router.delete("/api/documents/delete")
 def documents_delete(request: Request, path: str):
     rel_norm = (path or "").replace("\\", "/").lstrip("/")
@@ -280,6 +346,7 @@ def documents_delete(request: Request, path: str):
     os.remove(full)
     doc_delete_owner(rel_norm)
     return {"ok": True, "deleted": path}
+
 
 @router.post("/api/documents/move")
 def documents_move(req: MoveRequest, request: Request):
@@ -303,6 +370,10 @@ def documents_move(req: MoveRequest, request: Request):
     doc_move_owner(src_rel, dst_rel)
     return {"ok": True, "src": req.src, "dst": req.dst}
 
+
+# ---------------------------
+# Endpoints: Databases (still listed even if RAG missing; RAG actions return 503)
+# ---------------------------
 @router.get("/api/databases")
 def list_databases(request: Request):
     require_any_user(request)
@@ -313,7 +384,8 @@ def list_databases(request: Request):
             continue
         if os.path.exists(_db_config_path(name)):
             out.append(name)
-    return {"databases": out}
+    return {"databases": out, "rag_available": _RAG_AVAILABLE}
+
 
 @router.post("/api/databases/create")
 def create_database(req: CreateDBRequest, request: Request):
@@ -333,21 +405,36 @@ def create_database(req: CreateDBRequest, request: Request):
     _invalidate_rag(req.name)
     return {"ok": True, "db": req.name, "config": cfg}
 
+
 @router.get("/api/databases/{db_name}/config")
 def get_database_config(db_name: str, request: Request):
     require_any_user(request)
     return _load_db_config(db_name)
 
+
 @router.get("/api/databases/{db_name}/stats")
 def database_stats(db_name: str, request: Request):
     require_any_user(request)
     cfg = _load_db_config(db_name)
+
+    # If RAG not available on this environment, return useful info instead of crashing router import.
+    if not _RAG_AVAILABLE:
+        return {
+            "db": db_name,
+            "config": cfg,
+            "stats": None,
+            "rag_available": False,
+            "rag_error": _RAG_IMPORT_ERR,
+        }
+
     rag = _get_rag(db_name)
-    return {"db": db_name, "config": cfg, "stats": rag.stats()}
+    return {"db": db_name, "config": cfg, "stats": rag.stats(), "rag_available": True}
+
 
 @router.post("/api/databases/build")
 async def build_database(req: BuildDBRequest, request: Request):
     require_admin(request)
+    _require_rag()
 
     cfg = _load_db_config(req.name)
     folders = req.folders if req.folders is not None else cfg.get("folders", [])
@@ -418,16 +505,19 @@ async def build_database(req: BuildDBRequest, request: Request):
         "stats": rag.stats(),
     }
 
+
 @router.post("/api/databases/chat")
 async def database_chat(req: ChatRequest, request: Request):
     require_any_user(request)
+    _require_rag()
+
     try:
         rag = _get_rag(req.db)
         mode = (req.mode or DEFAULT_CHAT_MODE).lower().strip()
         top_k = int(req.top_k or DEFAULT_TOP_K)
         top_k = max(1, min(top_k, 8))
 
-        param = QueryParam(mode=mode, top_k=top_k)
+        param = QueryParam(mode=mode, top_k=top_k)  # type: ignore[misc]
         return await rag.aquery(req.query, param=param)
     except HTTPException:
         raise
