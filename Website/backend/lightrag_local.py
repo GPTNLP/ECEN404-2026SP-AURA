@@ -342,3 +342,18 @@ class LightRAG:
         answer = await self.client.generate(prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S)
 
         return {"answer": answer, "sources": sources, "hits": hits}
+    
+    
+
+    def ollama_base_url(self) -> str:
+        return getattr(self.client, "base_url", "")
+
+    def is_ollama_reachable(self) -> bool:
+        # quick ping: Ollama exposes GET /api/tags
+        try:
+            import urllib.request
+            url = f"{self.client.base_url}/api/tags"
+            with urllib.request.urlopen(url, timeout=2.5) as resp:
+                return 200 <= int(getattr(resp, "status", 200)) < 500
+        except Exception:
+            return False
