@@ -1,0 +1,9 @@
+{
+  "name": "ECEN214",
+  "folders": [
+    "ECEN_214_Docs"
+  ],
+  "llm_model": "llama3.2:3b",
+  "embed_model": "nomic-embed-text",
+  "ollama_url": "http://127.0.0.1:11434"
+}

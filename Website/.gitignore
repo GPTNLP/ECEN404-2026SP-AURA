@@ -39,3 +39,11 @@ backend/admin_users.json
 # Logs
 # ========================
 *.log
+
+
+
+# runtime/persistent data (DO NOT COMMIT)
+Website/backend/storage/
+Website/backend/*.sqlite
+Website/backend/**/*.sqlite
+Website/backend/**/*.jsonl
