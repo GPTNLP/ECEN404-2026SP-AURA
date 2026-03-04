@@ -18,11 +18,24 @@ init_db()
 
 BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DOCS_REL = os.getenv("AURA_DOCS_DIR", "storage/documents")
-DB_REL = os.getenv("AURA_DB_DIR", "storage/databases")
+# ✅ Accept BOTH old and new env var names
+# Prefer Azure persistent paths if set
+DOCS_ABS = (os.getenv("AURA_DOCUMENTS_DIR", "") or "").strip()
+DBS_ABS = (os.getenv("AURA_DATABASES_DIR", "") or "").strip()
 
-DOCUMENTS_DIR = DOCS_REL if os.path.isabs(DOCS_REL) else os.path.join(BACKEND_DIR, DOCS_REL)
-RAG_ROOT_DIR = DB_REL if os.path.isabs(DB_REL) else os.path.join(BACKEND_DIR, DB_REL)
+# Backwards compatibility (your previous code)
+DOCS_REL_OR_ABS = (os.getenv("AURA_DOCS_DIR", "storage/documents") or "").strip()
+DB_REL_OR_ABS = (os.getenv("AURA_DB_DIR", "storage/databases") or "").strip()
+
+if DOCS_ABS:
+    DOCUMENTS_DIR = DOCS_ABS
+else:
+    DOCUMENTS_DIR = DOCS_REL_OR_ABS if os.path.isabs(DOCS_REL_OR_ABS) else os.path.join(BACKEND_DIR, DOCS_REL_OR_ABS)
+
+if DBS_ABS:
+    RAG_ROOT_DIR = DBS_ABS
+else:
+    RAG_ROOT_DIR = DB_REL_OR_ABS if os.path.isabs(DB_REL_OR_ABS) else os.path.join(BACKEND_DIR, DB_REL_OR_ABS)
 
 DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2:3b")
 DEFAULT_EMBED = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
@@ -163,10 +176,10 @@ def _walk_tree(root: str) -> Dict[str, Any]:
     return build(root)
 
 # ---------------------------
-# RAG cache (HUGE speed win)
+# RAG cache
 # ---------------------------
-_RAG_CACHE: Dict[str, Tuple[LightRAG, float]] = {}  # db_name -> (rag, loaded_at)
-_RAG_CACHE_TTL_S = float(os.getenv("AURA_RAG_CACHE_TTL_S", "3600"))  # 1 hour
+_RAG_CACHE: Dict[str, Tuple[LightRAG, float]] = {}
+_RAG_CACHE_TTL_S = float(os.getenv("AURA_RAG_CACHE_TTL_S", "3600"))
 
 def _get_rag(db_name: str) -> LightRAG:
     now = time.time()
@@ -211,8 +224,8 @@ class BuildDBRequest(BaseModel):
 class ChatRequest(BaseModel):
     db: str
     query: str
-    mode: Optional[str] = None   # vector|bm25|hybrid
-    top_k: Optional[int] = None  # overrides default
+    mode: Optional[str] = None
+    top_k: Optional[int] = None
 
 # ---------------------------
 # Endpoints
@@ -392,7 +405,7 @@ async def build_database(req: BuildDBRequest, request: Request):
     except Exception:
         pass
 
-    _invalidate_rag(req.name)  # next chat loads fresh store from disk
+    _invalidate_rag(req.name)
 
     return {
         "ok": True,
@@ -412,10 +425,8 @@ async def database_chat(req: ChatRequest, request: Request):
         rag = _get_rag(req.db)
         mode = (req.mode or DEFAULT_CHAT_MODE).lower().strip()
         top_k = int(req.top_k or DEFAULT_TOP_K)
-        top_k = max(1, min(top_k, 8))  # clamp
+        top_k = max(1, min(top_k, 8))
 
-        # FAST DEFAULTS:
-        # vector mode + low top_k is dramatically faster than hybrid
         param = QueryParam(mode=mode, top_k=top_k)
         return await rag.aquery(req.query, param=param)
     except HTTPException:
