@@ -6,6 +6,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from config import ensure_storage_layout  # ✅ ensure persistent dirs/files exist at boot
+
 # Load .env ONLY for local dev; Azure uses App Settings (env vars).
 try:
     from dotenv import load_dotenv
@@ -62,19 +64,13 @@ def include_router_safely(module_name: str, label: str):
     except Exception as e:
         print(f"⚠️ Router not loaded ({label} / {module_name}): {e}")
 
-# ---- Always-safe routers (no ML deps) ----
-# Adjust these names to your actual file/module names.
-# If your routers live under backend/, the imports below should be "backend.<name>"
-# If they live at the same level as main.py, they should be "<name>"
-
-BASE = os.getenv("AURA_ROUTER_PREFIX", "").strip()  # optional
-
 def m(name: str) -> str:
     # If you use backend/ as a package, set AURA_USE_BACKEND_PACKAGE=1 in Azure.
     if os.getenv("AURA_USE_BACKEND_PACKAGE", "0") == "1":
         return f"backend.{name}"
     return name
 
+# ---- Always-safe routers (no ML deps) ----
 include_router_safely(m("auth_me_api"), "auth_me_api")
 include_router_safely(m("admin_auth_api"), "admin_auth_api")
 include_router_safely(m("student_auth_api"), "student_auth_api")
@@ -84,7 +80,6 @@ include_router_safely(m("database_api"), "database_api")
 include_router_safely(m("logs_api"), "logs_api")
 
 # ---- Optional / Heavy routers behind feature flags ----
-# These often import OpenCV/torch/whisper/etc — keep OFF on Azure.
 if os.getenv("ENABLE_CAMERA", "0") == "1":
     include_router_safely(m("camera_api"), "camera_api")
 
@@ -97,10 +92,12 @@ if os.getenv("ENABLE_TTS", "0") == "1":
 if os.getenv("ENABLE_STT", "0") == "1":
     include_router_safely(m("stt_api"), "stt_api")
 
-# ---- Ollama warmup OFF by default ----
 @app.on_event("startup")
 async def _startup():
-    # Never run warmup unless explicitly enabled.
+    # ✅ Ensure /home/site/storage layout exists (admin store, db dirs, etc.)
+    ensure_storage_layout()
+
+    # ---- Ollama warmup OFF by default ----
     if os.getenv("ENABLE_OLLAMA_WARMUP", "0") != "1":
         print("ℹ️ Ollama warmup disabled")
         return

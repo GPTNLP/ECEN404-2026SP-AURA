@@ -10,17 +10,25 @@ from typing import Dict, Any
 
 from fastapi import APIRouter, Request, HTTPException, Response
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 from security import require_ip_allowlist
 from security_tokens import mint_app_token
 from hash_passwords import verify_password as verify_pbkdf2_password
 from otp_store import OTPStore, hash_code
 
-# Local dev only
-env_path = Path(__file__).resolve().parents[1] / ".env"
-if env_path.exists():
-    load_dotenv(env_path)
+from config import ADMIN_USERS_PATH, ensure_storage_layout  # ✅ persistent path + auto-create
+
+# Load .env ONLY for local dev; Azure uses App Settings (env vars).
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+env = (os.getenv("ENV", "") or "").lower()
+if env in ("", "dev", "local") and load_dotenv is not None:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
 
 # SMTP settings
 SMTP_HOST = os.getenv("SMTP_HOST", "")
@@ -28,9 +36,6 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-
-# Admin user store (read-only; no signup)
-ADMIN_USERS_PATH = Path(__file__).resolve().parent / "admin_users.json"
 
 # Admin settings
 ADMIN_OTP_TTL_SECONDS = int(os.getenv("ADMIN_OTP_TTL_SECONDS", "300"))  # 5 min
@@ -95,14 +100,32 @@ def _send_otp_email(to_email: str, code: str):
         server.send_message(msg)
 
 def _load_admins() -> Dict[str, str]:
-    if not ADMIN_USERS_PATH.exists():
-        raise HTTPException(status_code=500, detail="Server missing admin store")
+    """
+    Loads admins from persistent storage:
+      ADMIN_USERS_PATH (usually /home/site/storage/admin_users.json on Azure)
+    Expected format:
+      {"admins": [{"email": "...", "password_hash": "..."}]}
+    """
+    ensure_storage_layout()
 
-    with open(ADMIN_USERS_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    # Auto-create if missing
+    if not ADMIN_USERS_PATH.exists():
+        ADMIN_USERS_PATH.write_text('{"admins":[]}\n', encoding="utf-8")
+
+    try:
+        with open(ADMIN_USERS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Admin store unreadable: {e}")
+
+    admins_list = data.get("admins", [])
+    if not isinstance(admins_list, list):
+        raise HTTPException(status_code=500, detail="Admin store invalid format (admins must be a list)")
 
     out: Dict[str, str] = {}
-    for a in data.get("admins", []):
+    for a in admins_list:
+        if not isinstance(a, dict):
+            continue
         email = (a.get("email") or "").strip().lower()
         ph = (a.get("password_hash") or "").strip()
         if email and ph:
@@ -180,7 +203,6 @@ async def verify(data: AdminVerifyRequest, request: Request, response: Response)
     result = mint_app_token(email=email, role="admin")
     token = result["token"]
 
-    # Set cookie for convenience (works in Azure HTTPS, and in dev if not secure)
     secure_cookie = _should_secure_cookie(request)
 
     cookie_kwargs: Dict[str, Any] = {}
