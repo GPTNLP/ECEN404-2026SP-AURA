@@ -135,8 +135,7 @@ export default function SimulatorPage() {
     const refresh = () => setPrefs(loadPrefs());
 
     // fires when localStorage changes from another tab/window
-    const onStorage = (e: StorageEvent) => {
-      // if you know the exact key you store prefs under, you can check it here
+    const onStorage = () => {
       refresh();
     };
 
