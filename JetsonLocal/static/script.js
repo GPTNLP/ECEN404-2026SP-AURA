@@ -1,48 +1,154 @@
-const chatContainer = document.getElementById('chat-container');
-const statusBadge = document.getElementById('status-badge');
+const chatContainer = document.getElementById("chat-container");
+const statusBadge = document.getElementById("status-badge");
+const cpuVal = document.getElementById("cpu-val");
+const netVal = document.getElementById("net-val");
 
-// Connect to the local FastAPI WebSocket
-const ws = new WebSocket(`ws://${window.location.host}/ws`);
+let ws = null;
+let reconnectTimer = null;
 
-ws.onopen = () => {
-    updateStatus("Connected", "ready");
-};
+function setEmptyState() {
+    if (!chatContainer) return;
 
-ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-
-    if (data.type === "status") {
-        let stateClass = "ready";
-        if (data.data.includes("Listening")) stateClass = "listening";
-        if (data.data.includes("Processing")) stateClass = "processing";
-        updateStatus(data.data, stateClass);
-    } 
-    else if (data.type === "chat") {
-        appendMessage(data.sender, data.text);
+    if (chatContainer.children.length === 0) {
+        chatContainer.innerHTML = `
+            <div class="empty-state">
+                <h2>AURA is ready</h2>
+                <p>
+                    Waiting for voice, keyboard, or system events from the Jetson runtime.
+                    Incoming user and AI messages will appear here live.
+                </p>
+            </div>
+        `;
     }
-};
+}
 
-ws.onclose = () => {
-    updateStatus("Offline - Reconnecting...", "processing");
-    // Optional: implement automatic reconnect logic here
-};
+function clearEmptyState() {
+    const empty = chatContainer.querySelector(".empty-state");
+    if (empty) empty.remove();
+}
 
-function updateStatus(text, stateClass) {
+function updateStatus(text, stateClass = "ready") {
+    if (!statusBadge) return;
     statusBadge.textContent = text;
-    statusBadge.className = `status ${stateClass}`;
+    statusBadge.className = `status-indicator ${stateClass}`;
+}
+
+function updateNetwork(text) {
+    if (!netVal) return;
+    netVal.textContent = text;
+}
+
+function updateCpu(value) {
+    if (!cpuVal) return;
+    cpuVal.textContent = value;
 }
 
 function appendMessage(sender, text) {
-    const msgDiv = document.createElement('div');
-    msgDiv.classList.add('message', sender);
-    
-    const bubbleDiv = document.createElement('div');
-    bubbleDiv.classList.add('bubble');
-    bubbleDiv.textContent = text; // Prevents HTML injection
-    
-    msgDiv.appendChild(bubbleDiv);
+    if (!chatContainer) return;
+
+    clearEmptyState();
+
+    const normalizedSender =
+        sender === "user" ? "user" :
+        sender === "ai" ? "ai" :
+        "system";
+
+    const msgDiv = document.createElement("div");
+    msgDiv.classList.add("message", normalizedSender);
+
+    const wrapper = document.createElement("div");
+
+    const bubbleDiv = document.createElement("div");
+    bubbleDiv.classList.add("bubble");
+    bubbleDiv.textContent = text || "";
+
+    const metaDiv = document.createElement("div");
+    metaDiv.classList.add("message-meta");
+    metaDiv.textContent =
+        normalizedSender === "user" ? "User" :
+        normalizedSender === "ai" ? "AURA" :
+        "System";
+
+    wrapper.appendChild(bubbleDiv);
+    wrapper.appendChild(metaDiv);
+    msgDiv.appendChild(wrapper);
     chatContainer.appendChild(msgDiv);
-    
-    // Auto-scroll to the newest message
+
     chatContainer.scrollTop = chatContainer.scrollHeight;
 }
+
+function handleMessage(data) {
+    if (!data || typeof data !== "object") return;
+
+    if (data.type === "status") {
+        const text = String(data.data || "Ready");
+
+        let stateClass = "ready";
+        if (text.toLowerCase().includes("listening")) stateClass = "listening";
+        else if (text.toLowerCase().includes("processing")) stateClass = "processing";
+        else if (text.toLowerCase().includes("offline")) stateClass = "offline";
+
+        updateStatus(text, stateClass);
+        return;
+    }
+
+    if (data.type === "chat") {
+        appendMessage(data.sender, data.text);
+        return;
+    }
+
+    if (data.type === "telemetry") {
+        if (typeof data.cpu_percent === "number") {
+            updateCpu(`${Math.round(data.cpu_percent)}%`);
+        }
+
+        if (typeof data.network === "string") {
+            updateNetwork(data.network);
+        }
+        return;
+    }
+
+    if (data.type === "system") {
+        appendMessage("system", data.text || "System event");
+    }
+}
+
+function connectWebSocket() {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+
+    ws.onopen = () => {
+        updateStatus("Connected", "ready");
+        updateNetwork("Online");
+        appendMessage("system", "WebSocket connected to local Jetson service.");
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            handleMessage(data);
+        } catch (err) {
+            console.error("Invalid WS message:", err);
+        }
+    };
+
+    ws.onclose = () => {
+        updateStatus("Offline - Reconnecting...", "offline");
+        updateNetwork("Offline");
+        appendMessage("system", "Connection lost. Attempting to reconnect...");
+
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectWebSocket, 2500);
+    };
+
+    ws.onerror = () => {
+        updateStatus("Connection Error", "offline");
+        updateNetwork("Offline");
+    };
+}
+
+setEmptyState();
+updateCpu("--%");
+updateNetwork("Offline");
+updateStatus("Booting...", "processing");
+connectWebSocket();
