@@ -78,6 +78,7 @@ include_router_safely(m("ta_auth_api"), "ta_auth_api")
 include_router_safely(m("ta_admin_api"), "ta_admin_api")
 include_router_safely(m("database_api"), "database_api")
 include_router_safely(m("logs_api"), "logs_api")
+include_router_safely(m("device_api"), "device_api")
 
 # ---- Optional / Heavy routers behind feature flags ----
 if os.getenv("ENABLE_CAMERA", "0") == "1":
