@@ -22,27 +22,46 @@
             <div class="filo-grid">
                 <div class="filo-item">
                     <div class="filo-top">
-                        <span class="filo-label">CPU Usage</span>
+                        <span class="filo-label">CPU / GPU Usage</span>
                     </div>
-                    <div class="filo-value" id="cpu-val">--%</div>
+                    <div class="filo-value">
+                        <div id="cpu-val">CPU: --%</div>
+                        <div id="gpu-val" style="font-size: 18px; margin-top: 6px;">GPU: --%</div>
+                    </div>
                 </div>
+
                 <div class="filo-item">
                     <div class="filo-top">
-                        <span class="filo-label">Active Model</span>
+                        <span class="filo-label">Database</span>
                     </div>
-                    <div class="filo-value">llama3.2</div>
+                    <div class="filo-value" id="db-val">--</div>
                 </div>
+
                 <div class="filo-item">
                     <div class="filo-top">
-                        <span class="filo-label">Network</span>
+                        <span class="filo-label">Connection</span>
                     </div>
                     <div class="filo-value" id="net-val">Offline</div>
                 </div>
             </div>
         </div>
 
-        <main id="chat-container" class="chat-box">
-            </main>
+        <main id="chat-container" class="chat-box"></main>
+
+        <div class="input-bar" style="margin-top: 16px; display: flex; gap: 10px;">
+            <input
+                id="chat-input"
+                type="text"
+                placeholder="Type a message to AURA..."
+                style="flex: 1; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text); font-size: 16px;"
+            />
+            <button
+                id="send-btn"
+                style="padding: 14px 18px; border: none; border-radius: 12px; background: var(--accent); color: white; font-weight: 700; cursor: pointer;"
+            >
+                Send
+            </button>
+        </div>
     </div>
     <script src="/static/script.js"></script>
 </body>

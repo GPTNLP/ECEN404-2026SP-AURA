@@ -1,7 +1,11 @@
 const chatContainer = document.getElementById("chat-container");
 const statusBadge = document.getElementById("status-badge");
 const cpuVal = document.getElementById("cpu-val");
+const gpuVal = document.getElementById("gpu-val");
+const dbVal = document.getElementById("db-val");
 const netVal = document.getElementById("net-val");
+const chatInput = document.getElementById("chat-input");
+const sendBtn = document.getElementById("send-btn");
 
 let ws = null;
 let reconnectTimer = null;
@@ -13,10 +17,7 @@ function setEmptyState() {
         chatContainer.innerHTML = `
             <div class="empty-state">
                 <h2>AURA is ready</h2>
-                <p>
-                    Waiting for voice, keyboard, or system events from the Jetson runtime.
-                    Incoming user and AI messages will appear here live.
-                </p>
+                <p>Send a message below to talk to the robot.</p>
             </div>
         `;
     }
@@ -33,14 +34,24 @@ function updateStatus(text, stateClass = "ready") {
     statusBadge.className = `status-indicator ${stateClass}`;
 }
 
-function updateNetwork(text) {
+function updateConnection(text) {
     if (!netVal) return;
     netVal.textContent = text;
 }
 
 function updateCpu(value) {
     if (!cpuVal) return;
-    cpuVal.textContent = value;
+    cpuVal.textContent = `CPU: ${value}`;
+}
+
+function updateGpu(value) {
+    if (!gpuVal) return;
+    gpuVal.textContent = `GPU: ${value}`;
+}
+
+function updateDb(value) {
+    if (!dbVal) return;
+    dbVal.textContent = value || "--";
 }
 
 function appendMessage(sender, text) {
@@ -84,8 +95,7 @@ function handleMessage(data) {
         const text = String(data.data || "Ready");
 
         let stateClass = "ready";
-        if (text.toLowerCase().includes("listening")) stateClass = "listening";
-        else if (text.toLowerCase().includes("processing")) stateClass = "processing";
+        if (text.toLowerCase().includes("processing")) stateClass = "processing";
         else if (text.toLowerCase().includes("offline")) stateClass = "offline";
 
         updateStatus(text, stateClass);
@@ -100,11 +110,24 @@ function handleMessage(data) {
     if (data.type === "telemetry") {
         if (typeof data.cpu_percent === "number") {
             updateCpu(`${Math.round(data.cpu_percent)}%`);
+        } else {
+            updateCpu("--%");
         }
 
-        if (typeof data.network === "string") {
-            updateNetwork(data.network);
+        if (typeof data.gpu_percent === "number") {
+            updateGpu(`${Math.round(data.gpu_percent)}%`);
+        } else {
+            updateGpu("--%");
         }
+
+        if (typeof data.db_name === "string") {
+            updateDb(data.db_name);
+        }
+
+        if (typeof data.connection === "string") {
+            updateConnection(data.connection);
+        }
+
         return;
     }
 
@@ -113,14 +136,21 @@ function handleMessage(data) {
     }
 }
 
+function sendMessage() {
+    const text = (chatInput?.value || "").trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+    ws.send(text);
+    chatInput.value = "";
+}
+
 function connectWebSocket() {
     const protocol = window.location.protocol === "https:" ? "wss" : "ws";
     ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
 
     ws.onopen = () => {
         updateStatus("Connected", "ready");
-        updateNetwork("Online");
-        appendMessage("system", "WebSocket connected to local Jetson service.");
+        updateConnection("Connected to robot");
     };
 
     ws.onmessage = (event) => {
@@ -134,21 +164,30 @@ function connectWebSocket() {
 
     ws.onclose = () => {
         updateStatus("Offline - Reconnecting...", "offline");
-        updateNetwork("Offline");
-        appendMessage("system", "Connection lost. Attempting to reconnect...");
-
+        updateConnection("Disconnected");
         if (reconnectTimer) clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectWebSocket, 2500);
     };
 
     ws.onerror = () => {
         updateStatus("Connection Error", "offline");
-        updateNetwork("Offline");
+        updateConnection("Connection error");
     };
 }
 
+sendBtn?.addEventListener("click", sendMessage);
+
+chatInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
 setEmptyState();
 updateCpu("--%");
-updateNetwork("Offline");
+updateGpu("--%");
+updateDb("--");
+updateConnection("Offline");
 updateStatus("Booting...", "processing");
 connectWebSocket();

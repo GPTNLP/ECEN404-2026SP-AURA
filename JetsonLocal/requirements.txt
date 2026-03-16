@@ -1,35 +1,12 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual environments
-aura_env/
-venv/
-.env
-
-# OS junk
-.DS_Store
-Thumbs.db
-
-# VSCode
-.vscode/
-
-# Runtime storage (RAG database)
-storage/
-
-# Logs
-*.log
-
-# Jetson telemetry dumps
-*.csv
-
-# Python build artifacts
-build/
-dist/
-*.egg-info/
-
-# Secrets
-.env
-config.local.py
+fastapi==0.123.5
+uvicorn[standard]==0.38.0
+requests==2.32.5
+pydantic==2.12.5
+python-dotenv==1.1.1
+psutil==7.0.0
+numpy==1.26.4
+faiss-cpu==1.8.0.post1
+rank-bm25==0.2.2
+websockets==15.0.1
+SpeechRecognition==3.10.1
+pyserial==3.5

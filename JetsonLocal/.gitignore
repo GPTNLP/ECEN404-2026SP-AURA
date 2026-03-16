@@ -1,17 +1,16 @@
-# Core API & Server
-fastapi==0.123.5
-uvicorn==0.38.0
-requests==2.32.5
-pydantic==2.12.5
-
-# RAG & Vector Dependencies
-lightrag==0.1.0b6
-faiss-cpu==1.8.0.post1
-rank-bm25==0.2.2
-
-# Hardware & Local ML
-faster-whisper==1.0.3
-websockets==15.0.1
-SpeechRecognition==3.10.1
-pyserial==3.5
-jetson-stats==4.2.3
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+aura_env/
+.env
+storage/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+build/
+dist/
+*.egg-info/
