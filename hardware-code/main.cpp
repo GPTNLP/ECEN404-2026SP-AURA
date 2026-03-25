@@ -1,4 +1,4 @@
-#include <Arduino.h> // Include this if using PlatformIO; optional for Arduino IDE
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Bluepad32.h>
@@ -15,9 +15,9 @@ Adafruit_PWMServoDriver pca9685 = Adafruit_PWMServoDriver(PCA9685_ADDR);
 #define SERVOMAX  600
 
 // PCA9685 channels for servos
-#define SERVO0_CH 0    // "servo 1" in your wording
+#define SERVO0_CH 0    // "servo 1" 
 #define SERVO1_CH 1    // "servo 2"
-#define SERVO2_CH 2    // "servo 3"
+#define SERVO2_CH 2    // "servo 3" (Pan / Tracking)
 
 // ---------- SERVO / PRESET CONFIG ----------
 
@@ -43,11 +43,7 @@ const int PRESET_OFFSET2_DEG    = 30;  // +30° CW for servo 3
 const int PRESET_STEP_DEG       = 2;
 const uint16_t PRESET_STEP_MS   = 15;
 
-// Preset state machine:
-//   1) servo 3 out
-//   2) servos 1 & 2 out
-//   3) servo 3 back
-//   4) servos 1 & 2 back
+// Preset state machine
 enum PresetPhase {
   PRESET_IDLE = 0,
   PRESET_MOVING_OUT_2,
@@ -62,6 +58,13 @@ int          presetTargetOut0  = HOME0_ANGLE;
 int          presetTargetOut1  = HOME1_ANGLE;
 int          presetTargetOut2  = HOME2_ANGLE;
 uint32_t     lastPresetStepMs  = 0;
+
+// ---------- SERIAL CONTROL STATE (NEW FOR JETSON) ----------
+enum SerialMoveState { SERIAL_STOP, SERIAL_LEFT, SERIAL_RIGHT };
+SerialMoveState currentSerialMove = SERIAL_STOP;
+uint32_t lastSerialMoveMs = 0;
+const int SERIAL_STEP_DEG = 1;   // How many degrees to move per step
+const int SERIAL_STEP_MS = 20;   // Speed of the rotation (lower = faster)
 
 // ---------- BLUEPAD32 STATE ----------
 
@@ -80,13 +83,52 @@ int applyDeadzoneInt(int v, int dz) {
   return v;
 }
 
+// ---------- SERIAL PROCESSING (NEW FOR JETSON) ----------
+
+void processSerialCommands() {
+  // Check if the Jetson Orin Nano has sent any data over USB
+  while (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim(); // Remove any extra \r or spaces
+    
+    if (cmd == "MOVE:TURN_LEFT") {
+      currentSerialMove = SERIAL_LEFT;
+    } 
+    else if (cmd == "MOVE:TURN_RIGHT") {
+      currentSerialMove = SERIAL_RIGHT;
+    } 
+    else if (cmd == "MOVE:STOP") {
+      currentSerialMove = SERIAL_STOP;
+    }
+  }
+}
+
+void updateSerialMotion() {
+  // If a gamepad preset is running, let it finish first
+  if (presetActive) return; 
+  // If we are centered/stopped, do nothing
+  if (currentSerialMove == SERIAL_STOP) return;
+
+  uint32_t now = millis();
+  if (now - lastSerialMoveMs < SERIAL_STEP_MS) return;
+  lastSerialMoveMs = now;
+
+  // Adjust Servo 3 (Pan) based on the Jetson's command
+  if (currentSerialMove == SERIAL_LEFT) {
+    servo2Angle -= SERIAL_STEP_DEG; // Decrease angle
+  } 
+  else if (currentSerialMove == SERIAL_RIGHT) {
+    servo2Angle += SERIAL_STEP_DEG; // Increase angle
+  }
+
+  // Ensure we don't break the servo
+  servo2Angle = constrain(servo2Angle, 0, 180);
+  
+  // Apply the movement
+  setServoAngle(SERVO2_CH, servo2Angle);
+}
+
 // ---------- PRESET MOTION LOGIC ----------
-//
-// Sequence when a D-pad preset is triggered:
-//   1) servo 3: home -> +30° (CW)
-//   2) servos 1 & 2: home -> ±30°
-//   3) servo 3: +30° -> home
-//   4) servos 1 & 2: ±30° -> home
 
 void startPresetForDpad(int dpadValue) {
   if (presetActive) return;
@@ -94,24 +136,19 @@ void startPresetForDpad(int dpadValue) {
   int offset0 = 0;
   int offset1 = 0;
 
-  // D-pad behavior for servos 1 & 2:
-  if (dpadValue == 1) {
-    // Up: servo0 +30°, servo1 -30°
+  if (dpadValue == 1) { // Up
     offset0 = +PRESET_OFFSET01_DEG;
     offset1 = -PRESET_OFFSET01_DEG;
-  } else if (dpadValue == 2) {
-    // Right: both +30°
+  } else if (dpadValue == 2) { // Right
     offset0 = +PRESET_OFFSET01_DEG;
     offset1 = +PRESET_OFFSET01_DEG;
-  } else if (dpadValue == 8) {
-    // Left: both -30°
+  } else if (dpadValue == 8) { // Left
     offset0 = -PRESET_OFFSET01_DEG;
     offset1 = -PRESET_OFFSET01_DEG;
   } else {
-    return;  // ignore other D-pad values
+    return;
   }
 
-  // Start all servos at home
   servo0Angle = HOME0_ANGLE;
   servo1Angle = HOME1_ANGLE;
   servo2Angle = HOME2_ANGLE;
@@ -119,20 +156,13 @@ void startPresetForDpad(int dpadValue) {
   setServoAngle(SERVO1_CH, servo1Angle);
   setServoAngle(SERVO2_CH, servo2Angle);
 
-  // Targets for servos 1 & 2
   presetTargetOut0 = constrain(HOME0_ANGLE + offset0, 0, 180);
   presetTargetOut1 = constrain(HOME1_ANGLE + offset1, 0, 180);
-
-  // Target for servo 3: +30° CW
   presetTargetOut2 = constrain(HOME2_ANGLE + PRESET_OFFSET2_DEG, 0, 180);
 
-  // New sequence: start with servo 3 out
   presetPhase      = PRESET_MOVING_OUT_2;
   presetActive     = true;
   lastPresetStepMs = millis();
-
-  Serial.printf("Preset started: dpad=%d, out0=%d, out1=%d, out2=%d\n",
-                dpadValue, presetTargetOut0, presetTargetOut1, presetTargetOut2);
 }
 
 void updatePresetMotion() {
@@ -145,7 +175,6 @@ void updatePresetMotion() {
   switch (presetPhase) {
 
     case PRESET_MOVING_OUT_2:
-      // Step servo 3 toward +30° target
       if (servo2Angle < presetTargetOut2)      servo2Angle += PRESET_STEP_DEG;
       else if (servo2Angle > presetTargetOut2) servo2Angle -= PRESET_STEP_DEG;
 
@@ -158,7 +187,6 @@ void updatePresetMotion() {
       break;
 
     case PRESET_MOVING_OUT_01:
-      // Step servos 1 & 2 toward their ±30° targets
       if (servo0Angle < presetTargetOut0)      servo0Angle += PRESET_STEP_DEG;
       else if (servo0Angle > presetTargetOut0) servo0Angle -= PRESET_STEP_DEG;
 
@@ -178,7 +206,6 @@ void updatePresetMotion() {
       break;
 
     case PRESET_MOVING_BACK_2:
-      // Return servo 3 back to home
       if (servo2Angle < HOME2_ANGLE)      servo2Angle += PRESET_STEP_DEG;
       else if (servo2Angle > HOME2_ANGLE) servo2Angle -= PRESET_STEP_DEG;
 
@@ -191,7 +218,6 @@ void updatePresetMotion() {
       break;
 
     case PRESET_MOVING_BACK_01:
-      // Return servos 1 & 2 back to home
       if (servo0Angle < HOME0_ANGLE)      servo0Angle += PRESET_STEP_DEG;
       else if (servo0Angle > HOME0_ANGLE) servo0Angle -= PRESET_STEP_DEG;
 
@@ -208,7 +234,6 @@ void updatePresetMotion() {
           abs(servo1Angle - HOME1_ANGLE) <= PRESET_STEP_DEG) {
         presetActive = false;
         presetPhase  = PRESET_IDLE;
-        Serial.println("Preset finished: all servos at home.");
       }
       break;
 
@@ -223,28 +248,20 @@ void updatePresetMotion() {
 void onConnectedController(ControllerPtr ctl) {
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (myControllers[i] == nullptr) {
-      Serial.printf("Controller connected, index=%d\n", i);
       ControllerProperties properties = ctl->getProperties();
-      Serial.printf("Model: %s, VID=0x%04x, PID=0x%04x\n",
-                    ctl->getModelName().c_str(),
-                    properties.vendor_id,
-                    properties.product_id);
       myControllers[i] = ctl;
       return;
     }
   }
-  Serial.println("Controller connected, but no free slot!");
 }
 
 void onDisconnectedController(ControllerPtr ctl) {
   for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
     if (myControllers[i] == ctl) {
-      Serial.printf("Controller disconnected, index=%d\n", i);
       myControllers[i] = nullptr;
       return;
     }
   }
-  Serial.println("Controller disconnected, but not found in array");
 }
 
 // ---------- GAMEPAD PROCESSING ----------
@@ -262,10 +279,6 @@ void processGamepad(ControllerPtr ctl) {
     return;
   }
 
-  // Normal joystick behavior:
-  //  - left stick Y  -> servo 1 (channel 0)
-  //  - right stick Y -> servo 2 (channel 1)
-  //  - right stick X -> servo 3 (channel 2)
   int ly = ctl->axisY();
   int ry = ctl->axisRY();
   int rx = ctl->axisRX();
@@ -283,3 +296,77 @@ void processGamepad(ControllerPtr ctl) {
     int delta1 = map(ry, -512, 512, -MAX_DELTA1, MAX_DELTA1);
     servo1Angle = HOME1_ANGLE + delta1;
   }
+
+  if (rx != 0) {
+    int delta2 = map(rx, -512, 512, -MAX_DELTA2, MAX_DELTA2);
+    servo2Angle = HOME2_ANGLE + delta2;
+  }
+
+  servo0Angle = constrain(servo0Angle, 0, 180);
+  servo1Angle = constrain(servo1Angle, 0, 180);
+  servo2Angle = constrain(servo2Angle, 0, 180);
+
+  setServoAngle(SERVO0_CH, servo0Angle);
+  setServoAngle(SERVO1_CH, servo1Angle);
+  setServoAngle(SERVO2_CH, servo2Angle);
+}
+
+void processControllers() {
+  for (auto ctl : myControllers) {
+    if (!ctl) continue;
+    if (!ctl->isConnected()) continue;
+    if (!ctl->hasData()) continue;
+
+    if (ctl->isGamepad()) {
+      processGamepad(ctl);
+    }
+  }
+}
+
+// ---------- SETUP & LOOP ----------
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000);
+
+  if (!pca9685.begin()) {
+    while (1) delay(1000);
+  }
+  pca9685.setPWMFreq(50);
+  delay(10);
+
+  // Initialize to home positions
+  setServoAngle(SERVO0_CH, servo0Angle);
+  setServoAngle(SERVO1_CH, servo1Angle);
+  setServoAngle(SERVO2_CH, servo2Angle);
+
+  BP32.setup(&onConnectedController, &onDisconnectedController);
+  BP32.forgetBluetoothKeys();
+  BP32.enableVirtualDevice(false);
+
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    myControllers[i] = nullptr;
+  }
+}
+
+void loop() {
+  // 1. Check for Bluetooth Gamepad updates
+  bool dataUpdated = BP32.update();
+  if (dataUpdated) {
+    processControllers();
+  }
+
+  // 2. Check for Jetson USB Serial updates
+  processSerialCommands();
+
+  // 3. Execute any active animations/movements
+  updatePresetMotion();
+  updateSerialMotion();
+
+  if (!dataUpdated) {
+    vTaskDelay(1);
+  }
+}
