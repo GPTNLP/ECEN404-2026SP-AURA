@@ -1,15 +1,13 @@
 # GPT-NLP-Lab-Assistant
 2025-26 Texas A&amp;M ELEN Senior Design Project
 
-Code for an AI-powered lab assistant that utilizes recent advancements in Retrieval-Augmented Generation to answer questions based on provided lab documents & lectures.
+Code for an AI-powered robotic lab assistant that utilizes recent advancements in Retrieval-Augmented Generation to answer questions based on provided lab documents & lectures.
 
 # Features
 - **Local LLM Integration**: Utilizes Ollama to run language models locally, removing the need for internet connection.
-- **Document Processing**: Supports PDF, DOCX, TXT, & MD File types.
-- **Vector Database**: Persistent Chrome database for efficient retrieval.
-- **Two Query Modes**:
-    - Standard Mode for traditional RAG with conversation history.
-    - LightRAG Mode for enhanced retrieval with evidence scoring & transparency.
+- **Document Processing**: Supports PDF File type.
+- **Vector Database**: Persistent database for efficient retrieval.
+- **LightRAG Queries**: Utilizes LightRAG for enhanced retrieval with evidence scoring & transparency.
 - **Session Management**: Save & load conversation sessions remotely.
 
 # Architecture
