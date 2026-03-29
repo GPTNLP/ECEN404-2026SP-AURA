@@ -43,6 +43,7 @@ type AdminListResponse = {
 
 const API_BASE = "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
 const DEVICE_ID = "jetson-001";
+const LS_TOKEN = "aura-auth-token";
 
 function dotColor(status: HealthStatus) {
   if (status === "OK") return "var(--status-good)";
@@ -89,12 +90,15 @@ export default function DashboardPage() {
     let alive = true;
 
     async function load() {
+      const token = localStorage.getItem(LS_TOKEN);
+
       try {
         const res = await fetch(`${API_BASE}/device/admin/list`, {
           method: "GET",
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
         });
 
@@ -172,15 +176,51 @@ export default function DashboardPage() {
         </div>
 
         <div className="filo-grid">
-          <FiloCard label="Battery" value={fmt(s?.battery_percent, "%", 1)} sub="Robot power" />
-          <FiloCard label="CPU Temp" value={fmt(s?.temperature_c, "°C", 1)} sub="Jetson SoC" />
-          <FiloCard label="RAM Usage" value={fmt(s?.ram_percent, "%", 1)} sub="Memory load" />
-          <FiloCard label="CPU Usage" value={fmt(s?.cpu_percent, "%", 1)} sub="Processor load" />
-          <FiloCard label="GPU Usage" value={fmt(extra?.gpu_percent, "%", 1)} sub="GPU load" />
-          <FiloCard label="Uptime" value={formatUptime(extra?.uptime_seconds)} sub="Since boot" />
-          <FiloCard label="Battery Voltage" value={fmt(s?.battery_voltage, " V", 2)} sub="Pack voltage" />
-          <FiloCard label="Charging" value={s?.charging == null ? "—" : s.charging ? "Yes" : "No"} sub="Charge state" />
-          <FiloCard label="IP Address" value={extra?.local_ip || "—"} sub="Jetson network" />
+          <FiloCard
+            label="Battery"
+            value={fmt(s?.battery_percent, "%", 1)}
+            sub="Robot power"
+          />
+          <FiloCard
+            label="CPU Temp"
+            value={fmt(s?.temperature_c, "°C", 1)}
+            sub="Jetson SoC"
+          />
+          <FiloCard
+            label="RAM Usage"
+            value={fmt(s?.ram_percent, "%", 1)}
+            sub="Memory load"
+          />
+          <FiloCard
+            label="CPU Usage"
+            value={fmt(s?.cpu_percent, "%", 1)}
+            sub="Processor load"
+          />
+          <FiloCard
+            label="GPU Usage"
+            value={fmt(extra?.gpu_percent, "%", 1)}
+            sub="GPU load"
+          />
+          <FiloCard
+            label="Uptime"
+            value={formatUptime(extra?.uptime_seconds)}
+            sub="Since boot"
+          />
+          <FiloCard
+            label="Battery Voltage"
+            value={fmt(s?.battery_voltage, " V", 2)}
+            sub="Pack voltage"
+          />
+          <FiloCard
+            label="Charging"
+            value={s?.charging == null ? "—" : s.charging ? "Yes" : "No"}
+            sub="Charge state"
+          />
+          <FiloCard
+            label="IP Address"
+            value={extra?.local_ip || "—"}
+            sub="Jetson network"
+          />
         </div>
       </section>
 
