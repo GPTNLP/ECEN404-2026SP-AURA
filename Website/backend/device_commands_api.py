@@ -5,7 +5,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Dict, Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -14,7 +14,7 @@ from security import require_role
 
 router = APIRouter(tags=["device_commands"])
 
-ALLOWED_COMMANDS = {"forward", "backward", "left", "right", "stop"}
+ALLOWED_COMMANDS = {"forward", "backward", "left", "right", "stop", "build_rag", "chat_prompt", "sync_vectors"}
 
 STORAGE_DIR = Path(os.getenv("LOG_DIR", Path(__file__).resolve().parent / "storage"))
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,7 +52,8 @@ def _require_device_secret(x_device_secret: str | None) -> None:
 
 class DeviceCommandIn(BaseModel):
     device_id: str
-    command: Literal["forward", "backward", "left", "right", "stop"]
+    command: str
+    payload: Optional[Dict[str, Any]] = {}
 
 
 class DeviceCommandAckIn(BaseModel):
@@ -60,29 +61,27 @@ class DeviceCommandAckIn(BaseModel):
     device_id: str
     status: Literal["completed", "failed"] = "completed"
     note: str | None = None
+    result: Optional[Dict[str, Any]] = None
 
 
 @router.post("/device/admin/command")
 def queue_device_command(payload: DeviceCommandIn, request: Request):
     _require_admin(request)
-
+    if payload.command not in ALLOWED_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"Invalid command. Allowed: {ALLOWED_COMMANDS}")
+    
     commands = _load_commands()
-
     entry = {
         "id": f"{payload.device_id}-{int(time.time() * 1000)}",
         "device_id": payload.device_id,
         "command": payload.command,
+        "payload": payload.payload, # Save the payload
         "created_at": int(time.time()),
         "status": "pending",
     }
-
     commands.append(entry)
     _save_commands(commands)
-
-    return {
-        "ok": True,
-        "queued": entry,
-    }
+    return {"ok": True, "queued": entry}
 
 
 @router.get("/device/command/next")
@@ -125,6 +124,7 @@ def ack_device_command(
             item["status"] = payload.status
             item["acked_at"] = int(time.time())
             item["note"] = payload.note
+            item["result"] = payload.result # Save the returned result (like the LLM answer)
             updated = item
             break
 

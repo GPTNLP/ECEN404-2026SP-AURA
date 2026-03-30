@@ -7,7 +7,8 @@ import math
 import re
 from typing import List, Optional, Dict, Any, Tuple, Iterable
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import Form, APIRouter, UploadFile, File, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
 
@@ -322,6 +323,42 @@ class ChatRequest(BaseModel):
 # ---------------------------
 # Endpoints: Documents
 # ---------------------------
+@router.get("/api/documents/download")
+def download_document(path: str, request: Request):
+    require_any_user(request) # Or require_device_secret if Jetson is pulling
+    full_path = _safe_join(DOCUMENTS_DIR, path)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+@router.post("/api/databases/{db_name}/sync_up")
+async def sync_db_up(db_name: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret"),
+                     files: List[UploadFile] = File(...)):
+    # Verify device secret here
+    db_dir = _db_dir(db_name)
+    os.makedirs(db_dir, exist_ok=True)
+    
+    saved = []
+    for f in files:
+        if f.filename in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
+            out = os.path.join(db_dir, f.filename)
+            with open(out, "wb") as w:
+                w.write(await f.read())
+            saved.append(f.filename)
+            
+    return {"ok": True, "saved": saved}
+
+@router.get("/api/databases/{db_name}/sync_down/{filename}")
+def sync_db_down(db_name: str, filename: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret")):
+    # Verify device secret
+    if filename not in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
+        raise HTTPException(status_code=400, detail="Invalid vector file")
+        
+    full_path = os.path.join(_db_dir(db_name), filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Vector file not found")
+    return FileResponse(full_path)
+
 @router.get("/api/documents/tree")
 def documents_tree(request: Request):
     require_any_user(request)
