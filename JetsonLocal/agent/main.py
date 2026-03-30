@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import asyncio
 from pathlib import Path
 from pypdf import PdfReader
@@ -37,7 +38,6 @@ from offline_queue import queue_log, queue_status, flush_logs, flush_statuses
 from heartbeat import build_heartbeat_payload
 from status import build_status_payload
 from device_info import collect_device_info
-
 from lightrag_local import LightRAG, OllamaClient
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
@@ -71,11 +71,14 @@ ui_manager = ConnectionManager()
 api = ApiClient()
 rag_system = None
 esp_serial = None
+
 runtime_config = {
     "poll_seconds": 5,
     "heartbeat_seconds": HEARTBEAT_SECONDS,
     "status_seconds": STATUS_SECONDS,
 }
+
+MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 
 def send_or_queue_log(level: str, event: str, message: str, meta=None):
@@ -97,12 +100,90 @@ def init_hardware():
     global esp_serial
     try:
         esp_serial = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+        time.sleep(2.0)
+        try:
+            esp_serial.reset_input_buffer()
+            esp_serial.reset_output_buffer()
+        except Exception:
+            pass
         print(f"[SERIAL] connected to {SERIAL_PORT}")
         send_or_queue_log("info", "serial_connected", f"Connected to serial port {SERIAL_PORT}")
-    except serial.SerialException:
+    except Exception as e:
         esp_serial = None
-        print(f"[SERIAL] unavailable: {SERIAL_PORT}")
-        send_or_queue_log("warning", "serial_unavailable", f"Serial port unavailable: {SERIAL_PORT}")
+        print(f"[SERIAL] unavailable: {SERIAL_PORT} | error: {e}")
+        send_or_queue_log("warning", "serial_unavailable", f"Serial port unavailable: {SERIAL_PORT} | error: {e}")
+
+
+def ensure_serial():
+    global esp_serial
+
+    try:
+        if esp_serial is not None and esp_serial.is_open:
+            return True
+    except Exception:
+        pass
+
+    try:
+        esp_serial = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+        time.sleep(2.0)
+        try:
+            esp_serial.reset_input_buffer()
+            esp_serial.reset_output_buffer()
+        except Exception:
+            pass
+        print(f"[SERIAL] reconnected to {SERIAL_PORT}")
+        send_or_queue_log("info", "serial_reconnected", f"Reconnected to serial port {SERIAL_PORT}")
+        return True
+    except Exception as e:
+        esp_serial = None
+        print(f"[SERIAL] reconnect failed: {e}")
+        return False
+
+
+def build_serial_message(cmd: str) -> str:
+    cmd = (cmd or "").strip().lower()
+    if cmd in MOVEMENT_COMMANDS:
+        return f"MOVE:{cmd}\n"
+    raise ValueError(f"Unsupported serial movement command: {cmd}")
+
+
+def send_serial_command(cmd: str) -> str:
+    global esp_serial
+
+    if not ensure_serial():
+        raise RuntimeError("ESP serial is not connected")
+
+    serial_msg = build_serial_message(cmd)
+    expected_ack = f"ACK:MOVE:{cmd}"
+
+    try:
+        esp_serial.reset_input_buffer()
+    except Exception:
+        pass
+
+    esp_serial.write(serial_msg.encode("utf-8"))
+    esp_serial.flush()
+    print(f"[SERIAL_TX] {serial_msg.strip()}")
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        try:
+            line = esp_serial.readline().decode("utf-8", errors="ignore").strip()
+        except Exception as e:
+            raise RuntimeError(f"Serial read failed: {e}")
+
+        if not line:
+            continue
+
+        print(f"[SERIAL_RX] {line}")
+
+        if line.startswith("ERR:"):
+            raise RuntimeError(line)
+
+        if line == expected_ack:
+            return line
+
+    raise RuntimeError(f"No ACK from ESP for {cmd}")
 
 
 def init_rag():
@@ -134,8 +215,8 @@ def build_register_payload():
         "local_ip": info["local_ip"],
     }
 
+
 def _read_pdf(path: str) -> str:
-    """Extracts text from a PDF file."""
     try:
         reader = PdfReader(path)
         parts = []
@@ -147,6 +228,7 @@ def _read_pdf(path: str) -> str:
     except Exception as e:
         print(f"[PDF_READER] Error reading {path}: {e}")
         return ""
+
 
 async def register_device():
     payload = build_register_payload()
@@ -237,55 +319,44 @@ async def command_loop():
                 command_id = command.get("id")
                 cmd = (command.get("command") or "").strip().lower()
                 payload = command.get("payload") or {}
-                print(f"[COMMAND] received: {cmd}")
+                print(f"[COMMAND] received: {cmd} payload={payload}")
 
-                if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}: #Movements
-                    if esp_serial:
-                        try:
-                            val = payload.get("value", "")
-                            
-                            # Format: "MOVE:pitch:15\n" or "MOVE:forward\n"
-                            serial_msg = f"MOVE:{cmd}:{val}\n" if val else f"MOVE:{cmd}\n"
-                            esp_serial.write(serial_msg.encode("utf-8"))
-                            print(f"[COMMAND] sent to ESP: {serial_msg.strip()}")
+                if cmd in MOVEMENT_COMMANDS:
+                    try:
+                        ack_line = await asyncio.to_thread(send_serial_command, cmd)
 
-                            await asyncio.to_thread(api.ack_command, {
+                        await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "completed",
+                            "note": f"ESP acknowledged {cmd}",
+                        })
+
+                        send_or_queue_log(
+                            "info",
+                            "device_command_executed",
+                            f"Executed command: {cmd}",
+                            {
                                 "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "completed",
-                                "note": f"Sent to ESP as {serial_msg.strip()}",
-                            })
-
-                            send_or_queue_log(
-                                "info",
-                                "device_command_executed",
-                                f"Executed command: {cmd}",
-                                {"command_id": command_id, "serial_message": serial_msg.strip()},
-                            )
-                        except Exception as e:
-                            print(f"[COMMAND] serial send failed: {e}")
-                            await asyncio.to_thread(api.ack_command, {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "failed",
-                                "note": f"Serial send failed: {e}",
-                            })
-                    else:
-                        print("[COMMAND] ESP serial not connected")
+                                "serial_message": f"MOVE:{cmd}",
+                                "ack": ack_line,
+                            },
+                        )
+                    except Exception as e:
+                        print(f"[COMMAND] serial send failed: {e}")
                         await asyncio.to_thread(api.ack_command, {
                             "command_id": command_id,
                             "device_id": DEVICE_ID,
                             "status": "failed",
-                            "note": "ESP serial is not connected",
+                            "note": f"Serial send failed: {e}",
                         })
+
                 elif cmd == "chat_prompt":
                     query = payload.get("query", "")
                     if rag_system and query:
                         try:
                             res = await rag_system.aquery(query)
                             ai_reply = res.get("answer", "No answer found.")
-                            
-                            # Send answer back to Azure
                             await asyncio.to_thread(api.ack_command, {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
@@ -301,33 +372,32 @@ async def command_loop():
                             })
                     else:
                         await asyncio.to_thread(api.ack_command, {
-                             "command_id": command_id, "device_id": DEVICE_ID,
-                             "status": "failed", "note": "RAG system offline or empty query"
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "failed",
+                            "note": "RAG system offline or empty query"
                         })
+
                 elif cmd == "build_rag":
                     db_name = payload.get("db_name", LOCAL_DB_NAME)
-                    paths = payload.get("paths", []) # List of relative paths on Azure
-                    
+                    paths = payload.get("paths", [])
+
                     try:
-                        rag_system.reset() # clear current
+                        rag_system.reset()
                         for path in paths:
-                            # Download to Jetson
                             local_dest = os.path.join(STORAGE_DIR, "downloads", os.path.basename(path))
+                            os.makedirs(os.path.dirname(local_dest), exist_ok=True)
+
                             await asyncio.to_thread(api.download_document, path, local_dest)
-                            
-                            # Read and chunk
-                            text = _read_pdf(local_dest) if path.endswith('.pdf') else ""
-                            # Assuming you have a chunking util accessible here
-                            
-                            # Insert into RAG
-                            await rag_system.ainsert(text, meta={"source": path})
-                            
-                        # Save it locally
+                            text = _read_pdf(local_dest) if path.endswith(".pdf") else ""
+
+                            if text.strip():
+                                await rag_system.ainsert(text, meta={"source": path})
+
                         rag_system.flush()
-                        
-                        # Upload back to Azure Storage
+
                         await asyncio.to_thread(api.upload_vector_db, db_name, rag_system.working_dir)
-                        
+
                         await asyncio.to_thread(api.ack_command, {
                             "command_id": command_id,
                             "device_id": DEVICE_ID,
@@ -335,12 +405,13 @@ async def command_loop():
                             "note": f"Built {len(paths)} files and synced to Azure"
                         })
                     except Exception as e:
-                         await asyncio.to_thread(api.ack_command, {
+                        await asyncio.to_thread(api.ack_command, {
                             "command_id": command_id,
                             "device_id": DEVICE_ID,
                             "status": "failed",
                             "note": str(e)
                         })
+
                 else:
                     print(f"[COMMAND] invalid command ignored: {cmd}")
                     if command_id:
@@ -379,14 +450,15 @@ async def handle_user_message(user_msg: str):
     intent = await parse_intent(user_msg)
 
     if intent == "MOVEMENT":
-        if esp_serial:
-            try:
-                esp_serial.write(f"MOVE:{user_msg}\n".encode("utf-8"))
-                ai_reply = "Movement command routed to ESP rotors."
-            except Exception:
-                ai_reply = "Failed to send movement command to ESP."
+        cmd = user_msg.lower().strip()
+        if cmd not in MOVEMENT_COMMANDS:
+            ai_reply = f"Unsupported movement command: {cmd}"
         else:
-            ai_reply = "ESP serial is not connected."
+            try:
+                await asyncio.to_thread(send_serial_command, cmd)
+                ai_reply = f"Movement command '{cmd}' sent to ESP."
+            except Exception as e:
+                ai_reply = f"Failed to send movement command to ESP: {e}"
     else:
         if rag_system:
             try:
@@ -458,6 +530,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if not msg:
                 continue
             await handle_user_message(msg)
+
     except WebSocketDisconnect:
         print("[WS] client disconnected")
         ui_manager.disconnect(websocket)

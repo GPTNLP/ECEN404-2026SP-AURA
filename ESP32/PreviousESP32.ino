@@ -34,25 +34,21 @@ const uint16_t SERVO_MIN_US[NUM_SERVOS]  = {1600,  800,  800,  800};
 const uint16_t SERVO_MAX_US[NUM_SERVOS]  = {2200, 1400, 2200, 2200};
 const uint16_t SERVO_HOME_US[NUM_SERVOS] = {1900, 1100, 1400, 1350};
 
-// Flip sign if physical direction is opposite
 const int8_t SERVO_SIGN[NUM_SERVOS] = {
-  +1,  // right shoulder
-  -1,  // left shoulder
-  +1,  // right leg
-  -1   // left leg
+  +1,
+  -1,
+  +1,
+  -1
 };
 
-// Servo frequency
 const uint16_t SERVO_FREQ = 50;
-
-// Smooth motion settings
 const unsigned long UPDATE_INTERVAL_MS = 20;
 const uint16_t STEP_US = 12;
-
-// Gait timing
 const unsigned long GAIT_TOGGLE_MS = 350;
 
-// Pose amplitudes
+// safety timeout: if no motion command comes in for this long, stop
+const unsigned long COMMAND_TIMEOUT_MS = 700;
+
 const int SHOULDER_SWING_US = 120;
 const int LEG_SWING_US = 160;
 const int TURN_SHOULDER_US = 90;
@@ -77,6 +73,7 @@ uint16_t targetUs[NUM_SERVOS];
 
 unsigned long lastUpdateMs = 0;
 unsigned long lastGaitToggleMs = 0;
+unsigned long lastMotionCommandMs = 0;
 bool gaitPhase = false;
 
 // ======================================================
@@ -113,6 +110,10 @@ int applySignedOffset(uint8_t idx, int offsetUs) {
   return (int)SERVO_HOME_US[idx] + (SERVO_SIGN[idx] * offsetUs);
 }
 
+void markMotionSeen() {
+  lastMotionCommandMs = millis();
+}
+
 void printStatus() {
   Serial.println();
   Serial.println("===== CURRENT SERVO STATUS =====");
@@ -129,6 +130,8 @@ void printStatus() {
     Serial.print(SERVO_HOME_US[i]);
     Serial.println(" us");
   }
+  Serial.print("Mode = ");
+  Serial.println((int)currentMode);
   Serial.println("===============================");
   Serial.println();
 }
@@ -158,26 +161,31 @@ void printHelp() {
 void applyStopPose() {
   setTargetHomeAll();
   currentMode = MODE_STOP;
+  gaitPhase = false;
   Serial.println("POSE: stop/home");
 }
 
 void applyForwardPose() {
   currentMode = MODE_FORWARD;
+  markMotionSeen();
   Serial.println("POSE: forward");
 }
 
 void applyBackwardPose() {
   currentMode = MODE_BACKWARD;
+  markMotionSeen();
   Serial.println("POSE: backward");
 }
 
 void applyLeftPose() {
   currentMode = MODE_LEFT;
+  markMotionSeen();
   Serial.println("POSE: left");
 }
 
 void applyRightPose() {
   currentMode = MODE_RIGHT;
+  markMotionSeen();
   Serial.println("POSE: right");
 }
 
@@ -188,6 +196,12 @@ void applyRightPose() {
 void handleMoveCommand(String moveCmd) {
   moveCmd.trim();
   moveCmd.toLowerCase();
+
+  int colon = moveCmd.indexOf(':');
+  if (colon != -1) {
+    moveCmd = moveCmd.substring(0, colon);
+    moveCmd.trim();
+  }
 
   if (moveCmd == "forward") {
     applyForwardPose();
@@ -293,10 +307,7 @@ void serviceGait() {
       setTargetUs(2, applySignedOffset(2, -TURN_LEG_US));
       setTargetUs(3, applySignedOffset(3, +TURN_LEG_US));
     } else {
-      setTargetUs(0, SERVO_HOME_US[0]);
-      setTargetUs(1, SERVO_HOME_US[1]);
-      setTargetUs(2, SERVO_HOME_US[2]);
-      setTargetUs(3, SERVO_HOME_US[3]);
+      setTargetHomeAll();
     }
   }
   else if (currentMode == MODE_RIGHT) {
@@ -306,10 +317,7 @@ void serviceGait() {
       setTargetUs(2, applySignedOffset(2, +TURN_LEG_US));
       setTargetUs(3, applySignedOffset(3, -TURN_LEG_US));
     } else {
-      setTargetUs(0, SERVO_HOME_US[0]);
-      setTargetUs(1, SERVO_HOME_US[1]);
-      setTargetUs(2, SERVO_HOME_US[2]);
-      setTargetUs(3, SERVO_HOME_US[3]);
+      setTargetHomeAll();
     }
   }
 }
@@ -338,6 +346,16 @@ void serviceMotion() {
     }
 
     writeServoUs(i, (uint16_t)cur);
+  }
+}
+
+void serviceCommandTimeout() {
+  if (currentMode == MODE_STOP) return;
+
+  unsigned long now = millis();
+  if (now - lastMotionCommandMs > COMMAND_TIMEOUT_MS) {
+    Serial.println("TIMEOUT: stopping motion");
+    applyStopPose();
   }
 }
 
@@ -375,20 +393,25 @@ void setup() {
   }
 
   applyStopPose();
+  markMotionSeen();
   printHelp();
   printStatus();
 }
 
 void loop() {
   if (Serial.available()) {
-    Serial.println("DATA RECEIVED");
     String cmd = Serial.readStringUntil('\n');
-    Serial.print("RAW CMD = [");
-    Serial.print(cmd);
-    Serial.println("]");
-    handleCommand(cmd);
+    cmd.trim();
+
+    if (cmd.length() > 0) {
+      Serial.print("RAW CMD = [");
+      Serial.print(cmd);
+      Serial.println("]");
+      handleCommand(cmd);
+    }
   }
 
+  serviceCommandTimeout();
   serviceGait();
   serviceMotion();
 }
