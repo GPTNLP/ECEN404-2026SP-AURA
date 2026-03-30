@@ -70,7 +70,7 @@ class ConnectionManager:
 ui_manager = ConnectionManager()
 api = ApiClient()
 rag_system = None
-esp_serial = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+esp_serial = None
 runtime_config = {
     "poll_seconds": 5,
     "heartbeat_seconds": HEARTBEAT_SECONDS,
@@ -236,6 +236,7 @@ async def command_loop():
             if command:
                 command_id = command.get("id")
                 cmd = (command.get("command") or "").strip().lower()
+                payload = command.get("payload") or {}
                 print(f"[COMMAND] received: {cmd}")
 
                 if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}: #Movements
@@ -276,6 +277,69 @@ async def command_loop():
                             "device_id": DEVICE_ID,
                             "status": "failed",
                             "note": "ESP serial is not connected",
+                        })
+                elif cmd == "chat_prompt":
+                    query = payload.get("query", "")
+                    if rag_system and query:
+                        try:
+                            res = await rag_system.aquery(query)
+                            ai_reply = res.get("answer", "No answer found.")
+                            
+                            # Send answer back to Azure
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "result": {"answer": ai_reply, "sources": res.get("sources", [])}
+                            })
+                        except Exception as e:
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": str(e)
+                            })
+                    else:
+                        await asyncio.to_thread(api.ack_command, {
+                             "command_id": command_id, "device_id": DEVICE_ID,
+                             "status": "failed", "note": "RAG system offline or empty query"
+                        })
+                elif cmd == "build_rag":
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
+                    paths = payload.get("paths", []) # List of relative paths on Azure
+                    
+                    try:
+                        rag_system.reset() # clear current
+                        for path in paths:
+                            # Download to Jetson
+                            local_dest = os.path.join(STORAGE_DIR, "downloads", os.path.basename(path))
+                            await asyncio.to_thread(api.download_document, path, local_dest)
+                            
+                            # Read and chunk
+                            text = _read_pdf(local_dest) if path.endswith('.pdf') else ""
+                            # Assuming you have a chunking util accessible here
+                            
+                            # Insert into RAG
+                            await rag_system.ainsert(text, meta={"source": path})
+                            
+                        # Save it locally
+                        rag_system.flush()
+                        
+                        # Upload back to Azure Storage
+                        await asyncio.to_thread(api.upload_vector_db, db_name, rag_system.working_dir)
+                        
+                        await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "completed",
+                            "note": f"Built {len(paths)} files and synced to Azure"
+                        })
+                    except Exception as e:
+                         await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "failed",
+                            "note": str(e)
                         })
                 else:
                     print(f"[COMMAND] invalid command ignored: {cmd}")

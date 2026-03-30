@@ -1,5 +1,6 @@
 import requests
 from typing import Any, Dict
+import os
 
 from config import API_BASE_URL, DEVICE_SHARED_SECRET
 
@@ -8,6 +9,33 @@ class ApiClient:
     def __init__(self):
         self.base_url = API_BASE_URL.rstrip("/")
         self.timeout = 15
+
+    def download_document(self, path: str, dest_path: str):
+        r = requests.get(
+            self._url("/api/documents/download"),
+            params={"path": path},
+            headers=self._headers(),
+            stream=True
+        )
+        r.raise_for_status()
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+    def upload_vector_db(self, db_name: str, working_dir: str):
+        url = self._url(f"/api/databases/{db_name}/sync_up")
+        files = []
+        for fn in ["faiss.index", "embeddings.npy", "meta.json"]:
+            fp = os.path.join(working_dir, fn)
+            if os.path.exists(fp):
+                files.append(("files", (fn, open(fp, "rb"))))
+        
+        if files:
+            r = requests.post(url, files=files, headers={"X-Device-Secret": DEVICE_SHARED_SECRET})
+            r.raise_for_status()
+            for _, (_, f) in files:
+                f.close()
 
     def _headers(self) -> Dict[str, str]:
         return {

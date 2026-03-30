@@ -30,7 +30,7 @@ STATUS_SECONDS = int(os.getenv("DEVICE_STATUS_SECONDS", "20"))
 CONFIG_REFRESH_SECONDS = int(os.getenv("DEVICE_CONFIG_REFRESH_SECONDS", "120"))
 OFFLINE_RETRY_SECONDS = int(os.getenv("DEVICE_OFFLINE_RETRY_SECONDS", "10"))
 
-SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyACM0")
+SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyUSB0")
 INPUT_MODE = os.getenv("INPUT_MODE", "keyboard").strip().lower()
 
 # local Jetson demo / edge AI config
