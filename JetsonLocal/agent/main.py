@@ -38,7 +38,7 @@ from heartbeat import build_heartbeat_payload
 from status import build_status_payload
 from device_info import collect_device_info
 
-from lightrag_local import LightRAG, OllamaClient, _read_pdf
+from lightrag_local import LightRAG, OllamaClient
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
