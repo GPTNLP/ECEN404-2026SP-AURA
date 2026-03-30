@@ -11,7 +11,9 @@ const DEFAULT_DEVICE_ID = "jetson-001";
 
 type TreeNode = {
   name: string;
-  type: "dir" | "file";
+  path?: string;
+  type?: "dir" | "file";
+  kind?: "dir" | "file";
   children?: TreeNode[];
 };
 
@@ -35,6 +37,11 @@ type ContextMenuState =
 function joinPath(parent: string, name: string) {
   if (!parent) return name;
   return `${parent}/${name}`.replaceAll("//", "/");
+}
+
+function nodeType(node: TreeNode | null | undefined): "dir" | "file" | "" {
+  if (!node) return "";
+  return (node.type || node.kind || "") as "dir" | "file" | "";
 }
 
 function dirname(path: string) {
@@ -88,43 +95,34 @@ export default function DatabasePage() {
     | "jetson-db"
   >("");
 
-  // Documents
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "": true });
 
-  // Selected item (file OR dir)
   const [selected, setSelected] = useState<SelectedItem>({ kind: "dir", path: "" });
 
-  // UI state
   const [newFolderName, setNewFolderName] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [moveTargetDir, setMoveTargetDir] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
 
-  // Upload
   const [files, setFiles] = useState<FileList | null>(null);
   const selectedFiles = useMemo(() => (files ? Array.from(files) : []), [files]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // DBs
   const [dbList, setDbList] = useState<string[]>([]);
   const [activeDb, setActiveDb] = useState<string>("");
   const [newDbName, setNewDbName] = useState<string>("");
 
-  // Jetson selection
   const [deviceId, setDeviceId] = useState<string>(DEFAULT_DEVICE_ID);
   const [jetsonSelectedDb, setJetsonSelectedDb] = useState<string>("");
   const [jetsonUpdatedTs, setJetsonUpdatedTs] = useState<number | null>(null);
 
-  // Folder selection for DB build
   const [folderChecks, setFolderChecks] = useState<Record<string, boolean>>({});
   const [dbStats, setDbStats] = useState<any>(null);
 
-  // Search
   const [treeSearch, setTreeSearch] = useState("");
   const [contentsSearch, setContentsSearch] = useState("");
 
-  // Context menu
   const [ctx, setCtx] = useState<ContextMenuState>({
     open: false,
     x: 0,
@@ -141,24 +139,25 @@ export default function DatabasePage() {
     return h;
   }, [token]);
 
-  const selectedPath = selected?.path ?? "";
   const selectedKind = selected?.kind ?? "dir";
-
-  const selectedDir = selectedKind === "dir" ? selectedPath : dirname(selectedPath);
+  const selectedDir = selectedKind === "dir" ? (selected?.path ?? "") : dirname(selected?.path ?? "");
 
   const allFolders = useMemo(() => {
     const out: string[] = [];
+
     const walk = (node: TreeNode | null, parentPath: string) => {
-      if (!node || node.type !== "dir") return;
+      if (!node || nodeType(node) !== "dir") return;
+
       const kids = node.children || [];
       for (const ch of kids) {
         const p = joinPath(parentPath, ch.name);
-        if (ch.type === "dir") {
+        if (nodeType(ch) === "dir") {
           out.push(p);
           walk(ch, p);
         }
       }
     };
+
     out.push("");
     walk(tree, "");
     return out;
@@ -305,12 +304,12 @@ export default function DatabasePage() {
   }, [ctx.open]);
 
   const getDirNode = (dirPath: string) => {
-    if (!tree || tree.type !== "dir") return null;
+    if (!tree || nodeType(tree) !== "dir") return null;
     const parts = splitPath(dirPath);
     let cur: TreeNode = tree;
 
     for (const part of parts) {
-      const next = (cur.children || []).find((x) => x.type === "dir" && x.name === part);
+      const next = (cur.children || []).find((x) => nodeType(x) === "dir" && x.name === part);
       if (!next) return null;
       cur = next;
     }
@@ -322,7 +321,9 @@ export default function DatabasePage() {
   const dirContents = useMemo(() => {
     const kids = dirNode?.children || [];
     const sorted = [...kids].sort((a, b) => {
-      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+      const at = nodeType(a);
+      const bt = nodeType(b);
+      if (at !== bt) return at === "dir" ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
 
@@ -356,9 +357,9 @@ export default function DatabasePage() {
   };
 
   const renderTree = (node: TreeNode, parentPath: string) => {
-    if (node.type !== "dir") return null;
+    if (nodeType(node) !== "dir") return null;
 
-    const folders = (node.children || []).filter((c) => c.type === "dir");
+    const folders = (node.children || []).filter((c) => nodeType(c) === "dir");
 
     return (
       <div className="db-tree">
@@ -782,7 +783,6 @@ export default function DatabasePage() {
         </div>
 
         <div className="db-grid">
-          {/* LEFT: Folder Tree */}
           <div className="card card-pad db-panel">
             <div className="db-panel-head">
               <div>
@@ -845,7 +845,6 @@ export default function DatabasePage() {
             </div>
           </div>
 
-          {/* MIDDLE: Contents + Actions */}
           <div className="card card-pad db-panel">
             <div className="db-panel-head">
               <div>
@@ -1040,7 +1039,8 @@ export default function DatabasePage() {
               ) : (
                 dirContents.map((n) => {
                   const p = joinPath(selectedDir, n.name);
-                  const isSel = selected?.path === p && selected?.kind === n.type;
+                  const nt = nodeType(n);
+                  const isSel = selected?.path === p && selected?.kind === nt;
 
                   return (
                     <div
@@ -1048,26 +1048,26 @@ export default function DatabasePage() {
                       className={`db-item ${isSel ? "is-selected" : ""}`}
                       onClick={() =>
                         setSelected({
-                          kind: n.type === "dir" ? "dir" : "file",
+                          kind: nt === "dir" ? "dir" : "file",
                           path: p,
                         })
                       }
                       onContextMenu={(e) =>
                         openCtxMenu(e, {
-                          kind: n.type === "dir" ? "dir" : "file",
+                          kind: nt === "dir" ? "dir" : "file",
                           path: p,
                           name: n.name,
                         })
                       }
                       title={p}
                     >
-                      <div className="db-item-ic">{n.type === "dir" ? "📁" : "📄"}</div>
+                      <div className="db-item-ic">{nt === "dir" ? "📁" : "📄"}</div>
                       <div className="db-item-main">
                         <div className="db-item-name">{n.name}</div>
                         <div className="db-item-path">{p}</div>
                       </div>
 
-                      {n.type === "dir" ? (
+                      {nt === "dir" ? (
                         <button
                           className="db-link"
                           onClick={(e) => {
@@ -1086,7 +1086,6 @@ export default function DatabasePage() {
             </div>
           </div>
 
-          {/* RIGHT: Databases */}
           <div className="card card-pad db-panel">
             <div className="db-panel-head">
               <div>
