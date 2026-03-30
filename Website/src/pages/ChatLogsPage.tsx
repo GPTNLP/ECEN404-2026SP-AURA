@@ -2,14 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../services/authService";
 import "../styles/page-ui.css";
 
-type LogMessage = {
-  role?: "user" | "ai" | "error";
-  content?: string;
-  sources?: string[];
-};
-
 type LogItem = {
-  log_id?: string;
   ts: number;
   event?: string;
   user_email?: string;
@@ -39,7 +32,6 @@ export default function ChatLogsPage() {
   const isAdmin = user?.role === "admin";
 
   const [loading, setLoading] = useState(false);
-  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [items, setItems] = useState<LogItem[]>([]);
@@ -51,9 +43,6 @@ export default function ChatLogsPage() {
 
   const [limit, setLimit] = useState(200);
   const [offset, setOffset] = useState(0);
-
-  const [selectedLog, setSelectedLog] = useState<LogItem | null>(null);
-  const [detailOpen, setDetailOpen] = useState(false);
 
   const canFetch = !!token && isAdmin;
 
@@ -90,29 +79,6 @@ export default function ChatLogsPage() {
     }
   };
 
-  const openLog = async (logId?: string) => {
-    if (!token || !logId) return;
-
-    setDetailLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/logs/get?log_id=${encodeURIComponent(logId)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(data?.detail || "Failed to load log detail");
-      }
-
-      setSelectedLog((data?.item || null) as LogItem | null);
-      setDetailOpen(true);
-    } catch (e: any) {
-      setError(e?.message || "Failed to load log detail");
-    } finally {
-      setDetailLoading(false);
-    }
-  };
-
   useEffect(() => {
     if (!canFetch) return;
     fetchLogs();
@@ -136,10 +102,6 @@ export default function ChatLogsPage() {
       </div>
     );
   }
-
-  const messages = Array.isArray(selectedLog?.meta?.messages)
-    ? (selectedLog?.meta?.messages as LogMessage[])
-    : [];
 
   return (
     <div className="page-shell">
@@ -176,7 +138,6 @@ export default function ChatLogsPage() {
               <option value="">All Roles</option>
               <option value="admin">Admin</option>
               <option value="student">Student</option>
-              <option value="ta">TA</option>
             </select>
 
             <select
@@ -189,7 +150,6 @@ export default function ChatLogsPage() {
             >
               <option value="">All Events</option>
               <option value="chat">chat</option>
-              <option value="chat_error">chat_error</option>
               <option value="bot">bot</option>
               <option value="upload">upload</option>
               <option value="login">login</option>
@@ -232,14 +192,7 @@ export default function ChatLogsPage() {
           </div>
 
           {error && (
-            <div
-              style={{
-                marginTop: 10,
-                color: "var(--status-bad)",
-                fontSize: 13,
-                whiteSpace: "pre-wrap",
-              }}
-            >
+            <div style={{ marginTop: 10, color: "var(--status-bad)", fontSize: 13, whiteSpace: "pre-wrap" }}>
               {error}
             </div>
           )}
@@ -268,12 +221,7 @@ export default function ChatLogsPage() {
                 )}
 
                 {items.map((it, idx) => (
-                  <tr
-                    key={it.log_id || idx}
-                    onClick={() => openLog(it.log_id)}
-                    style={{ cursor: it.log_id ? "pointer" : "default" }}
-                    title={it.log_id ? "Click to view full conversation" : ""}
-                  >
+                  <tr key={idx}>
                     <td style={{ whiteSpace: "nowrap" }} className="muted">
                       {fmtTime(it.ts)}
                     </td>
@@ -332,126 +280,6 @@ export default function ChatLogsPage() {
           Endpoint: <span className="mono">{API_BASE}/logs/list</span>
         </div>
       </div>
-
-      {detailOpen && selectedLog && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.45)",
-            display: "grid",
-            placeItems: "center",
-            zIndex: 9999,
-            padding: 20,
-          }}
-          onClick={() => setDetailOpen(false)}
-        >
-          <div
-            className="card card-pad"
-            style={{
-              width: "min(1000px, 95vw)",
-              maxHeight: "90vh",
-              overflow: "auto",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-                gap: 12,
-              }}
-            >
-              <div>
-                <h3 style={{ margin: 0 }}>Log Detail</h3>
-                <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                  {selectedLog.log_id || "—"} • {fmtTime(selectedLog.ts)}
-                </div>
-              </div>
-
-              <button className="btn" onClick={() => setDetailOpen(false)}>
-                Close
-              </button>
-            </div>
-
-            {detailLoading && <div className="muted">Loading…</div>}
-
-            <div className="card card-pad" style={{ marginBottom: 14 }}>
-              <div><b>User:</b> {selectedLog.user_email || "-"}</div>
-              <div><b>Role:</b> {selectedLog.user_role || "-"}</div>
-              <div><b>Event:</b> {selectedLog.event || "-"}</div>
-              <div><b>Prompt:</b> {selectedLog.prompt || "-"}</div>
-              <div><b>Preview:</b> {selectedLog.response_preview || "-"}</div>
-              <div><b>Latency:</b> {typeof selectedLog.latency_ms === "number" ? `${selectedLog.latency_ms}ms` : "-"}</div>
-              <div><b>Model:</b> {selectedLog.model || "-"}</div>
-            </div>
-
-            <div className="card card-pad">
-              <div style={{ fontWeight: 800, marginBottom: 12 }}>Conversation</div>
-
-              {messages.length === 0 ? (
-                <div className="muted">No saved conversation messages in this log yet.</div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                  {messages.map((msg, i) => {
-                    const role = msg.role || "ai";
-                    const isUser = role === "user";
-                    const isError = role === "error";
-
-                    return (
-                      <div
-                        key={i}
-                        style={{
-                          alignSelf: isUser ? "flex-end" : "flex-start",
-                          maxWidth: "80%",
-                          padding: "12px 14px",
-                          borderRadius: 14,
-                          whiteSpace: "pre-wrap",
-                          lineHeight: 1.5,
-                          background: isUser
-                            ? "var(--accent)"
-                            : isError
-                            ? "color-mix(in srgb, var(--status-bad) 12%, var(--card-bg))"
-                            : "var(--card-bg)",
-                          color: isUser ? "#fff" : "var(--text)",
-                          border: "1px solid var(--card-border)",
-                        }}
-                      >
-                        <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6, fontWeight: 800 }}>
-                          {role.toUpperCase()}
-                        </div>
-                        <div>{msg.content || ""}</div>
-
-                        {Array.isArray(msg.sources) && msg.sources.length > 0 && (
-                          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-                            <b>Sources:</b> {msg.sources.join(", ")}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="card card-pad" style={{ marginTop: 14 }}>
-              <div style={{ fontWeight: 800, marginBottom: 8 }}>Raw Meta</div>
-              <pre
-                style={{
-                  margin: 0,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                  fontSize: 12,
-                }}
-              >
-                {JSON.stringify(selectedLog.meta || {}, null, 2)}
-              </pre>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

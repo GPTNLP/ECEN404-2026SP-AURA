@@ -75,7 +75,6 @@ include_router_safely(m("database_api"), "database_api")
 include_router_safely(m("logs_api"), "logs_api")
 include_router_safely(m("device_api"), "device_api")
 include_router_safely(m("device_commands_api"), "device_commands_api")
-include_router_safely(m("device_db_api"), "device_db_api")
 
 if os.getenv("ENABLE_CAMERA", "0") == "1":
     include_router_safely(m("camera_api"), "camera_api")

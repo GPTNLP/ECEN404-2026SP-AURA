@@ -17,14 +17,14 @@ function setEmptyState() {
         chatContainer.innerHTML = `
             <div class="empty-state">
                 <h2>AURA is ready</h2>
-                <p>Talk to the robot locally from this screen.</p>
+                <p>Send a message below to talk to the robot.</p>
             </div>
         `;
     }
 }
 
 function clearEmptyState() {
-    const empty = chatContainer?.querySelector(".empty-state");
+    const empty = chatContainer.querySelector(".empty-state");
     if (empty) empty.remove();
 }
 
@@ -97,7 +97,6 @@ function handleMessage(data) {
         let stateClass = "ready";
         if (text.toLowerCase().includes("processing")) stateClass = "processing";
         else if (text.toLowerCase().includes("offline")) stateClass = "offline";
-        else if (text.toLowerCase().includes("listening")) stateClass = "listening";
 
         updateStatus(text, stateClass);
         return;
@@ -129,43 +128,20 @@ function handleMessage(data) {
             updateConnection(data.connection);
         }
 
-        if (typeof data.status_text === "string") {
-            const txt = data.status_text.toLowerCase();
-            let stateClass = "ready";
-            if (txt.includes("processing")) stateClass = "processing";
-            else if (txt.includes("offline")) stateClass = "offline";
-            else if (txt.includes("listening")) stateClass = "listening";
-            updateStatus(data.status_text, stateClass);
-        }
-
         return;
     }
 
     if (data.type === "system") {
         appendMessage("system", data.text || "System event");
-        return;
     }
-
-    if (data.type === "pong") {
-        return;
-    }
-}
-
-function sendJson(payload) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(payload));
-    return true;
 }
 
 function sendMessage() {
     const text = (chatInput?.value || "").trim();
-    if (!text) return;
-    const ok = sendJson({ type: "chat", text });
-    if (ok && chatInput) chatInput.value = "";
-}
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-function sendMove(value) {
-    sendJson({ type: "move", value });
+    ws.send(text);
+    chatInput.value = "";
 }
 
 function connectWebSocket() {
@@ -175,7 +151,6 @@ function connectWebSocket() {
     ws.onopen = () => {
         updateStatus("Connected", "ready");
         updateConnection("Connected to robot");
-        sendJson({ type: "ping" });
     };
 
     ws.onmessage = (event) => {
@@ -207,13 +182,6 @@ chatInput?.addEventListener("keydown", (e) => {
         e.preventDefault();
         sendMessage();
     }
-});
-
-document.addEventListener("click", (e) => {
-    const el = e.target.closest("[data-move]");
-    if (!el) return;
-    const move = el.getAttribute("data-move");
-    if (move) sendMove(move);
 });
 
 setEmptyState();

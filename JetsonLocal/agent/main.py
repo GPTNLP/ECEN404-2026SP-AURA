@@ -1,474 +1,470 @@
-import json
 import os
-import time
+import sys
+import asyncio
 from pathlib import Path
-from typing import Any, Dict, Optional
+from pypdf import PdfReader
 
-from api_client import ApiClient
+import serial
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
+BASE_DIR = Path(__file__).resolve().parent
+JETSONLOCAL_DIR = BASE_DIR.parent
+if str(JETSONLOCAL_DIR) not in sys.path:
+    sys.path.insert(0, str(JETSONLOCAL_DIR))
+
 from config import (
-    AGENT_LOG_FILE,
-    CAMERA_READY_DEFAULT,
-    CONFIG_REFRESH_SECONDS,
+    STATIC_DIR,
+    STORAGE_DIR,
+    SERIAL_PORT,
+    DEFAULT_MODEL,
+    EMBEDDING_MODEL,
+    LOCAL_DB_NAME,
     DEVICE_ID,
     DEVICE_NAME,
-    DEVICE_SOFTWARE_VERSION,
     DEVICE_TYPE,
+    DEVICE_SOFTWARE_VERSION,
     HEARTBEAT_SECONDS,
-    INPUT_MODE,
-    OFFLINE_RETRY_SECONDS,
-    OLLAMA_READY_DEFAULT,
-    PENDING_LOGS_FILE,
-    PENDING_STATUS_FILE,
-    RUNTIME_FILE,
-    SERIAL_PORT,
     STATUS_SECONDS,
-    VECTOR_DB_READY_DEFAULT,
+    CONFIG_REFRESH_SECONDS,
+    OFFLINE_RETRY_SECONDS,
 )
-from db_manager import DBManager
+from api_client import ApiClient
+from logger import write_local_log
+from offline_queue import queue_log, queue_status, flush_logs, flush_statuses
+from heartbeat import build_heartbeat_payload
+from status import build_status_payload
+from device_info import collect_device_info
 
-try:
-    import serial
-except Exception:
-    serial = None
+from lightrag_local import LightRAG, OllamaClient
 
-
-def _now_ts() -> int:
-    return int(time.time())
-
-
-def _safe_read_json(path: Path, default: Any) -> Any:
-    try:
-        if not path.exists():
-            return default
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
+app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-def _safe_write_json(path: Path, data: Any):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
-    except Exception:
-        pass
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        dead = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead.append(connection)
+        for connection in dead:
+            self.disconnect(connection)
 
 
-def _append_jsonl(path: Path, row: Dict[str, Any]):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-
-FAST_MOVE_MAP = {
-    "forward": "F",
-    "backward": "B",
-    "left": "L",
-    "right": "R",
-    "stop": "S",
-    "f": "F",
-    "b": "B",
-    "l": "L",
-    "r": "R",
-    "s": "S",
+ui_manager = ConnectionManager()
+api = ApiClient()
+rag_system = None
+esp_serial = None
+runtime_config = {
+    "poll_seconds": 5,
+    "heartbeat_seconds": HEARTBEAT_SECONDS,
+    "status_seconds": STATUS_SECONDS,
 }
 
 
-class AuraJetsonAgent:
-    def __init__(self):
-        self.api = ApiClient()
-        self.db = DBManager(self.api)
-
-        self.serial_conn = None
-        self.serial_ready = False
-        self.last_serial_error = ""
-
-        self.command_poll_seconds = float(os.getenv("DEVICE_COMMAND_POLL_SECONDS", "0.08"))
-        self.serial_baud = int(os.getenv("SERIAL_BAUD", "115200"))
-
-        self.last_heartbeat_ts = 0.0
-        self.last_status_ts = 0.0
-        self.last_config_ts = 0.0
-        self.last_command_ts = 0.0
-
-        self.last_command_id: Optional[str] = None
-        self.registered = False
-
-        self.runtime = _safe_read_json(Path(RUNTIME_FILE), {})
-        self.runtime.setdefault("started_at", _now_ts())
-        self.runtime.setdefault("last_selected_db", self.db.get_active_db())
-        self.runtime.setdefault("last_command", None)
-        self.runtime.setdefault("last_command_at", None)
-        self.runtime.setdefault("serial_port", SERIAL_PORT)
-        self._save_runtime()
-
-    def _save_runtime(self):
-        _safe_write_json(Path(RUNTIME_FILE), self.runtime)
-
-    def log_local(self, level: str, event: str, message: str, **extra):
-        row = {
-            "ts": _now_ts(),
-            "level": level,
-            "event": event,
-            "message": message,
-            **extra,
-        }
-        _append_jsonl(Path(AGENT_LOG_FILE), row)
-        print(f"[{level.upper()}] {event}: {message}")
-
-    def queue_status_fallback(self, payload: Dict[str, Any]):
-        _append_jsonl(Path(PENDING_STATUS_FILE), payload)
-
-    def queue_log_fallback(self, payload: Dict[str, Any]):
-        _append_jsonl(Path(PENDING_LOGS_FILE), payload)
-
-    def connect_serial(self):
-        if serial is None:
-            self.serial_ready = False
-            self.last_serial_error = "pyserial not installed"
-            self.log_local("error", "serial", self.last_serial_error)
-            return
-
-        try:
-            self.serial_conn = serial.Serial(
-                SERIAL_PORT,
-                self.serial_baud,
-                timeout=0,
-                write_timeout=0.25,
-            )
-            time.sleep(0.2)
-            self.serial_ready = True
-            self.last_serial_error = ""
-            self.log_local("info", "serial", f"Connected to serial {SERIAL_PORT} @ {self.serial_baud}")
-        except Exception as e:
-            self.serial_conn = None
-            self.serial_ready = False
-            self.last_serial_error = str(e)
-            self.log_local("error", "serial", f"Failed to open serial {SERIAL_PORT}: {e}")
-
-    def read_serial_lines(self, max_lines: int = 20):
-        if not self.serial_conn or not self.serial_ready:
-            return
-
-        try:
-            count = 0
-            while self.serial_conn.in_waiting and count < max_lines:
-                raw = self.serial_conn.readline()
-                if not raw:
-                    break
-                try:
-                    line = raw.decode("utf-8", errors="ignore").strip()
-                except Exception:
-                    line = ""
-                if line:
-                    self.log_local("info", "esp32_rx", line)
-                count += 1
-        except Exception as e:
-            self.serial_ready = False
-            self.last_serial_error = str(e)
-            self.log_local("error", "serial", f"Serial read error: {e}")
-
-    def send_serial_line(self, line: str) -> bool:
-        if not line:
-            return False
-        if not self.serial_conn or not self.serial_ready:
-            return False
-
-        try:
-            payload = (line.strip() + "\n").encode("utf-8")
-            self.serial_conn.write(payload)
-            self.serial_conn.flush()
-            self.runtime["last_command"] = line.strip()
-            self.runtime["last_command_at"] = _now_ts()
-            self._save_runtime()
-            self.log_local("info", "esp32_tx", line.strip())
-            return True
-        except Exception as e:
-            self.serial_ready = False
-            self.last_serial_error = str(e)
-            self.log_local("error", "serial", f"Serial write error: {e}")
-            return False
-
-    def ensure_db_ready(self, db_name: str):
-        if not db_name:
-            return
-
-        if self.db.activate_if_local(db_name):
-            self.runtime["last_selected_db"] = db_name
-            self._save_runtime()
-            self.log_local("info", "db", f'Using cached local DB "{db_name}"')
-            return
-
-        self.log_local("info", "db", f'No local DB cache for "{db_name}", trying Azure vector sync')
-        self.db.write_sync_state(db_name, "downloading_vector_bundle")
-
-        db_dir = self.db.db_dir(db_name)
-        db_dir.mkdir(parents=True, exist_ok=True)
-
-        pulled_any = False
-        for fn in ["db.json", "meta.json", "embeddings.npy", "faiss.index", "chunks.jsonl", "stats.json"]:
-            dest = db_dir / fn
-            try:
-                self.api.download_vector_file(db_name, fn, str(dest))
-                pulled_any = True
-            except Exception:
-                pass
-
-        if pulled_any and self.db.activate_if_local(db_name):
-            self.runtime["last_selected_db"] = db_name
-            self._save_runtime()
-            self.log_local("info", "db", f'Pulled vector cache from Azure for "{db_name}"')
-            return
-
-        try:
-            manifest = self.api.get_source_manifest(db_name)
-            files = list(manifest.get("files") or [])
-            if files:
-                self.db.download_source_files(db_name, files)
-                self.db.write_sync_state(
-                    db_name,
-                    "source_docs_ready",
-                    "Source files downloaded. Waiting for local vector build step.",
-                )
-                self.log_local(
-                    "info",
-                    "db",
-                    f'Downloaded {len(files)} source files for "{db_name}" into temp storage',
-                )
-            else:
-                self.db.write_sync_state(db_name, "failed", "No vector files and no source files found")
-                self.log_local("error", "db", f'No vector files or source files found for "{db_name}"')
-        except Exception as e:
-            self.db.write_sync_state(db_name, "failed", str(e))
-            self.log_local("error", "db", f'Failed to prepare DB "{db_name}": {e}')
-
-    def refresh_selected_db(self):
-        try:
-            data = self.api.get_selected_db(DEVICE_ID)
-            if not isinstance(data, dict):
-                return
-
-            selected_db = str(data.get("selected_db") or "").strip()
-            if not selected_db:
-                return
-
-            current_db = self.db.get_active_db()
-            if selected_db != current_db:
-                self.log_local("info", "db_selection", f'Azure selected DB changed: "{current_db}" -> "{selected_db}"')
-                self.ensure_db_ready(selected_db)
-
-            self.last_config_ts = time.time()
-        except Exception as e:
-            self.log_local("error", "db_selection", f"Selected DB refresh failed: {e}")
-
-    def make_register_payload(self) -> Dict[str, Any]:
-        return {
-            "device_id": DEVICE_ID,
-            "name": DEVICE_NAME,
-            "device_type": DEVICE_TYPE,
-            "software_version": DEVICE_SOFTWARE_VERSION,
-            "input_mode": INPUT_MODE,
-            "serial_port": SERIAL_PORT,
-        }
-
-    def make_heartbeat_payload(self) -> Dict[str, Any]:
-        return {
-            "device_id": DEVICE_ID,
-            "ts": _now_ts(),
-            "software_version": DEVICE_SOFTWARE_VERSION,
-            "selected_db": self.db.get_active_db(),
-        }
-
-    def make_status_payload(self) -> Dict[str, Any]:
-        sync_state = self.db.read_sync_state()
-        return {
-            "device_id": DEVICE_ID,
-            "ts": _now_ts(),
-            "status": "online",
-            "input_mode": INPUT_MODE,
-            "serial_ready": bool(self.serial_ready),
-            "serial_port": SERIAL_PORT,
-            "serial_error": self.last_serial_error,
-            "camera_ready": bool(CAMERA_READY_DEFAULT),
-            "vector_db_ready": bool(VECTOR_DB_READY_DEFAULT),
-            "ollama_ready": bool(OLLAMA_READY_DEFAULT),
-            "selected_db": self.db.get_active_db(),
-            "local_dbs": self.db.list_local_dbs(),
-            "db_sync_state": sync_state,
-            "last_command": self.runtime.get("last_command"),
-            "last_command_at": self.runtime.get("last_command_at"),
-        }
-
-    def do_register(self):
-        try:
-            self.api.register(self.make_register_payload())
-            self.registered = True
-            self.log_local("info", "register", "Device registered")
-        except Exception as e:
-            self.registered = False
-            self.log_local("error", "register", f"Register failed: {e}")
-
-    def do_heartbeat(self):
-        payload = self.make_heartbeat_payload()
-        try:
-            self.api.heartbeat(payload)
-            self.last_heartbeat_ts = time.time()
-        except Exception as e:
-            self.log_local("error", "heartbeat", f"Heartbeat failed: {e}")
-
-    def do_status(self):
-        payload = self.make_status_payload()
-        try:
-            self.api.status(payload)
-            self.last_status_ts = time.time()
-        except Exception as e:
-            self.queue_status_fallback(payload)
-            self.log_local("error", "status", f"Status failed: {e}")
-
-    def normalize_move_text(self, raw: str) -> Optional[str]:
-        if not raw:
-            return None
-
-        s = raw.strip()
-        low = s.lower()
-
-        if low in ("f", "b", "l", "r", "s"):
-            return low.upper()
-
-        if low.startswith("move:"):
-            move = low.split(":", 1)[1].strip()
-            return FAST_MOVE_MAP.get(move)
-
-        if low in FAST_MOVE_MAP:
-            return FAST_MOVE_MAP[low]
-
-        return None
-
-    def send_move_command(self, move: str) -> bool:
-        key = self.normalize_move_text(move)
-        if not key:
-            return False
-        return self.send_serial_line(key)
-
-    def try_handle_command_payload(self, cmd: Dict[str, Any]) -> bool:
-        command_id = cmd.get("command_id") or cmd.get("id") or cmd.get("uuid")
-        command_type = str(cmd.get("type") or cmd.get("command_type") or "").strip().lower()
-        value = cmd.get("value")
-        text = cmd.get("command") or cmd.get("cmd") or cmd.get("message") or cmd.get("text")
-
-        handled = False
-
-        if command_type in ("move", "movement", "control"):
-            if isinstance(value, str):
-                handled = self.send_move_command(value)
-            elif isinstance(text, str):
-                handled = self.send_move_command(text)
-
-        elif isinstance(text, str):
-            maybe_move = self.normalize_move_text(text)
-            if maybe_move:
-                handled = self.send_move_command(maybe_move)
-            else:
-                handled = self.send_serial_line(text)
-
-        if not handled and command_type in ("select_db", "database"):
-            db_name = str(value or text or "").strip()
-            if db_name:
-                self.ensure_db_ready(db_name)
-                handled = True
-
-        if command_id:
-            try:
-                self.api.ack_command(
-                    {
-                        "device_id": DEVICE_ID,
-                        "command_id": command_id,
-                        "ok": bool(handled),
-                        "ts": _now_ts(),
-                    }
-                )
-            except Exception as e:
-                self.log_local("error", "command_ack", f"Ack failed: {e}")
-
-        if handled:
-            self.last_command_id = str(command_id or "")
-            self.last_command_ts = time.time()
-
-        return handled
-
-    def poll_command_once(self):
-        try:
-            data = self.api.get_next_command(DEVICE_ID)
-            if not isinstance(data, dict):
-                return
-
-            if not data:
-                return
-            if data.get("ok") is True and not any(k in data for k in ("command", "cmd", "type", "id", "command_id", "message", "text", "value")):
-                return
-            if data.get("command") is None and data.get("cmd") is None and data.get("text") is None and data.get("value") is None and not data.get("type"):
-                return
-
-            handled = self.try_handle_command_payload(data)
-            if handled:
-                self.log_local("info", "command", f"Handled command: {data}")
-            else:
-                self.log_local("warning", "command", f"Unhandled command payload: {data}")
-        except Exception as e:
-            self.log_local("error", "command_poll", f"Command poll failed: {e}")
-
-    def boot(self):
-        self.connect_serial()
-        self.do_register()
-
-        boot_db = self.db.get_active_db()
-        if boot_db:
-            self.ensure_db_ready(boot_db)
-
-        self.do_status()
-        self.refresh_selected_db()
-        self.do_heartbeat()
-
-    def run_forever(self):
-        self.boot()
-
-        while True:
-            now = time.time()
-
-            if not self.serial_ready and serial is not None:
-                self.connect_serial()
-
-            self.read_serial_lines()
-
-            if (now - self.last_heartbeat_ts) >= HEARTBEAT_SECONDS:
-                self.do_heartbeat()
-
-            if (now - self.last_status_ts) >= STATUS_SECONDS:
-                self.do_status()
-
-            if (now - self.last_config_ts) >= CONFIG_REFRESH_SECONDS:
-                self.refresh_selected_db()
-
-            self.poll_command_once()
-            time.sleep(self.command_poll_seconds)
-
-
-def main():
-    agent = AuraJetsonAgent()
-
+def send_or_queue_log(level: str, event: str, message: str, meta=None):
+    entry = write_local_log(level, event, message, meta)
+    payload = {
+        "device_id": entry["device_id"],
+        "level": entry["level"],
+        "event": entry["event"],
+        "message": entry["message"],
+        "meta": entry["meta"],
+    }
+    try:
+        api.log(payload)
+    except Exception:
+        queue_log(payload)
+
+
+def init_hardware():
+    global esp_serial
+    try:
+        esp_serial = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+        print(f"[SERIAL] connected to {SERIAL_PORT}")
+        send_or_queue_log("info", "serial_connected", f"Connected to serial port {SERIAL_PORT}")
+    except serial.SerialException:
+        esp_serial = None
+        print(f"[SERIAL] unavailable: {SERIAL_PORT}")
+        send_or_queue_log("warning", "serial_unavailable", f"Serial port unavailable: {SERIAL_PORT}")
+
+
+def init_rag():
+    global rag_system
+    db_path = os.path.join(str(STORAGE_DIR), LOCAL_DB_NAME)
+    os.makedirs(db_path, exist_ok=True)
+    try:
+        rag_system = LightRAG(
+            working_dir=db_path,
+            llm_model_name=DEFAULT_MODEL,
+            embed_model_name=EMBEDDING_MODEL,
+        )
+        print(f"[RAG] initialized at {db_path}")
+        send_or_queue_log("info", "rag_initialized", f"RAG initialized at {db_path}")
+    except Exception as e:
+        rag_system = None
+        print(f"[RAG] init failed: {e}")
+        send_or_queue_log("warning", "rag_init_failed", f"RAG init failed: {e}")
+
+
+def build_register_payload():
+    info = collect_device_info()
+    return {
+        "device_id": DEVICE_ID,
+        "device_name": DEVICE_NAME,
+        "device_type": DEVICE_TYPE,
+        "software_version": DEVICE_SOFTWARE_VERSION,
+        "hostname": info["hostname"],
+        "local_ip": info["local_ip"],
+    }
+
+def _read_pdf(path: str) -> str:
+    """Extracts text from a PDF file."""
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            if txt.strip():
+                parts.append(txt)
+        return "\n\n".join(parts)
+    except Exception as e:
+        print(f"[PDF_READER] Error reading {path}: {e}")
+        return ""
+
+async def register_device():
+    payload = build_register_payload()
+    print(f"[REGISTER] sending: {payload}")
+    result = await asyncio.to_thread(api.register, payload)
+    print(f"[REGISTER] success: {result}")
+    send_or_queue_log("info", "device_registered", "Device registered with backend", result)
+    return result
+
+
+async def refresh_config():
+    global runtime_config
+    try:
+        result = await asyncio.to_thread(api.get_config, DEVICE_ID)
+        runtime_config["poll_seconds"] = int(result.get("poll_seconds", runtime_config["poll_seconds"]))
+        runtime_config["heartbeat_seconds"] = int(result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"]))
+        runtime_config["status_seconds"] = int(result.get("status_seconds", runtime_config["status_seconds"]))
+        print(f"[CONFIG] success: {result}")
+    except Exception as e:
+        print(f"[CONFIG] failed: {e}")
+        send_or_queue_log("warning", "config_refresh_failed", f"Failed to refresh device config: {e}")
+
+
+async def heartbeat_loop():
     while True:
         try:
-            agent.run_forever()
-        except KeyboardInterrupt:
-            raise
+            payload = build_heartbeat_payload()
+            await asyncio.to_thread(api.heartbeat, payload)
+            print(f"[HEARTBEAT] sent for {payload.get('device_id')}")
         except Exception as e:
-            agent.log_local("error", "main", f"Agent crashed: {e}")
-            time.sleep(OFFLINE_RETRY_SECONDS)
+            print(f"[HEARTBEAT] failed: {e}")
+            send_or_queue_log("warning", "heartbeat_failed", f"Heartbeat failed: {e}")
+        await asyncio.sleep(runtime_config["heartbeat_seconds"])
+
+
+async def status_loop():
+    while True:
+        payload = build_status_payload()
+
+        connection_text = "Connected to website"
+        try:
+            await asyncio.to_thread(api.status, payload)
+            print(
+                f"[STATUS] sent cpu={payload.get('cpu_percent')} "
+                f"gpu={(payload.get('extra') or {}).get('gpu_percent')}"
+            )
+        except Exception as e:
+            queue_status(payload)
+            print(f"[STATUS] failed: {e}")
+            send_or_queue_log("warning", "status_failed", f"Status upload failed: {e}")
+            connection_text = "Robot only / website offline"
+
+        await ui_manager.broadcast({
+            "type": "telemetry",
+            "cpu_percent": payload.get("cpu_percent"),
+            "gpu_percent": (payload.get("extra") or {}).get("gpu_percent"),
+            "db_name": (payload.get("extra") or {}).get("db_name", LOCAL_DB_NAME),
+            "connection": connection_text,
+        })
+
+        await asyncio.sleep(runtime_config["status_seconds"])
+
+
+async def flush_loop():
+    while True:
+        try:
+            await asyncio.to_thread(flush_logs, api.log)
+            await asyncio.to_thread(flush_statuses, api.status)
+            print("[FLUSH] attempted queued log/status flush")
+        except Exception as e:
+            print(f"[FLUSH] failed: {e}")
+        await asyncio.sleep(OFFLINE_RETRY_SECONDS)
+
+
+async def config_loop():
+    while True:
+        await refresh_config()
+        await asyncio.sleep(CONFIG_REFRESH_SECONDS)
+
+
+async def command_loop():
+    while True:
+        try:
+            result = await asyncio.to_thread(api.get_next_command, DEVICE_ID)
+            command = result.get("command")
+
+            if command:
+                command_id = command.get("id")
+                cmd = (command.get("command") or "").strip().lower()
+                payload = command.get("payload") or {}
+                print(f"[COMMAND] received: {cmd}")
+
+                if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}: #Movements
+                    if esp_serial:
+                        try:
+                            val = payload.get("value", "")
+                            
+                            # Format: "MOVE:pitch:15\n" or "MOVE:forward\n"
+                            serial_msg = f"MOVE:{cmd}:{val}\n" if val else f"MOVE:{cmd}\n"
+                            esp_serial.write(serial_msg.encode("utf-8"))
+                            print(f"[COMMAND] sent to ESP: {serial_msg.strip()}")
+
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": f"Sent to ESP as {serial_msg.strip()}",
+                            })
+
+                            send_or_queue_log(
+                                "info",
+                                "device_command_executed",
+                                f"Executed command: {cmd}",
+                                {"command_id": command_id, "serial_message": serial_msg.strip()},
+                            )
+                        except Exception as e:
+                            print(f"[COMMAND] serial send failed: {e}")
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Serial send failed: {e}",
+                            })
+                    else:
+                        print("[COMMAND] ESP serial not connected")
+                        await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "failed",
+                            "note": "ESP serial is not connected",
+                        })
+                elif cmd == "chat_prompt":
+                    query = payload.get("query", "")
+                    if rag_system and query:
+                        try:
+                            res = await rag_system.aquery(query)
+                            ai_reply = res.get("answer", "No answer found.")
+                            
+                            # Send answer back to Azure
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "result": {"answer": ai_reply, "sources": res.get("sources", [])}
+                            })
+                        except Exception as e:
+                            await asyncio.to_thread(api.ack_command, {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": str(e)
+                            })
+                    else:
+                        await asyncio.to_thread(api.ack_command, {
+                             "command_id": command_id, "device_id": DEVICE_ID,
+                             "status": "failed", "note": "RAG system offline or empty query"
+                        })
+                elif cmd == "build_rag":
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
+                    paths = payload.get("paths", []) # List of relative paths on Azure
+                    
+                    try:
+                        rag_system.reset() # clear current
+                        for path in paths:
+                            # Download to Jetson
+                            local_dest = os.path.join(STORAGE_DIR, "downloads", os.path.basename(path))
+                            await asyncio.to_thread(api.download_document, path, local_dest)
+                            
+                            # Read and chunk
+                            text = _read_pdf(local_dest) if path.endswith('.pdf') else ""
+                            # Assuming you have a chunking util accessible here
+                            
+                            # Insert into RAG
+                            await rag_system.ainsert(text, meta={"source": path})
+                            
+                        # Save it locally
+                        rag_system.flush()
+                        
+                        # Upload back to Azure Storage
+                        await asyncio.to_thread(api.upload_vector_db, db_name, rag_system.working_dir)
+                        
+                        await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "completed",
+                            "note": f"Built {len(paths)} files and synced to Azure"
+                        })
+                    except Exception as e:
+                         await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "failed",
+                            "note": str(e)
+                        })
+                else:
+                    print(f"[COMMAND] invalid command ignored: {cmd}")
+                    if command_id:
+                        await asyncio.to_thread(api.ack_command, {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "failed",
+                            "note": f"Invalid command: {cmd}",
+                        })
+
+        except Exception as e:
+            print(f"[COMMAND] poll failed: {e}")
+
+        await asyncio.sleep(runtime_config["poll_seconds"])
+
+
+async def parse_intent(user_msg: str):
+    client = OllamaClient("http://127.0.0.1:11434", EMBEDDING_MODEL, DEFAULT_MODEL)
+    system = "Classify user input as 'MOVEMENT' or 'QUESTION'. Reply with one word."
+    prompt = f"Input: '{user_msg}'"
+    try:
+        res = await client.generate(prompt, system=system, timeout_s=5.0)
+        return "MOVEMENT" if "MOVEMENT" in res.upper() else "QUESTION"
+    except Exception:
+        return "QUESTION"
+
+
+async def handle_user_message(user_msg: str):
+    user_msg = (user_msg or "").strip()
+    if not user_msg:
+        return
+
+    await ui_manager.broadcast({"type": "chat", "sender": "user", "text": user_msg})
+    await ui_manager.broadcast({"type": "status", "data": "Processing..."})
+
+    intent = await parse_intent(user_msg)
+
+    if intent == "MOVEMENT":
+        if esp_serial:
+            try:
+                esp_serial.write(f"MOVE:{user_msg}\n".encode("utf-8"))
+                ai_reply = "Movement command routed to ESP rotors."
+            except Exception:
+                ai_reply = "Failed to send movement command to ESP."
+        else:
+            ai_reply = "ESP serial is not connected."
+    else:
+        if rag_system:
+            try:
+                res = await rag_system.aquery(user_msg)
+                ai_reply = res.get("answer", "No answer found.")
+            except Exception as e:
+                ai_reply = f"RAG query failed: {e}"
+        else:
+            ai_reply = "RAG database offline."
+
+    send_or_queue_log("info", "assistant_interaction", "Assistant handled user message", {
+        "user_message": user_msg,
+        "reply_preview": ai_reply[:200],
+    })
+
+    await ui_manager.broadcast({"type": "chat", "sender": "ai", "text": ai_reply})
+    await ui_manager.broadcast({"type": "status", "data": "Ready"})
+
+
+@app.on_event("startup")
+async def startup_event():
+    print("[STARTUP] initializing hardware")
+    init_hardware()
+
+    print("[STARTUP] initializing rag")
+    init_rag()
+
+    try:
+        await register_device()
+    except Exception as e:
+        print(f"[REGISTER] initial register failed: {e}")
+        send_or_queue_log("warning", "register_failed", f"Initial register failed: {e}")
+
+    asyncio.create_task(config_loop())
+    asyncio.create_task(heartbeat_loop())
+    asyncio.create_task(status_loop())
+    asyncio.create_task(flush_loop())
+    asyncio.create_task(command_loop())
+
+    print("[STARTUP] background loops started")
+    send_or_queue_log("info", "startup_complete", "Jetson agent startup complete")
+
+
+@app.get("/")
+async def serve_ui():
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await ui_manager.connect(websocket)
+    print("[WS] client connected")
+    try:
+        await websocket.send_json({
+            "type": "status",
+            "data": "Ready"
+        })
+        await websocket.send_json({
+            "type": "telemetry",
+            "cpu_percent": None,
+            "gpu_percent": None,
+            "db_name": LOCAL_DB_NAME,
+            "connection": "Connected to robot"
+        })
+
+        while True:
+            raw = await websocket.receive_text()
+            msg = raw.strip()
+            if not msg:
+                continue
+            await handle_user_message(msg)
+    except WebSocketDisconnect:
+        print("[WS] client disconnected")
+        ui_manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WS] error: {e}")
+        ui_manager.disconnect(websocket)
 
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="127.0.0.1", port=8000)

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AURA Edge App</title>
+    <title>AURA Core System</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="dashboard-page">
@@ -12,7 +12,7 @@
             <div class="aura-panel">
                 <div class="aura-text">
                     <h1 class="aura-title">AURA Edge Terminal</h1>
-                    <span class="aura-sub">Jetson Orin Nano Local Touchscreen App</span>
+                    <span class="aura-sub">Jetson Orin Nano Local Processing</span>
                 </div>
                 <div id="status-badge" class="status-indicator">Booting...</div>
             </div>
@@ -46,28 +46,21 @@
             </div>
         </div>
 
-        <div class="control-card">
-            <div class="control-title">Touch Controls</div>
-            <div class="dpad">
-                <button class="dpad-btn" data-move="forward">Forward</button>
-                <div class="dpad-row">
-                    <button class="dpad-btn" data-move="left">Left</button>
-                    <button class="dpad-btn stop" data-move="stop">Stop</button>
-                    <button class="dpad-btn" data-move="right">Right</button>
-                </div>
-                <button class="dpad-btn" data-move="backward">Backward</button>
-            </div>
-        </div>
-
         <main id="chat-container" class="chat-box"></main>
 
-        <div class="input-bar">
+        <div class="input-bar" style="margin-top: 16px; display: flex; gap: 10px;">
             <input
                 id="chat-input"
                 type="text"
                 placeholder="Type a message to AURA..."
+                style="flex: 1; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text); font-size: 16px;"
             />
-            <button id="send-btn">Send</button>
+            <button
+                id="send-btn"
+                style="padding: 14px 18px; border: none; border-radius: 12px; background: var(--accent); color: white; font-weight: 700; cursor: pointer;"
+            >
+                Send
+            </button>
         </div>
     </div>
     <script src="/static/script.js"></script>

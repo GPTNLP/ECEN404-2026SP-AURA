@@ -7,8 +7,6 @@ const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
   "http://127.0.0.1:9000";
 
-const DEFAULT_DEVICE_ID = "jetson-001";
-
 type TreeNode = {
   name: string;
   type: "dir" | "file";
@@ -85,7 +83,6 @@ export default function DatabasePage() {
     | "db-create"
     | "db-build"
     | "db-stats"
-    | "jetson-db"
   >("");
 
   // Documents
@@ -111,11 +108,6 @@ export default function DatabasePage() {
   const [activeDb, setActiveDb] = useState<string>("");
   const [newDbName, setNewDbName] = useState<string>("");
 
-  // Jetson selection
-  const [deviceId, setDeviceId] = useState<string>(DEFAULT_DEVICE_ID);
-  const [jetsonSelectedDb, setJetsonSelectedDb] = useState<string>("");
-  const [jetsonUpdatedTs, setJetsonUpdatedTs] = useState<number | null>(null);
-
   // Folder selection for DB build
   const [folderChecks, setFolderChecks] = useState<Record<string, boolean>>({});
   const [dbStats, setDbStats] = useState<any>(null);
@@ -135,6 +127,7 @@ export default function DatabasePage() {
   const renameRef = useRef<HTMLInputElement | null>(null);
   const moveRef = useRef<HTMLSelectElement | null>(null);
 
+  // ✅ always return a real Headers object
   const authHeaders = useMemo(() => {
     const h = new Headers();
     if (token) h.set("Authorization", `Bearer ${token}`);
@@ -146,6 +139,7 @@ export default function DatabasePage() {
 
   const selectedDir = selectedKind === "dir" ? selectedPath : dirname(selectedPath);
 
+  // Flatten folders for dropdowns
   const allFolders = useMemo(() => {
     const out: string[] = [];
     const walk = (node: TreeNode | null, parentPath: string) => {
@@ -159,19 +153,10 @@ export default function DatabasePage() {
         }
       }
     };
-    out.push("");
+    out.push(""); // Documents (root)
     walk(tree, "");
     return out;
   }, [tree]);
-
-  function formatJetsonUpdated(ts?: number | null) {
-    if (!ts) return "—";
-    try {
-      return new Date(ts * 1000).toLocaleString();
-    } catch {
-      return "—";
-    }
-  }
 
   const refreshTree = async () => {
     setBusy("tree");
@@ -180,11 +165,10 @@ export default function DatabasePage() {
         headers: authHeaders,
       });
       const data = (await res.json().catch(() => null)) as TreeResponse | null;
-      if (!res.ok) {
+      if (!res.ok)
         throw new Error(
           (data as any)?.detail ? (data as any).detail : "Failed to load documents tree"
         );
-      }
       setTree((data?.tree as TreeNode) || null);
     } catch (e: any) {
       setStatus(`❌ ${e?.message || String(e)}`);
@@ -199,92 +183,25 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
       setDbList(list);
-      setActiveDb((prev) => {
-        if (prev && list.includes(prev)) return prev;
-        return list[0] || "";
-      });
+      if (!activeDb && list.length) setActiveDb(list[0]);
     } catch {
       // ignore
-    }
-  };
-
-  const refreshJetsonSelectedDb = async (targetDeviceId = deviceId) => {
-    if (!targetDeviceId.trim()) return;
-
-    try {
-      const res = await fetch(
-        `${API_BASE}/api/devices/${encodeURIComponent(targetDeviceId)}/selected_db`,
-        { headers: authHeaders }
-      );
-      const data = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        throw new Error(data?.detail || "Failed to load Jetson selected DB");
-      }
-
-      setJetsonSelectedDb(typeof data?.selected_db === "string" ? data.selected_db : "");
-      setJetsonUpdatedTs(typeof data?.updated_ts === "number" ? data.updated_ts : null);
-    } catch (e: any) {
-      setJetsonSelectedDb("");
-      setJetsonUpdatedTs(null);
-      setStatus(`❌ ${e?.message || String(e)}`);
-    }
-  };
-
-  const setJetsonDb = async () => {
-    if (!deviceId.trim()) {
-      setStatus("❌ Enter a device ID first.");
-      return;
-    }
-
-    if (!activeDb.trim()) {
-      setStatus("❌ Choose a database first.");
-      return;
-    }
-
-    setBusy("jetson-db");
-    setStatus(`Setting "${activeDb}" for ${deviceId}…`);
-
-    try {
-      const headers = new Headers(authHeaders);
-      headers.set("Content-Type", "application/json");
-
-      const res = await fetch(
-        `${API_BASE}/api/devices/${encodeURIComponent(deviceId)}/selected_db`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ selected_db: activeDb }),
-        }
-      );
-
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(data?.detail || "Failed to set Jetson database");
-      }
-
-      setJetsonSelectedDb(activeDb);
-      setJetsonUpdatedTs(typeof data?.updated_ts === "number" ? data.updated_ts : null);
-      setStatus(`✅ Jetson "${deviceId}" now points to "${activeDb}"`);
-    } catch (e: any) {
-      setStatus(`❌ ${e?.message || String(e)}`);
-    } finally {
-      setBusy("");
     }
   };
 
   useEffect(() => {
     refreshTree();
     refreshDatabases();
-    refreshJetsonSelectedDb(DEFAULT_DEVICE_ID);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // keep renameValue synced when you click a new item
   useEffect(() => {
     setRenameValue(selected ? basename(selected.path) : "");
     setMoveTargetDir("");
   }, [selected?.kind, selected?.path]);
 
+  // Close context menu on click / escape / scroll
   useEffect(() => {
     if (!ctx.open) return;
 
@@ -304,6 +221,7 @@ export default function DatabasePage() {
     };
   }, [ctx.open]);
 
+  // ---------- Helpers: get node + folder contents ----------
   const getDirNode = (dirPath: string) => {
     if (!tree || tree.type !== "dir") return null;
     const parts = splitPath(dirPath);
@@ -332,12 +250,16 @@ export default function DatabasePage() {
     });
   }, [dirNode, selectedDir, contentsSearch]);
 
+  // ---------- Tree rendering ----------
   const toggle = (path: string) => {
     setExpanded((p) => ({ ...p, [path]: !p[path] }));
   };
   const isExpanded = (path: string) => expanded[path] ?? false;
 
-  const openCtxMenu = (e: React.MouseEvent, target: CtxTarget) => {
+  const openCtxMenu = (
+    e: React.MouseEvent,
+    target: CtxTarget
+  ) => {
     e.preventDefault();
     setCtx({
       open: true,
@@ -420,7 +342,11 @@ export default function DatabasePage() {
                 </label>
               </div>
 
-              {open && <div className="db-tree-children">{renderTree(ch, chPath)}</div>}
+              {open && (
+                <div className="db-tree-children">
+                  {renderTree(ch, chPath)}
+                </div>
+              )}
             </div>
           );
         })}
@@ -428,6 +354,7 @@ export default function DatabasePage() {
     );
   };
 
+  // ---------- Breadcrumbs ----------
   const crumbs = useMemo(() => {
     const parts = splitPath(selectedDir);
     const out: { label: string; path: string }[] = [{ label: "Documents", path: "" }];
@@ -444,6 +371,7 @@ export default function DatabasePage() {
     [folderChecks]
   );
 
+  // ---------- Documents actions ----------
   const doMkdir = async () => {
     const name = newFolderName.trim();
     if (!name) return;
@@ -548,7 +476,7 @@ export default function DatabasePage() {
 
   const doMoveToFolder = async () => {
     if (!selected) return;
-    const target = moveTargetDir;
+    const target = moveTargetDir; // "" Documents ok
     const src = selected.path;
     const dst = target ? `${target}/${basename(src)}` : basename(src);
     if (dst === src) return;
@@ -606,6 +534,7 @@ export default function DatabasePage() {
     }
   };
 
+  // ---------- DB actions ----------
   const loadDbStats = async (name: string) => {
     if (!name) return;
     setBusy("db-stats");
@@ -705,6 +634,7 @@ export default function DatabasePage() {
     }
   };
 
+  // ---------- Upload dropzone ----------
   const onDropFiles = (fileList: FileList) => {
     const dt = new DataTransfer();
     for (const f of selectedFiles) dt.items.add(f);
@@ -718,6 +648,7 @@ export default function DatabasePage() {
       : `${selected.kind.toUpperCase()}: (Documents)`
     : "None";
 
+  // ---------- Context menu actions ----------
   const ctxTarget = ctx.open ? ctx.target : null;
 
   const ctxOpenFolder = () => {
@@ -808,6 +739,7 @@ export default function DatabasePage() {
             </div>
 
             <div className="db-scroll">
+              {/* Documents root */}
               <div
                 className={`db-tree-row ${
                   selected?.kind === "dir" && selected?.path === "" ? "is-selected" : ""
@@ -835,13 +767,7 @@ export default function DatabasePage() {
                 </div>
               </div>
 
-              {tree ? (
-                isExpanded("") ? (
-                  renderTree(tree, "")
-                ) : null
-              ) : (
-                <div className="muted">No documents yet.</div>
-              )}
+              {tree ? (isExpanded("") ? renderTree(tree, "") : null) : <div className="muted">No documents yet.</div>}
             </div>
           </div>
 
@@ -867,6 +793,7 @@ export default function DatabasePage() {
               </div>
             </div>
 
+            {/* Breadcrumbs + quick create folder */}
             <div className="db-breadcrumb-row">
               <div className="db-breadcrumbs" aria-label="Breadcrumb">
                 {crumbs.map((c, idx) => (
@@ -900,6 +827,7 @@ export default function DatabasePage() {
               </div>
             </div>
 
+            {/* Upload */}
             <div
               className={`db-dropzone ${busy === "upload" ? "is-busy" : ""}`}
               onDragOver={(e) => e.preventDefault()}
@@ -924,18 +852,10 @@ export default function DatabasePage() {
                     onChange={(e) => setFiles(e.target.files)}
                     className="db-hidden-input"
                   />
-                  <button
-                    className="btn"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={busy !== ""}
-                  >
+                  <button className="btn" onClick={() => fileInputRef.current?.click()} disabled={busy !== ""}>
                     Browse
                   </button>
-                  <button
-                    className="btn btn-primary"
-                    onClick={doUpload}
-                    disabled={busy !== "" || selectedFiles.length === 0}
-                  >
+                  <button className="btn btn-primary" onClick={doUpload} disabled={busy !== "" || selectedFiles.length === 0}>
                     {busy === "upload" ? "Uploading…" : `Upload (${selectedFiles.length || 0})`}
                   </button>
                 </div>
@@ -964,6 +884,7 @@ export default function DatabasePage() {
               )}
             </div>
 
+            {/* Rename / Move */}
             <div className="db-two">
               <div className="db-box">
                 <div className="db-box-title">Rename</div>
@@ -1011,17 +932,14 @@ export default function DatabasePage() {
                         </option>
                       ))}
                   </select>
-                  <button
-                    className="btn"
-                    onClick={doMoveToFolder}
-                    disabled={busy !== "" || !selected || selected.path === ""}
-                  >
+                  <button className="btn" onClick={doMoveToFolder} disabled={busy !== "" || !selected || selected.path === ""}>
                     {busy === "move" ? "Moving…" : "Move"}
                   </button>
                 </div>
               </div>
             </div>
 
+            {/* Folder contents */}
             <div className="db-contents-head">
               <input
                 value={contentsSearch}
@@ -1126,45 +1044,6 @@ export default function DatabasePage() {
             </div>
 
             <div className="db-box">
-              <div className="db-box-title">Jetson database</div>
-
-              <div className="db-row" style={{ marginBottom: 10 }}>
-                <input
-                  value={deviceId}
-                  onChange={(e) => setDeviceId(e.target.value)}
-                  placeholder="device id"
-                  className="db-input"
-                  disabled={busy !== ""}
-                />
-              </div>
-
-              <div className="db-stat">
-                current: <b>{jetsonSelectedDb || "—"}</b>
-              </div>
-              <div className="db-mini" style={{ marginBottom: 10 }}>
-                Updated: <b>{formatJetsonUpdated(jetsonUpdatedTs)}</b>
-              </div>
-
-              <div className="db-row">
-                <button
-                  className="btn"
-                  disabled={busy !== "" || !deviceId.trim()}
-                  onClick={() => refreshJetsonSelectedDb(deviceId)}
-                >
-                  {busy === "jetson-db" ? "Working…" : "Refresh Jetson DB"}
-                </button>
-
-                <button
-                  className="btn btn-primary"
-                  disabled={busy !== "" || !activeDb || !deviceId.trim()}
-                  onClick={setJetsonDb}
-                >
-                  {busy === "jetson-db" ? "Saving…" : `Use "${activeDb || "DB"}" on Jetson`}
-                </button>
-              </div>
-            </div>
-
-            <div className="db-box">
               <div className="db-box-title">Create new DB</div>
               <div className="db-row">
                 <input
@@ -1181,29 +1060,22 @@ export default function DatabasePage() {
 
             <div className="db-box">
               <div className="db-box-title">Build / Rebuild</div>
-              <button
-                className="btn btn-primary"
-                disabled={busy !== "" || !activeDb}
-                onClick={doBuildDb}
-                style={{ width: "100%" }}
-              >
+              <button className="btn btn-primary" disabled={busy !== "" || !activeDb} onClick={doBuildDb} style={{ width: "100%" }}>
                 {busy === "db-build" ? "Building…" : `Build "${activeDb || "DB"}"`}
               </button>
-              <div className="db-mini">Builds from included folders (force rebuild).</div>
+              <div className="db-mini">Builds from included folders (force </div>
+              <div className="db-mini">rebuild).</div>
             </div>
 
             {dbStats && (
               <div className="db-box">
                 <div className="db-box-title">Stats</div>
-                <div className="db-stat">
-                  chunks: <b>{humanCount(dbStats?.stats?.chunk_count ?? 0)}</b>
-                </div>
+                <div className="db-stat">chunks: <b>{humanCount(dbStats?.stats?.chunk_count ?? 0)}</b></div>
                 <div className="db-stat">
                   file: <span className="db-mono db-wrap">{dbStats?.stats?.vdb_path || "-"}</span>
                 </div>
                 <div className="db-stat">
-                  model: <b>{dbStats?.config?.llm_model || "-"}</b> · embed:{" "}
-                  <b>{dbStats?.config?.embed_model || "-"}</b>
+                  model: <b>{dbStats?.config?.llm_model || "-"}</b> · embed: <b>{dbStats?.config?.embed_model || "-"}</b>
                 </div>
               </div>
             )}
@@ -1214,6 +1086,7 @@ export default function DatabasePage() {
           </div>
         </div>
 
+        {/* Context Menu */}
         {ctx.open && ctx.target && (
           <div
             className="db-ctx"
@@ -1253,6 +1126,7 @@ export default function DatabasePage() {
           </div>
         )}
 
+        {/* Delete Modal */}
         {deleteOpen && selected && selected.path !== "" && (
           <div className="db-modal-overlay" onClick={() => setDeleteOpen(false)}>
             <div className="card db-modal" onClick={(e) => e.stopPropagation()}>

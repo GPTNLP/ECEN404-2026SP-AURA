@@ -4,17 +4,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 JETSONLOCAL_DIR = BASE_DIR.parent
-
 STORAGE_DIR = JETSONLOCAL_DIR / "storage"
 LOGS_DIR = STORAGE_DIR / "logs"
 QUEUE_DIR = STORAGE_DIR / "queue"
 STATE_DIR = STORAGE_DIR / "state"
 STATIC_DIR = JETSONLOCAL_DIR / "static"
-
-# NEW: local vector DB layout
-VECTOR_DBS_DIR = STORAGE_DIR / "vector_dbs"
-TMP_DIR = STORAGE_DIR / "tmp"
-TMP_SOURCE_DIR = TMP_DIR / "source_downloads"
 
 ENV_PATH = JETSONLOCAL_DIR / ".env"
 if ENV_PATH.exists():
@@ -27,7 +21,7 @@ DEVICE_TYPE = os.getenv("DEVICE_TYPE", "jetson").strip()
 DEVICE_SHARED_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
 DEVICE_SOFTWARE_VERSION = os.getenv("DEVICE_SOFTWARE_VERSION", "0.1.0").strip()
 
-OLLAMA_READY_DEFAULT = os.getenv("OLLAMA_READY_DEFAULT", "false").lower() == "true"
+OLLAMA_READY_DEFAULT = os.getenv("OLLAMA_READY_DEFAULT", "true").lower() == "true"
 VECTOR_DB_READY_DEFAULT = os.getenv("VECTOR_DB_READY_DEFAULT", "true").lower() == "true"
 CAMERA_READY_DEFAULT = os.getenv("CAMERA_READY_DEFAULT", "true").lower() == "true"
 
@@ -39,26 +33,12 @@ OFFLINE_RETRY_SECONDS = int(os.getenv("DEVICE_OFFLINE_RETRY_SECONDS", "10"))
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/ttyUSB0")
 INPUT_MODE = os.getenv("INPUT_MODE", "keyboard").strip().lower()
 
-# local Jetson AI config
+# local Jetson demo / edge AI config
 DEFAULT_MODEL = os.getenv("AURA_LLM_MODEL", "llama3.2")
 EMBEDDING_MODEL = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
+LOCAL_DB_NAME = os.getenv("LOCAL_DB_NAME", "jetson_local_db")
 
-# legacy fallback if nothing is selected yet
-LOCAL_DB_NAME = os.getenv("LOCAL_DB_NAME", "jetson_local_db").strip()
-
-# New state files
-SELECTED_DB_FILE = STATE_DIR / "selected_db.json"
-DB_SYNC_STATE_FILE = STATE_DIR / "db_sync_state.json"
-
-for p in [
-    STORAGE_DIR,
-    LOGS_DIR,
-    QUEUE_DIR,
-    STATE_DIR,
-    VECTOR_DBS_DIR,
-    TMP_DIR,
-    TMP_SOURCE_DIR,
-]:
+for p in [STORAGE_DIR, LOGS_DIR, QUEUE_DIR, STATE_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 AGENT_LOG_FILE = LOGS_DIR / "agent.jsonl"

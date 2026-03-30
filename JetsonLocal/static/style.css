@@ -45,7 +45,7 @@ body {
 }
 
 .dashboard-page {
-    padding: 18px;
+    padding: 24px;
     min-height: 100vh;
 }
 
@@ -54,13 +54,13 @@ body {
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    min-height: calc(100vh - 36px);
+    min-height: calc(100vh - 48px);
 }
 
 .aura-header {
     display: flex;
     justify-content: space-between;
-    margin-bottom: 14px;
+    margin-bottom: 18px;
 }
 
 .aura-panel {
@@ -130,7 +130,7 @@ body {
 }
 
 .dashboard-cards {
-    margin-bottom: 14px;
+    margin-bottom: 20px;
 }
 
 .filo-grid {
@@ -166,55 +166,6 @@ body {
     word-break: break-word;
 }
 
-.control-card {
-    background: var(--card-bg);
-    border: 1px solid var(--card-border);
-    border-radius: var(--card-radius);
-    padding: 16px;
-    box-shadow: var(--shadow);
-    margin-bottom: 14px;
-}
-
-.control-title {
-    font-size: 16px;
-    font-weight: 800;
-    margin-bottom: 12px;
-}
-
-.dpad {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-}
-
-.dpad-row {
-    display: flex;
-    gap: 10px;
-}
-
-.dpad-btn {
-    min-width: 110px;
-    min-height: 58px;
-    padding: 14px 18px;
-    border: none;
-    border-radius: 14px;
-    background: var(--accent);
-    color: white;
-    font-weight: 800;
-    font-size: 16px;
-    box-shadow: var(--shadow);
-    cursor: pointer;
-}
-
-.dpad-btn:active {
-    transform: scale(0.98);
-}
-
-.dpad-btn.stop {
-    background: #444;
-}
-
 .chat-box {
     flex-grow: 1;
     background: var(--card-bg);
@@ -226,7 +177,7 @@ body {
     flex-direction: column;
     gap: 15px;
     box-shadow: var(--shadow);
-    min-height: 280px;
+    min-height: 420px;
 }
 
 .empty-state {
@@ -297,32 +248,6 @@ body {
     margin-top: 6px;
 }
 
-.input-bar {
-    margin-top: 14px;
-    display: flex;
-    gap: 10px;
-}
-
-.input-bar input {
-    flex: 1;
-    padding: 14px 16px;
-    border-radius: 12px;
-    border: 1px solid var(--card-border);
-    background: var(--card-bg);
-    color: var(--text);
-    font-size: 16px;
-}
-
-.input-bar button {
-    padding: 14px 18px;
-    border: none;
-    border-radius: 12px;
-    background: var(--accent);
-    color: white;
-    font-weight: 700;
-    cursor: pointer;
-}
-
 @media (max-width: 900px) {
     .filo-grid {
         grid-template-columns: 1fr;
@@ -339,11 +264,5 @@ body {
 
     .bubble {
         max-width: 92%;
-    }
-
-    .dpad-btn {
-        min-width: 88px;
-        min-height: 52px;
-        font-size: 15px;
     }
 }

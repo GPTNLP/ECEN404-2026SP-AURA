@@ -7,7 +7,7 @@ import math
 import re
 from typing import List, Optional, Dict, Any, Tuple, Iterable
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Request, Header
+from fastapi import Form, APIRouter, UploadFile, File, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -38,9 +38,11 @@ except Exception:
 # ---------------------------
 # Paths / env
 # ---------------------------
+# Prefer Azure persistent paths if set
 DOCS_ABS = (os.getenv("AURA_DOCUMENTS_DIR", "") or "").strip()
 DBS_ABS = (os.getenv("AURA_DATABASES_DIR", "") or "").strip()
 
+# Backwards compatibility (older env names)
 DOCS_REL_OR_ABS = (os.getenv("AURA_DOCS_DIR", "storage/documents") or "").strip()
 DB_REL_OR_ABS = (os.getenv("AURA_DB_DIR", "storage/databases") or "").strip()
 
@@ -61,11 +63,12 @@ DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2:3b")
 DEFAULT_EMBED = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
 
-DEFAULT_CHAT_MODE = os.getenv("AURA_CHAT_MODE", "vector")
+DEFAULT_CHAT_MODE = os.getenv("AURA_CHAT_MODE", "vector")  # vector|bm25|hybrid (only used in LightRAG mode)
 DEFAULT_TOP_K = int(os.getenv("AURA_TOP_K", "4"))
 
+# Feature flag: allow LightRAG only if explicitly enabled (recommended)
+# On Azure, set AURA_ENABLE_RAG=0 (or leave unset)
 AURA_ENABLE_RAG = os.getenv("AURA_ENABLE_RAG", "0").strip() == "1"
-DEVICE_SHARED_SECRET = (os.getenv("DEVICE_SHARED_SECRET", "") or "").strip()
 
 # ---------------------------
 # Auth helpers
@@ -81,113 +84,178 @@ def require_any_user(request: Request) -> Dict[str, Any]:
     return require_auth(request)
 
 def require_admin(request: Request) -> Dict[str, Any]:
-    payload = require_any_user(request)
-    if _role(payload) != "admin":
+    require_ip_allowlist(request)
+    p = require_auth(request)
+    if _role(p) != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
-    return payload
+    return p
 
 def require_admin_or_ta(request: Request) -> Dict[str, Any]:
-    payload = require_any_user(request)
-    if _role(payload) not in ("admin", "ta"):
-        raise HTTPException(status_code=403, detail="Admin/TA only")
-    return payload
+    require_ip_allowlist(request)
+    p = require_auth(request)
+    if _role(p) not in ("admin", "ta"):
+        raise HTTPException(status_code=403, detail="Admin or TA only")
+    return p
 
-def require_device_secret(x_device_secret: Optional[str]):
-    expected = DEVICE_SHARED_SECRET
-    got = (x_device_secret or "").strip()
-    if not expected:
-        raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET is not configured on backend")
-    if got != expected:
-        raise HTTPException(status_code=403, detail="Invalid device secret")
+def require_owner_or_admin(request: Request, rel_path: str) -> Dict[str, Any]:
+    """
+    For file operations: admin can do anything.
+    TA can only modify/delete/move files they uploaded.
+    Students can't do file ops.
+    """
+    require_ip_allowlist(request)
+    p = require_auth(request)
+    r = _role(p)
+    if r == "admin":
+        return p
+    if r != "ta":
+        raise HTTPException(status_code=403, detail="Admin or TA only")
 
-def require_user_or_device(request: Request, x_device_secret: Optional[str] = None):
-    if x_device_secret:
-        require_device_secret(x_device_secret)
-        return {"role": "device", "sub": "device"}
-    return require_any_user(request)
+    rel_path_norm = (rel_path or "").replace("\\", "/").lstrip("/")
+    owner = doc_get_owner(rel_path_norm)
+    if not owner:
+        raise HTTPException(status_code=403, detail="File has no owner record (admin only)")
+    if (owner.get("owner_email") or "").strip().lower() != _email(p):
+        raise HTTPException(status_code=403, detail="TA can only modify files they uploaded")
+    return p
 
 # ---------------------------
-# Safe path helpers
+# Path helpers
 # ---------------------------
 def _safe_join(root: str, rel: str) -> str:
     rel = (rel or "").replace("\\", "/").lstrip("/")
-    full = os.path.normpath(os.path.join(root, rel))
-    root_norm = os.path.normpath(root)
-    if not (full == root_norm or full.startswith(root_norm + os.sep)):
+    full = os.path.abspath(os.path.join(root, rel))
+    root_abs = os.path.abspath(root)
+    if not full.startswith(root_abs):
         raise HTTPException(status_code=400, detail="Invalid path")
     return full
 
-def _walk_tree(base: str, rel: str = "") -> Dict[str, Any]:
-    cur = _safe_join(base, rel)
-    name = os.path.basename(cur) if rel else "documents"
-    node = {
-        "name": name,
-        "path": rel.replace("\\", "/"),
-        "kind": "dir",
-        "children": [],
-    }
+def _db_dir(db_name: str) -> str:
+    if not db_name or any(c in db_name for c in r'\/:*?"<>|'):
+        raise HTTPException(status_code=400, detail="Invalid database name")
+    return os.path.join(RAG_ROOT_DIR, db_name)
 
-    try:
-        entries = sorted(os.listdir(cur), key=lambda x: x.lower())
-    except Exception:
-        entries = []
+def _db_config_path(db_name: str) -> str:
+    return os.path.join(_db_dir(db_name), "db.json")
 
-    for entry in entries:
-        entry_rel = f"{rel}/{entry}".strip("/")
-        full = os.path.join(cur, entry)
-        if os.path.isdir(full):
-            node["children"].append(_walk_tree(base, entry_rel))
-        else:
-            node["children"].append(
-                {
-                    "name": entry,
-                    "path": entry_rel.replace("\\", "/"),
-                    "kind": "file",
-                    "size": os.path.getsize(full) if os.path.exists(full) else 0,
-                }
-            )
-    return node
+def _db_workdir(db_name: str) -> str:
+    return _db_dir(db_name)
 
-# ---------------------------
-# DB paths
-# ---------------------------
-def _db_dir(name: str) -> str:
-    return _safe_join(RAG_ROOT_DIR, name)
+def _db_chunks_path(db_name: str) -> str:
+    # Azure-safe simple index storage
+    return os.path.join(_db_dir(db_name), "chunks.jsonl")
 
-def _db_config_path(name: str) -> str:
-    return os.path.join(_db_dir(name), "db.json")
+def _db_stats_path(db_name: str) -> str:
+    return os.path.join(_db_dir(db_name), "stats.json")
 
-def _db_stats_path(name: str) -> str:
-    return os.path.join(_db_dir(name), "stats.json")
-
-def _db_workdir(name: str) -> str:
-    return _db_dir(name)
-
-def _db_manifest_path(name: str) -> str:
-    return os.path.join(_db_dir(name), "source_manifest.json")
-
-def _load_db_config(name: str) -> Dict[str, Any]:
-    p = _db_config_path(name)
+def _load_db_config(db_name: str) -> Dict[str, Any]:
+    p = _db_config_path(db_name)
     if not os.path.exists(p):
         raise HTTPException(status_code=404, detail="Database not found")
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _save_db_config(db_name: str, cfg: Dict[str, Any]):
+    os.makedirs(_db_dir(db_name), exist_ok=True)
+    with open(_db_config_path(db_name), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+# ---------------------------
+# Reading + chunking
+# ---------------------------
+def _read_pdf(path: str) -> str:
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            if txt.strip():
+                parts.append(txt)
+        return "\n\n".join(parts)
     except Exception:
-        raise HTTPException(status_code=500, detail="Invalid database config")
+        return ""
 
-def _save_db_config(name: str, cfg: Dict[str, Any]):
-    os.makedirs(_db_dir(name), exist_ok=True)
-    with open(_db_config_path(name), "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+def _read_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 
-def _save_simple_stats(name: str, stats: Dict[str, Any]):
-    os.makedirs(_db_dir(name), exist_ok=True)
-    with open(_db_stats_path(name), "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+def _chunk_text(text: str, max_chars: int = 2400, overlap: int = 250) -> List[str]:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+    chunks = []
+    i = 0
+    n = len(text)
+    while i < n:
+        j = min(n, i + max_chars)
+        chunk = text[i:j].strip()
+        if chunk:
+            chunks.append(chunk)
+        if j >= n:
+            break
+        i = max(0, j - overlap)
+    return chunks
 
-def _load_simple_stats(name: str) -> Dict[str, Any]:
-    p = _db_stats_path(name)
+def _walk_tree(root: str) -> Dict[str, Any]:
+    def build(node_path: str) -> Dict[str, Any]:
+        name = os.path.basename(node_path) or "documents"
+        if os.path.isdir(node_path):
+            children = []
+            for item in sorted(os.listdir(node_path)):
+                children.append(build(os.path.join(node_path, item)))
+            return {"name": name, "type": "dir", "children": children}
+        return {"name": name, "type": "file"}
+    return build(root)
+
+# ---------------------------
+# Azure-safe lightweight search index (no external deps)
+# ---------------------------
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+
+def _tokenize(s: str) -> List[str]:
+    return [t.lower() for t in _TOKEN_RE.findall(s or "") if t]
+
+def _score_overlap(query_tokens: List[str], text_tokens: List[str]) -> float:
+    if not query_tokens or not text_tokens:
+        return 0.0
+    qset = set(query_tokens)
+    tset = set(text_tokens)
+    inter = len(qset & tset)
+    # small length-normalization so huge chunks don't always win
+    return inter / math.sqrt(max(1.0, float(len(tset))))
+
+def _write_chunks(db_name: str, records: Iterable[Dict[str, Any]]) -> int:
+    path = _db_chunks_path(db_name)
+    os.makedirs(_db_dir(db_name), exist_ok=True)
+    n = 0
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            n += 1
+    return n
+
+def _read_chunks(db_name: str) -> List[Dict[str, Any]]:
+    path = _db_chunks_path(db_name)
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+def _save_simple_stats(db_name: str, stats: Dict[str, Any]):
+    with open(_db_stats_path(db_name), "w", encoding="utf-8") as f:
+        json.dump(stats, f, indent=2)
+
+def _load_simple_stats(db_name: str) -> Dict[str, Any]:
+    p = _db_stats_path(db_name)
     if not os.path.exists(p):
         return {"chunk_count": 0, "files_found": 0, "skipped_files": 0, "mode": "simple"}
     try:
@@ -197,12 +265,13 @@ def _load_simple_stats(name: str) -> Dict[str, Any]:
         return {"chunk_count": 0, "files_found": 0, "skipped_files": 0, "mode": "simple"}
 
 # ---------------------------
-# LightRAG cache
+# LightRAG cache (Jetson/local)
 # ---------------------------
 _RAG_CACHE: Dict[str, Tuple[Any, float]] = {}
 _RAG_CACHE_TTL_S = float(os.getenv("AURA_RAG_CACHE_TTL_S", "3600"))
 
 def _get_rag(db_name: str):
+    # Only if explicitly enabled + import exists
     if not (AURA_ENABLE_RAG and HAS_RAG):
         raise RuntimeError("RAG disabled")
 
@@ -252,106 +321,42 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
 
 # ---------------------------
-# Text / chunking helpers
-# ---------------------------
-def _read_text(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception:
-        return ""
-
-def _read_pdf(path: str) -> str:
-    try:
-        reader = PdfReader(path)
-        parts: List[str] = []
-        for page in reader.pages:
-            try:
-                parts.append(page.extract_text() or "")
-            except Exception:
-                pass
-        return "\n".join(parts)
-    except Exception:
-        return ""
-
-def _chunk_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> List[str]:
-    text = (text or "").strip()
-    if not text:
-        return []
-
-    chunks: List[str] = []
-    i = 0
-    n = len(text)
-
-    while i < n:
-        j = min(n, i + chunk_size)
-        chunk = text[i:j].strip()
-        if chunk:
-            chunks.append(chunk)
-        if j >= n:
-            break
-        i = max(i + 1, j - overlap)
-
-    return chunks
-
-# ---------------------------
-# Manifest helpers
-# ---------------------------
-def _collect_db_source_files(folders: List[str]) -> List[str]:
-    found: List[str] = []
-    for folder in folders:
-        base = _safe_join(DOCUMENTS_DIR, folder)
-        if not os.path.exists(base) or not os.path.isdir(base):
-            continue
-        for root, _, files in os.walk(base):
-            for fn in sorted(files):
-                ext = os.path.splitext(fn)[1].lower()
-                if ext in [".pdf", ".txt", ".md"]:
-                    full = os.path.join(root, fn)
-                    rel = os.path.relpath(full, DOCUMENTS_DIR).replace("\\", "/")
-                    found.append(rel)
-    return sorted(found)
-
-def _save_source_manifest(db_name: str, folders: List[str], files: List[str]):
-    payload = {
-        "db": db_name,
-        "folders": folders,
-        "files": files,
-        "updated_ts": int(time.time()),
-    }
-    with open(_db_manifest_path(db_name), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-def _load_source_manifest(db_name: str) -> Dict[str, Any]:
-    p = _db_manifest_path(db_name)
-    if not os.path.exists(p):
-        cfg = _load_db_config(db_name)
-        folders = list(cfg.get("folders") or [])
-        files = _collect_db_source_files(folders)
-        _save_source_manifest(db_name, folders, files)
-    try:
-        with open(_db_manifest_path(db_name), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        cfg = _load_db_config(db_name)
-        folders = list(cfg.get("folders") or [])
-        files = _collect_db_source_files(folders)
-        payload = {"db": db_name, "folders": folders, "files": files, "updated_ts": int(time.time())}
-        return payload
-
-# ---------------------------
 # Endpoints: Documents
 # ---------------------------
 @router.get("/api/documents/download")
-def download_document(
-    path: str,
-    request: Request,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-):
-    require_user_or_device(request, x_device_secret)
+def download_document(path: str, request: Request):
+    require_any_user(request) # Or require_device_secret if Jetson is pulling
     full_path = _safe_join(DOCUMENTS_DIR, path)
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(full_path)
+
+@router.post("/api/databases/{db_name}/sync_up")
+async def sync_db_up(db_name: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret"),
+                     files: List[UploadFile] = File(...)):
+    # Verify device secret here
+    db_dir = _db_dir(db_name)
+    os.makedirs(db_dir, exist_ok=True)
+    
+    saved = []
+    for f in files:
+        if f.filename in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
+            out = os.path.join(db_dir, f.filename)
+            with open(out, "wb") as w:
+                w.write(await f.read())
+            saved.append(f.filename)
+            
+    return {"ok": True, "saved": saved}
+
+@router.get("/api/databases/{db_name}/sync_down/{filename}")
+def sync_db_down(db_name: str, filename: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret")):
+    # Verify device secret
+    if filename not in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
+        raise HTTPException(status_code=400, detail="Invalid vector file")
+        
+    full_path = os.path.join(_db_dir(db_name), filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Vector file not found")
     return FileResponse(full_path)
 
 @router.get("/api/documents/tree")
@@ -393,85 +398,53 @@ def documents_delete(request: Request, path: str):
     rel_norm = (path or "").replace("\\", "/").lstrip("/")
     full = _safe_join(DOCUMENTS_DIR, path)
     if not os.path.exists(full):
-        raise HTTPException(status_code=404, detail="Path not found")
-
-    payload = require_admin_or_ta(request)
-    role = _role(payload)
-    email = _email(payload)
-
-    owner = doc_get_owner(rel_norm)
-
-    if os.path.isfile(full):
-        if role != "admin":
-            if not owner or owner.get("owner_email") != email:
-                raise HTTPException(status_code=403, detail="You can only delete your own uploaded files")
-        try:
-            os.remove(full)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
-        doc_delete_owner(rel_norm)
-        return {"ok": True, "deleted": rel_norm}
+        raise HTTPException(status_code=404, detail="Not found")
 
     if os.path.isdir(full):
-        if role != "admin":
-            raise HTTPException(status_code=403, detail="Only admins can delete folders")
-        try:
-            shutil.rmtree(full)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
-        return {"ok": True, "deleted": rel_norm}
+        require_admin(request)
+        shutil.rmtree(full)
+        return {"ok": True, "deleted": path}
 
-    raise HTTPException(status_code=400, detail="Unsupported path type")
+    require_owner_or_admin(request, rel_norm)
+    os.remove(full)
+    doc_delete_owner(rel_norm)
+    return {"ok": True, "deleted": path}
 
 @router.post("/api/documents/move")
 def documents_move(req: MoveRequest, request: Request):
-    payload = require_admin_or_ta(request)
-
     src_rel = (req.src or "").replace("\\", "/").lstrip("/")
     dst_rel = (req.dst or "").replace("\\", "/").lstrip("/")
 
-    if not src_rel or not dst_rel:
-        raise HTTPException(status_code=400, detail="src and dst required")
-
-    src = _safe_join(DOCUMENTS_DIR, src_rel)
-    dst = _safe_join(DOCUMENTS_DIR, dst_rel)
-
+    src = _safe_join(DOCUMENTS_DIR, req.src)
+    dst = _safe_join(DOCUMENTS_DIR, req.dst)
     if not os.path.exists(src):
-        raise HTTPException(status_code=404, detail="Source path not found")
-
-    role = _role(payload)
-    email = _email(payload)
-
-    if os.path.isfile(src):
-        owner = doc_get_owner(src_rel)
-        if role != "admin":
-            if not owner or owner.get("owner_email") != email:
-                raise HTTPException(status_code=403, detail="You can only move your own uploaded files")
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.move(src, dst)
-        doc_move_owner(src_rel, dst_rel)
-        return {"ok": True, "src": src_rel, "dst": dst_rel}
+        raise HTTPException(status_code=404, detail="Source not found")
 
     if os.path.isdir(src):
-        if role != "admin":
-            raise HTTPException(status_code=403, detail="Only admins can move folders")
+        require_admin(request)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.move(src, dst)
-        return {"ok": True, "src": src_rel, "dst": dst_rel}
+        return {"ok": True, "src": req.src, "dst": req.dst}
 
-    raise HTTPException(status_code=400, detail="Unsupported path type")
+    require_owner_or_admin(request, src_rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.move(src, dst)
+    doc_move_owner(src_rel, dst_rel)
+    return {"ok": True, "src": req.src, "dst": req.dst}
 
 # ---------------------------
-# Endpoints: DBs
+# Endpoints: Databases
 # ---------------------------
-@router.get("/api/databases/list")
+@router.get("/api/databases")
 def list_databases(request: Request):
     require_any_user(request)
     out = []
-    if os.path.exists(RAG_ROOT_DIR):
-        for name in sorted(os.listdir(RAG_ROOT_DIR)):
-            if os.path.exists(_db_config_path(name)):
-                out.append(name)
+    for name in sorted(os.listdir(RAG_ROOT_DIR)):
+        p = os.path.join(RAG_ROOT_DIR, name)
+        if not os.path.isdir(p):
+            continue
+        if os.path.exists(_db_config_path(name)):
+            out.append(name)
     return {"databases": out}
 
 @router.post("/api/databases/create")
@@ -487,10 +460,10 @@ def create_database(req: CreateDBRequest, request: Request):
         "llm_model": DEFAULT_LLM,
         "embed_model": DEFAULT_EMBED,
         "ollama_url": OLLAMA_URL,
+        # store current mode so UI can show it
         "engine": "lightrag" if (AURA_ENABLE_RAG and HAS_RAG) else "simple",
     }
     _save_db_config(req.name, cfg)
-    _save_source_manifest(req.name, req.folders, _collect_db_source_files(req.folders))
     _invalidate_rag(req.name)
     return {"ok": True, "db": req.name, "config": cfg}
 
@@ -504,6 +477,7 @@ def database_stats(db_name: str, request: Request):
     require_any_user(request)
     cfg = _load_db_config(db_name)
 
+    # Try LightRAG stats if enabled, otherwise simple stats
     if AURA_ENABLE_RAG and HAS_RAG:
         try:
             rag = _get_rag(db_name)
@@ -512,6 +486,7 @@ def database_stats(db_name: str, request: Request):
             pass
 
     simple_stats = _load_simple_stats(db_name)
+    # Match your UI expectations: stats.chunk_count + config + vdb_path field
     return {
         "db": db_name,
         "config": cfg,
@@ -537,6 +512,7 @@ async def build_database(req: BuildDBRequest, request: Request):
     workdir = _db_workdir(req.name)
     os.makedirs(workdir, exist_ok=True)
 
+    # Collect indexable files
     all_files: List[str] = []
     for folder in folders:
         base = _safe_join(DOCUMENTS_DIR, folder)
@@ -552,6 +528,7 @@ async def build_database(req: BuildDBRequest, request: Request):
     if not all_files:
         raise HTTPException(status_code=400, detail="No indexable files (.pdf/.txt/.md) found")
 
+    # If LightRAG is enabled and available, use it (Jetson/local)
     if AURA_ENABLE_RAG and HAS_RAG:
         try:
             rag = _get_rag(req.name)
@@ -579,7 +556,6 @@ async def build_database(req: BuildDBRequest, request: Request):
             cfg["folders"] = folders
             cfg["engine"] = "lightrag"
             _save_db_config(req.name, cfg)
-            _save_source_manifest(req.name, folders, _collect_db_source_files(folders))
 
             try:
                 rag.flush()
@@ -600,17 +576,20 @@ async def build_database(req: BuildDBRequest, request: Request):
                 "engine": "lightrag",
             }
         except Exception as e:
+            # Fall through to simple engine if Ollama is unreachable etc.
+            # But keep a useful message in logs.
             print(f"[database_api] LightRAG build failed, falling back to simple. Error: {e}")
 
+    # Azure-safe SIMPLE build (no Ollama, no extra deps)
     inserted_chunks = 0
     skipped_files = 0
-
-    chunks_out: List[Dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
 
     for path in sorted(all_files):
         ext = os.path.splitext(path)[1].lower()
         text = _read_pdf(path) if ext == ".pdf" else _read_text(path)
-        if not text.strip():
+
+        if not (text or "").strip():
             skipped_files += 1
             continue
 
@@ -619,106 +598,116 @@ async def build_database(req: BuildDBRequest, request: Request):
         chunks = _chunk_text(header + text)
 
         for c in chunks:
-            chunks_out.append({"text": c, "meta": {"source": rel_source}})
+            records.append({"source": rel_source, "text": c})
             inserted_chunks += 1
 
-    chunks_path = os.path.join(workdir, "chunks.jsonl")
-    with open(chunks_path, "w", encoding="utf-8") as f:
-        for row in chunks_out:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if inserted_chunks == 0:
+        raise HTTPException(status_code=400, detail="No readable text found in indexable files")
 
-    stats = {
-        "chunk_count": inserted_chunks,
-        "files_found": len(all_files),
-        "skipped_files": skipped_files,
-        "mode": "simple",
-        "vdb_path": workdir,
-        "updated_ts": int(time.time()),
-    }
-    _save_simple_stats(req.name, stats)
+    if req.force:
+        # explicitly remove old simple index files
+        try:
+            if os.path.exists(_db_chunks_path(req.name)):
+                os.remove(_db_chunks_path(req.name))
+        except Exception:
+            pass
+        try:
+            if os.path.exists(_db_stats_path(req.name)):
+                os.remove(_db_stats_path(req.name))
+        except Exception:
+            pass
+
+    chunk_count = _write_chunks(req.name, records)
 
     cfg["folders"] = folders
     cfg["engine"] = "simple"
     _save_db_config(req.name, cfg)
-    _save_source_manifest(req.name, folders, _collect_db_source_files(folders))
+
+    simple_stats = {
+        "mode": "simple",
+        "chunk_count": chunk_count,
+        "files_found": len(all_files),
+        "skipped_files": skipped_files,
+        "built_ts": int(time.time()),
+    }
+    _save_simple_stats(req.name, simple_stats)
 
     return {
         "ok": True,
-        "status": "Database built",
+        "status": "Database built (simple)",
         "db": req.name,
         "folders": folders,
         "files_found": len(all_files),
         "skipped_files": skipped_files,
-        "inserted_chunks": inserted_chunks,
-        "stats": stats,
+        "inserted_chunks": chunk_count,
+        "stats": {"chunk_count": chunk_count, "vdb_path": _db_dir(req.name), "engine": "simple"},
         "engine": "simple",
     }
 
-@router.post("/api/databases/{db_name}/sync_up")
-async def sync_db_up(
-    db_name: str,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-    files: List[UploadFile] = File(...),
-):
-    require_device_secret(x_device_secret)
+@router.post("/api/databases/chat")
+async def database_chat(req: ChatRequest, request: Request):
+    require_any_user(request)
 
-    db_dir = _db_dir(db_name)
-    os.makedirs(db_dir, exist_ok=True)
+    # Prefer LightRAG if enabled and available
+    if AURA_ENABLE_RAG and HAS_RAG:
+        try:
+            rag = _get_rag(req.db)
+            mode = (req.mode or DEFAULT_CHAT_MODE).lower().strip()
+            top_k = int(req.top_k or DEFAULT_TOP_K)
+            top_k = max(1, min(top_k, 8))
+            param = QueryParam(mode=mode, top_k=top_k)
+            return await rag.aquery(req.query, param=param)
+        except HTTPException:
+            raise
+        except Exception:
+            # fall through to simple
+            pass
 
-    saved = []
-    allowed = {"faiss.index", "embeddings.npy", "meta.json", "db.json", "chunks.jsonl", "stats.json"}
+    # SIMPLE chat: retrieve top chunks by token overlap and return a structured answer
+    chunks = _read_chunks(req.db)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="Database has no built index yet. Click Build first.")
 
-    for f in files:
-        if f.filename in allowed:
-            out = os.path.join(db_dir, f.filename)
-            with open(out, "wb") as w:
-                w.write(await f.read())
-            saved.append(f.filename)
+    q = (req.query or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Query is empty")
 
-    return {"ok": True, "saved": saved, "db": db_name}
+    qtok = _tokenize(q)
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for r in chunks:
+        txt = str(r.get("text") or "")
+        score = _score_overlap(qtok, _tokenize(txt))
+        if score > 0:
+            scored.append((score, r))
 
-@router.get("/api/databases/{db_name}/sync_down/{filename}")
-def sync_db_down(
-    db_name: str,
-    filename: str,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-):
-    require_device_secret(x_device_secret)
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:5] if scored else []
 
-    allowed = {"faiss.index", "embeddings.npy", "meta.json", "db.json", "chunks.jsonl", "stats.json"}
-    if filename not in allowed:
-        raise HTTPException(status_code=400, detail="Invalid vector file")
+    sources = []
+    context_snips = []
+    for s, r in top:
+        src = str(r.get("source") or "")
+        if src and src not in sources:
+            sources.append(src)
+        # keep snippet short-ish
+        t = str(r.get("text") or "")
+        t = t.replace("\n", " ").strip()
+        context_snips.append(t[:500])
 
-    full_path = os.path.join(_db_dir(db_name), filename)
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="Vector file not found")
-    return FileResponse(full_path)
+    if not top:
+        return {
+            "answer": "I couldn’t find anything relevant in the indexed documents for that query.",
+            "sources": [],
+            "engine": "simple",
+        }
 
-@router.get("/api/databases/{db_name}/source_manifest")
-def get_source_manifest(
-    db_name: str,
-    request: Request,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-):
-    require_user_or_device(request, x_device_secret)
-    cfg = _load_db_config(db_name)
-    folders = list(cfg.get("folders") or [])
-    files = _collect_db_source_files(folders)
-    _save_source_manifest(db_name, folders, files)
+    # Very basic “answer”: show best-matching snippets
+    answer = "Top matches from your documents:\n\n" + "\n\n".join(
+        [f"- {snip}" for snip in context_snips[:3]]
+    )
+
     return {
-        "ok": True,
-        "db": db_name,
-        "folders": folders,
-        "files": files,
-        "count": len(files),
-        "updated_ts": int(time.time()),
+        "answer": answer,
+        "sources": sources,
+        "engine": "simple",
     }
-
-@router.post("/api/databases/{db_name}/set_folders")
-def set_database_folders(db_name: str, req: CreateDBRequest, request: Request):
-    require_admin(request)
-    cfg = _load_db_config(db_name)
-    cfg["folders"] = req.folders
-    _save_db_config(db_name, cfg)
-    _save_source_manifest(db_name, req.folders, _collect_db_source_files(req.folders))
-    return {"ok": True, "db": db_name, "folders": req.folders}

@@ -183,6 +183,7 @@ export default function DashboardPage() {
           <FiloCard label="GPU Usage" value={fmt(extra?.gpu_percent, "%", 1)} sub="GPU load" />
           <FiloCard label="Uptime" value={formatUptime(extra?.uptime_seconds)} sub="Since boot" />
           <FiloCard label="Battery Voltage" value={fmt(s?.battery_voltage, " V", 2)} sub="Pack voltage" />
+          <FiloCard label="Charging" value={s?.charging == null ? "—" : s.charging ? "Yes" : "No"} sub="Charge state" />
         </div>
       </section>
 
