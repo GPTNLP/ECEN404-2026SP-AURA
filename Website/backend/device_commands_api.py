@@ -14,7 +14,7 @@ from security import require_role
 
 router = APIRouter(tags=["device_commands"])
 
-ALLOWED_COMMANDS = {"forward", "backward", "left", "right", "stop", "build_rag", "chat_prompt", "sync_vectors"}
+ALLOWED_COMMANDS = {"forward", "backward", "left", "right", "stop", "build_rag", "chat_prompt", "sync_vectors", "pitch", "yaw"}
 
 STORAGE_DIR = Path(os.getenv("LOG_DIR", Path(__file__).resolve().parent / "storage"))
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)

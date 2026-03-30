@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ESP32Servo.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Bluepad32.h>
@@ -36,6 +37,19 @@ Adafruit_PWMServoDriver pca9685 = Adafruit_PWMServoDriver(PCA9685_ADDR);
 const int HOME0_ANGLE = 134; 
 const int HOME1_ANGLE = 70;  
 const int HOME2_ANGLE = 90;  
+
+// Assuming 4 main shoulder joints for the 4 TARS segments
+const int PIN_OUTER_LEFT  = 18;
+const int PIN_INNER_LEFT  = 19;
+const int PIN_INNER_RIGHT = 21;
+const int PIN_OUTER_RIGHT = 22;
+
+Servo outerLeft;
+Servo innerLeft;
+Servo innerRight;
+Servo outerRight;
+
+const int BASE_ANGLE = 90;
 
 int servo0Angle = HOME0_ANGLE;
 int servo1Angle = HOME1_ANGLE;

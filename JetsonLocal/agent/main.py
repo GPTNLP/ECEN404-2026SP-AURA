@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+from pypdf import PdfReader
 
 import serial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -37,7 +38,7 @@ from heartbeat import build_heartbeat_payload
 from status import build_status_payload
 from device_info import collect_device_info
 
-from lightrag_local import LightRAG, OllamaClient, _read_pdf
+from lightrag_local import LightRAG, OllamaClient
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -133,6 +134,19 @@ def build_register_payload():
         "local_ip": info["local_ip"],
     }
 
+def _read_pdf(path: str) -> str:
+    """Extracts text from a PDF file."""
+    try:
+        reader = PdfReader(path)
+        parts = []
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            if txt.strip():
+                parts.append(txt)
+        return "\n\n".join(parts)
+    except Exception as e:
+        print(f"[PDF_READER] Error reading {path}: {e}")
+        return ""
 
 async def register_device():
     payload = build_register_payload()
@@ -225,10 +239,13 @@ async def command_loop():
                 payload = command.get("payload") or {}
                 print(f"[COMMAND] received: {cmd}")
 
-                if cmd in {"forward", "backward", "left", "right", "stop"}: #Movements
+                if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}: #Movements
                     if esp_serial:
                         try:
-                            serial_msg = f"MOVE:{cmd}\n"
+                            val = payload.get("value", "")
+                            
+                            # Format: "MOVE:pitch:15\n" or "MOVE:forward\n"
+                            serial_msg = f"MOVE:{cmd}:{val}\n" if val else f"MOVE:{cmd}\n"
                             esp_serial.write(serial_msg.encode("utf-8"))
                             print(f"[COMMAND] sent to ESP: {serial_msg.strip()}")
 
