@@ -1,17 +1,23 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "../styles/controlPage.css";
 
-// Added pitch and yaw to the allowed commands
-type MoveCmd = "forward" | "backward" | "left" | "right" | "stop" | "pitch" | "yaw";
+type MoveCmd =
+  | "forward"
+  | "backward"
+  | "left"
+  | "right"
+  | "stop"
+  | "pitch"
+  | "yaw";
 
-const API_BASE = "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
+const API_BASE =
+  "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
 const DEVICE_ID = "jetson-001";
 const LS_TOKEN = "aura-auth-token";
 
 async function sendMove(command: MoveCmd, value?: number) {
   const token = localStorage.getItem(LS_TOKEN);
 
-  // Construct the body. If a value is provided (for pitch/yaw), wrap it in the payload object.
   const bodyData: any = {
     device_id: DEVICE_ID,
     command,
@@ -45,28 +51,86 @@ async function sendMove(command: MoveCmd, value?: number) {
 }
 
 export default function ControlPage() {
-  // State for the sliders
   const [pitch, setPitch] = useState<number>(0);
   const [yaw, setYaw] = useState<number>(0);
 
-  // Helper to completely reset the robot's stance and zero out the sliders
+  const holdIntervalRef = useRef<number | null>(null);
+  const activeMoveRef = useRef<MoveCmd | null>(null);
+
+  const clearHoldInterval = useCallback(() => {
+    if (holdIntervalRef.current !== null) {
+      window.clearInterval(holdIntervalRef.current);
+      holdIntervalRef.current = null;
+    }
+  }, []);
+
+  const stopMove = useCallback(() => {
+    clearHoldInterval();
+    activeMoveRef.current = null;
+    sendMove("stop");
+  }, [clearHoldInterval]);
+
+  const startMove = useCallback(
+    (cmd: MoveCmd) => {
+      if (cmd === "stop" || cmd === "pitch" || cmd === "yaw") return;
+
+      if (activeMoveRef.current === cmd && holdIntervalRef.current !== null) {
+        return;
+      }
+
+      clearHoldInterval();
+      activeMoveRef.current = cmd;
+
+      sendMove(cmd);
+
+      holdIntervalRef.current = window.setInterval(() => {
+        sendMove(cmd);
+      }, 120);
+    },
+    [clearHoldInterval]
+  );
+
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (activeMoveRef.current) {
+        stopMove();
+      }
+    };
+
+    window.addEventListener("mouseup", handleGlobalRelease);
+    window.addEventListener("touchend", handleGlobalRelease);
+    window.addEventListener("touchcancel", handleGlobalRelease);
+
+    return () => {
+      window.removeEventListener("mouseup", handleGlobalRelease);
+      window.removeEventListener("touchend", handleGlobalRelease);
+      window.removeEventListener("touchcancel", handleGlobalRelease);
+      clearHoldInterval();
+    };
+  }, [clearHoldInterval, stopMove]);
+
   const handleStopAndReset = () => {
+    clearHoldInterval();
+    activeMoveRef.current = null;
     setPitch(0);
     setYaw(0);
-    sendMove("stop"); // The ESP32 code resets to BASE_ANGLE on 'stop'
+    sendMove("stop");
   };
 
   return (
     <div className="page">
       <div className="control-header">
         <h1>Robot Control</h1>
-        <p className="control-subtitle">Command the robot's movement and stance.</p>
+        <p className="control-subtitle">
+          Command the robot&apos;s movement and stance.
+        </p>
       </div>
 
-      <div className="control-grid" style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
-        
-        {/* Locomotion D-Pad (Existing) */}
-        <section className="control-card" style={{ flex: '1 1 300px' }}>
+      <div
+        className="control-grid"
+        style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}
+      >
+        <section className="control-card" style={{ flex: "1 1 300px" }}>
           <h2>Movement</h2>
           <div className="control-divider" />
 
@@ -74,7 +138,17 @@ export default function ControlPage() {
             <div className="dpad">
               <button
                 className="dpad-btn up"
-                onClick={() => sendMove("forward")}
+                onMouseDown={() => startMove("forward")}
+                onMouseUp={stopMove}
+                onMouseLeave={stopMove}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  startMove("forward");
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  stopMove();
+                }}
                 aria-label="Move forward"
               >
                 <span>▲</span>
@@ -82,7 +156,17 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn left"
-                onClick={() => sendMove("left")}
+                onMouseDown={() => startMove("left")}
+                onMouseUp={stopMove}
+                onMouseLeave={stopMove}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  startMove("left");
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  stopMove();
+                }}
                 aria-label="Move left"
               >
                 <span>◀</span>
@@ -98,7 +182,17 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn right"
-                onClick={() => sendMove("right")}
+                onMouseDown={() => startMove("right")}
+                onMouseUp={stopMove}
+                onMouseLeave={stopMove}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  startMove("right");
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  stopMove();
+                }}
                 aria-label="Move right"
               >
                 <span>▶</span>
@@ -106,7 +200,17 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn down"
-                onClick={() => sendMove("backward")}
+                onMouseDown={() => startMove("backward")}
+                onMouseUp={stopMove}
+                onMouseLeave={stopMove}
+                onTouchStart={(e) => {
+                  e.preventDefault();
+                  startMove("backward");
+                }}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  stopMove();
+                }}
                 aria-label="Move backward"
               >
                 <span>▼</span>
@@ -115,68 +219,111 @@ export default function ControlPage() {
           </div>
         </section>
 
-        {/* New Stance Control Section */}
-        <section className="control-card" style={{ flex: '1 1 300px' }}>
+        <section className="control-card" style={{ flex: "1 1 300px" }}>
           <h2>Stance Control</h2>
           <div className="control-divider" />
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', marginTop: '1rem' }}>
-            
-            {/* Pitch Control */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "1.5rem",
+              marginTop: "1rem",
+            }}
+          >
             <div className="slider-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <label style={{ fontWeight: 'bold' }}>Pitch (Tilt)</label>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginBottom: "0.5rem",
+                }}
+              >
+                <label style={{ fontWeight: "bold" }}>Pitch (Tilt)</label>
                 <span>{pitch}°</span>
               </div>
-              <input 
-                type="range" 
-                min="-45" 
-                max="45" 
-                value={pitch} 
-                onChange={(e) => setPitch(parseInt(e.target.value))}
-                style={{ width: '100%', marginBottom: '0.5rem' }}
+
+              <input
+                type="range"
+                min="-45"
+                max="45"
+                value={pitch}
+                onChange={(e) => setPitch(parseInt(e.target.value, 10))}
+                style={{ width: "100%", marginBottom: "0.5rem" }}
               />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#666' }}>
+
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontSize: "0.8rem",
+                  color: "#666",
+                }}
+              >
                 <span>Backward</span>
                 <span>Forward</span>
               </div>
-              <button 
+
+              <button
                 onClick={() => sendMove("pitch", pitch)}
-                style={{ marginTop: '0.5rem', width: '100%', padding: '0.5rem', cursor: 'pointer' }}
+                style={{
+                  marginTop: "0.5rem",
+                  width: "100%",
+                  padding: "0.5rem",
+                  cursor: "pointer",
+                }}
               >
                 Apply Pitch
               </button>
             </div>
 
-            {/* Yaw Control */}
             <div className="slider-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                <label style={{ fontWeight: 'bold' }}>Yaw (Pivot)</label>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginBottom: "0.5rem",
+                }}
+              >
+                <label style={{ fontWeight: "bold" }}>Yaw (Pivot)</label>
                 <span>{yaw}°</span>
               </div>
-              <input 
-                type="range" 
-                min="-45" 
-                max="45" 
-                value={yaw} 
-                onChange={(e) => setYaw(parseInt(e.target.value))}
-                style={{ width: '100%', marginBottom: '0.5rem' }}
+
+              <input
+                type="range"
+                min="-45"
+                max="45"
+                value={yaw}
+                onChange={(e) => setYaw(parseInt(e.target.value, 10))}
+                style={{ width: "100%", marginBottom: "0.5rem" }}
               />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: '#666' }}>
+
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontSize: "0.8rem",
+                  color: "#666",
+                }}
+              >
                 <span>Left</span>
                 <span>Right</span>
               </div>
-              <button 
+
+              <button
                 onClick={() => sendMove("yaw", yaw)}
-                style={{ marginTop: '0.5rem', width: '100%', padding: '0.5rem', cursor: 'pointer' }}
+                style={{
+                  marginTop: "0.5rem",
+                  width: "100%",
+                  padding: "0.5rem",
+                  cursor: "pointer",
+                }}
               >
                 Apply Yaw
               </button>
             </div>
-
           </div>
         </section>
-
       </div>
     </div>
   );

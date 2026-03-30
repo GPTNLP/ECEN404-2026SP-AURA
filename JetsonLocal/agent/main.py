@@ -73,7 +73,7 @@ rag_system = None
 esp_serial = None
 
 runtime_config = {
-    "poll_seconds": 5,
+    "poll_seconds": 0.08,
     "heartbeat_seconds": HEARTBEAT_SECONDS,
     "status_seconds": STATUS_SECONDS,
 }
@@ -310,6 +310,9 @@ async def config_loop():
 
 
 async def command_loop():
+    last_cmd = None
+    last_cmd_time = 0.0
+
     while True:
         try:
             result = await asyncio.to_thread(api.get_next_command, DEVICE_ID)
@@ -319,36 +322,65 @@ async def command_loop():
                 command_id = command.get("id")
                 cmd = (command.get("command") or "").strip().lower()
                 payload = command.get("payload") or {}
-                print(f"[COMMAND] received: {cmd} payload={payload}")
+                now = asyncio.get_event_loop().time()
 
-                if cmd in MOVEMENT_COMMANDS:
-                    try:
-                        ack_line = await asyncio.to_thread(send_serial_command, cmd)
+                print(f"[COMMAND] received: {cmd}")
 
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                            "note": f"ESP acknowledged {cmd}",
-                        })
+                if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}:
+                    if esp_serial:
+                        try:
+                            # prevent rapid duplicate spam for same command in tiny window
+                            if cmd == last_cmd and (now - last_cmd_time) < 0.04:
+                                await asyncio.to_thread(api.ack_command, {
+                                    "command_id": command_id,
+                                    "device_id": DEVICE_ID,
+                                    "status": "completed",
+                                    "note": f"Duplicate command skipped: {cmd}",
+                                })
+                            else:
+                                val = payload.get("value", "")
 
-                        send_or_queue_log(
-                            "info",
-                            "device_command_executed",
-                            f"Executed command: {cmd}",
-                            {
+                                if cmd in {"forward", "backward", "left", "right", "stop"}:
+                                    serial_msg = f"MOVE:{cmd}\n"
+                                else:
+                                    serial_msg = f"MOVE:{cmd}:{val}\n"
+
+                                esp_serial.write(serial_msg.encode("utf-8"))
+                                esp_serial.flush()
+                                print(f"[COMMAND] sent to ESP: {serial_msg.strip()}")
+
+                                last_cmd = cmd
+                                last_cmd_time = now
+
+                                await asyncio.to_thread(api.ack_command, {
+                                    "command_id": command_id,
+                                    "device_id": DEVICE_ID,
+                                    "status": "completed",
+                                    "note": f"Sent to ESP as {serial_msg.strip()}",
+                                })
+
+                                send_or_queue_log(
+                                    "info",
+                                    "device_command_executed",
+                                    f"Executed command: {cmd}",
+                                    {"command_id": command_id, "serial_message": serial_msg.strip()},
+                                )
+
+                        except Exception as e:
+                            print(f"[COMMAND] serial send failed: {e}")
+                            await asyncio.to_thread(api.ack_command, {
                                 "command_id": command_id,
-                                "serial_message": f"MOVE:{cmd}",
-                                "ack": ack_line,
-                            },
-                        )
-                    except Exception as e:
-                        print(f"[COMMAND] serial send failed: {e}")
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Serial send failed: {e}",
+                            })
+                    else:
+                        print("[COMMAND] ESP serial not connected")
                         await asyncio.to_thread(api.ack_command, {
                             "command_id": command_id,
                             "device_id": DEVICE_ID,
                             "status": "failed",
-                            "note": f"Serial send failed: {e}",
+                            "note": "ESP serial is not connected",
                         })
 
                 elif cmd == "chat_prompt":
@@ -357,6 +389,7 @@ async def command_loop():
                         try:
                             res = await rag_system.aquery(query)
                             ai_reply = res.get("answer", "No answer found.")
+
                             await asyncio.to_thread(api.ack_command, {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
@@ -378,40 +411,6 @@ async def command_loop():
                             "note": "RAG system offline or empty query"
                         })
 
-                elif cmd == "build_rag":
-                    db_name = payload.get("db_name", LOCAL_DB_NAME)
-                    paths = payload.get("paths", [])
-
-                    try:
-                        rag_system.reset()
-                        for path in paths:
-                            local_dest = os.path.join(STORAGE_DIR, "downloads", os.path.basename(path))
-                            os.makedirs(os.path.dirname(local_dest), exist_ok=True)
-
-                            await asyncio.to_thread(api.download_document, path, local_dest)
-                            text = _read_pdf(local_dest) if path.endswith(".pdf") else ""
-
-                            if text.strip():
-                                await rag_system.ainsert(text, meta={"source": path})
-
-                        rag_system.flush()
-
-                        await asyncio.to_thread(api.upload_vector_db, db_name, rag_system.working_dir)
-
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                            "note": f"Built {len(paths)} files and synced to Azure"
-                        })
-                    except Exception as e:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": str(e)
-                        })
-
                 else:
                     print(f"[COMMAND] invalid command ignored: {cmd}")
                     if command_id:
@@ -426,7 +425,6 @@ async def command_loop():
             print(f"[COMMAND] poll failed: {e}")
 
         await asyncio.sleep(runtime_config["poll_seconds"])
-
 
 async def parse_intent(user_msg: str):
     client = OllamaClient("http://127.0.0.1:11434", EMBEDDING_MODEL, DEFAULT_MODEL)
