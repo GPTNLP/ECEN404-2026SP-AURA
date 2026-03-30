@@ -8,7 +8,6 @@ from api_client import ApiClient
 from config import (
     AGENT_LOG_FILE,
     CAMERA_READY_DEFAULT,
-    CONFIG_REFRESH_SECONDS,
     DEVICE_ID,
     DEVICE_NAME,
     DEVICE_SOFTWARE_VERSION,
@@ -16,15 +15,12 @@ from config import (
     HEARTBEAT_SECONDS,
     INPUT_MODE,
     OFFLINE_RETRY_SECONDS,
-    OLLAMA_READY_DEFAULT,
     PENDING_LOGS_FILE,
     PENDING_STATUS_FILE,
     RUNTIME_FILE,
     SERIAL_PORT,
     STATUS_SECONDS,
-    VECTOR_DB_READY_DEFAULT,
 )
-from db_manager import DBManager
 
 try:
     import serial
@@ -81,7 +77,6 @@ FAST_MOVE_MAP = {
 class AuraJetsonAgent:
     def __init__(self):
         self.api = ApiClient()
-        self.db = DBManager(self.api)
 
         self.serial_conn = None
         self.serial_ready = False
@@ -92,7 +87,6 @@ class AuraJetsonAgent:
 
         self.last_heartbeat_ts = 0.0
         self.last_status_ts = 0.0
-        self.last_config_ts = 0.0
         self.last_command_ts = 0.0
 
         self.last_command_id: Optional[str] = None
@@ -100,7 +94,6 @@ class AuraJetsonAgent:
 
         self.runtime = _safe_read_json(Path(RUNTIME_FILE), {})
         self.runtime.setdefault("started_at", _now_ts())
-        self.runtime.setdefault("last_selected_db", self.db.get_active_db())
         self.runtime.setdefault("last_command", None)
         self.runtime.setdefault("last_command_at", None)
         self.runtime.setdefault("serial_port", SERIAL_PORT)
@@ -193,78 +186,6 @@ class AuraJetsonAgent:
             self.log_local("error", "serial", f"Serial write error: {e}")
             return False
 
-    def ensure_db_ready(self, db_name: str):
-        if not db_name:
-            return
-
-        if self.db.activate_if_local(db_name):
-            self.runtime["last_selected_db"] = db_name
-            self._save_runtime()
-            self.log_local("info", "db", f'Using cached local DB "{db_name}"')
-            return
-
-        self.log_local("info", "db", f'No local DB cache for "{db_name}", trying Azure vector sync')
-        self.db.write_sync_state(db_name, "downloading_vector_bundle")
-
-        db_dir = self.db.db_dir(db_name)
-        db_dir.mkdir(parents=True, exist_ok=True)
-
-        pulled_any = False
-        for fn in ["db.json", "meta.json", "embeddings.npy", "faiss.index", "chunks.jsonl", "stats.json"]:
-            dest = db_dir / fn
-            try:
-                self.api.download_vector_file(db_name, fn, str(dest))
-                pulled_any = True
-            except Exception:
-                pass
-
-        if pulled_any and self.db.activate_if_local(db_name):
-            self.runtime["last_selected_db"] = db_name
-            self._save_runtime()
-            self.log_local("info", "db", f'Pulled vector cache from Azure for "{db_name}"')
-            return
-
-        try:
-            manifest = self.api.get_source_manifest(db_name)
-            files = list(manifest.get("files") or [])
-            if files:
-                self.db.download_source_files(db_name, files)
-                self.db.write_sync_state(
-                    db_name,
-                    "source_docs_ready",
-                    "Source files downloaded. Waiting for local vector build step.",
-                )
-                self.log_local(
-                    "info",
-                    "db",
-                    f'Downloaded {len(files)} source files for "{db_name}" into temp storage',
-                )
-            else:
-                self.db.write_sync_state(db_name, "failed", "No vector files and no source files found")
-                self.log_local("error", "db", f'No vector files or source files found for "{db_name}"')
-        except Exception as e:
-            self.db.write_sync_state(db_name, "failed", str(e))
-            self.log_local("error", "db", f'Failed to prepare DB "{db_name}": {e}')
-
-    def refresh_selected_db(self):
-        try:
-            data = self.api.get_selected_db(DEVICE_ID)
-            if not isinstance(data, dict):
-                return
-
-            selected_db = str(data.get("selected_db") or "").strip()
-            if not selected_db:
-                return
-
-            current_db = self.db.get_active_db()
-            if selected_db != current_db:
-                self.log_local("info", "db_selection", f'Azure selected DB changed: "{current_db}" -> "{selected_db}"')
-                self.ensure_db_ready(selected_db)
-
-            self.last_config_ts = time.time()
-        except Exception as e:
-            self.log_local("error", "db_selection", f"Selected DB refresh failed: {e}")
-
     def make_register_payload(self) -> Dict[str, Any]:
         return {
             "device_id": DEVICE_ID,
@@ -280,11 +201,9 @@ class AuraJetsonAgent:
             "device_id": DEVICE_ID,
             "ts": _now_ts(),
             "software_version": DEVICE_SOFTWARE_VERSION,
-            "selected_db": self.db.get_active_db(),
         }
 
     def make_status_payload(self) -> Dict[str, Any]:
-        sync_state = self.db.read_sync_state()
         return {
             "device_id": DEVICE_ID,
             "ts": _now_ts(),
@@ -294,11 +213,6 @@ class AuraJetsonAgent:
             "serial_port": SERIAL_PORT,
             "serial_error": self.last_serial_error,
             "camera_ready": bool(CAMERA_READY_DEFAULT),
-            "vector_db_ready": bool(VECTOR_DB_READY_DEFAULT),
-            "ollama_ready": bool(OLLAMA_READY_DEFAULT),
-            "selected_db": self.db.get_active_db(),
-            "local_dbs": self.db.list_local_dbs(),
-            "db_sync_state": sync_state,
             "last_command": self.runtime.get("last_command"),
             "last_command_at": self.runtime.get("last_command_at"),
         }
@@ -333,8 +247,7 @@ class AuraJetsonAgent:
         if not raw:
             return None
 
-        s = raw.strip()
-        low = s.lower()
+        low = str(raw).strip().lower()
 
         if low in ("f", "b", "l", "r", "s"):
             return low.upper()
@@ -343,10 +256,7 @@ class AuraJetsonAgent:
             move = low.split(":", 1)[1].strip()
             return FAST_MOVE_MAP.get(move)
 
-        if low in FAST_MOVE_MAP:
-            return FAST_MOVE_MAP[low]
-
-        return None
+        return FAST_MOVE_MAP.get(low)
 
     def send_move_command(self, move: str) -> bool:
         key = self.normalize_move_text(move)
@@ -355,31 +265,33 @@ class AuraJetsonAgent:
         return self.send_serial_line(key)
 
     def try_handle_command_payload(self, cmd: Dict[str, Any]) -> bool:
+        """
+        Handles actual queued entry shape:
+          {
+            "id": "...",
+            "device_id": "jetson-001",
+            "command": "forward",
+            "payload": {},
+            "status": "delivered"
+          }
+        """
         command_id = cmd.get("command_id") or cmd.get("id") or cmd.get("uuid")
-        command_type = str(cmd.get("type") or cmd.get("command_type") or "").strip().lower()
-        value = cmd.get("value")
-        text = cmd.get("command") or cmd.get("cmd") or cmd.get("message") or cmd.get("text")
+        command_name = cmd.get("command")
+        payload = cmd.get("payload") or {}
 
         handled = False
+        note = None
+        result = None
 
-        if command_type in ("move", "movement", "control"):
-            if isinstance(value, str):
-                handled = self.send_move_command(value)
-            elif isinstance(text, str):
-                handled = self.send_move_command(text)
-
-        elif isinstance(text, str):
-            maybe_move = self.normalize_move_text(text)
-            if maybe_move:
-                handled = self.send_move_command(maybe_move)
-            else:
-                handled = self.send_serial_line(text)
-
-        if not handled and command_type in ("select_db", "database"):
-            db_name = str(value or text or "").strip()
-            if db_name:
-                self.ensure_db_ready(db_name)
-                handled = True
+        if isinstance(command_name, str):
+            move = self.normalize_move_text(command_name)
+            if move:
+                handled = self.send_move_command(move)
+                note = f"movement {move}"
+            elif command_name in ("pitch", "yaw"):
+                # not implemented yet, but do not crash
+                handled = False
+                note = f"{command_name} not implemented yet"
 
         if command_id:
             try:
@@ -387,8 +299,9 @@ class AuraJetsonAgent:
                     {
                         "device_id": DEVICE_ID,
                         "command_id": command_id,
-                        "ok": bool(handled),
-                        "ts": _now_ts(),
+                        "status": "completed" if handled else "failed",
+                        "note": note,
+                        "result": result,
                     }
                 )
             except Exception as e:
@@ -397,6 +310,9 @@ class AuraJetsonAgent:
         if handled:
             self.last_command_id = str(command_id or "")
             self.last_command_ts = time.time()
+            self.log_local("info", "command", f"Handled command payload: {cmd}")
+        else:
+            self.log_local("warning", "command", f"Unhandled command payload: {cmd}")
 
         return handled
 
@@ -406,31 +322,19 @@ class AuraJetsonAgent:
             if not isinstance(data, dict):
                 return
 
-            if not data:
-                return
-            if data.get("ok") is True and not any(k in data for k in ("command", "cmd", "type", "id", "command_id", "message", "text", "value")):
-                return
-            if data.get("command") is None and data.get("cmd") is None and data.get("text") is None and data.get("value") is None and not data.get("type"):
+            # backend returns {"ok": True, "command": next_cmd}
+            queued = data.get("command")
+            if not isinstance(queued, dict):
                 return
 
-            handled = self.try_handle_command_payload(data)
-            if handled:
-                self.log_local("info", "command", f"Handled command: {data}")
-            else:
-                self.log_local("warning", "command", f"Unhandled command payload: {data}")
+            self.try_handle_command_payload(queued)
         except Exception as e:
             self.log_local("error", "command_poll", f"Command poll failed: {e}")
 
     def boot(self):
         self.connect_serial()
         self.do_register()
-
-        boot_db = self.db.get_active_db()
-        if boot_db:
-            self.ensure_db_ready(boot_db)
-
         self.do_status()
-        self.refresh_selected_db()
         self.do_heartbeat()
 
     def run_forever(self):
@@ -449,9 +353,6 @@ class AuraJetsonAgent:
 
             if (now - self.last_status_ts) >= STATUS_SECONDS:
                 self.do_status()
-
-            if (now - self.last_config_ts) >= CONFIG_REFRESH_SECONDS:
-                self.refresh_selected_db()
 
             self.poll_command_once()
             time.sleep(self.command_poll_seconds)
