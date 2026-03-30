@@ -184,7 +184,7 @@ export default function SimulatorPage() {
 
     const load = async () => {
       try {
-        const res = await fetch(`${API_URL}/api/databases`, { headers: authHeaders });
+        const res = await fetch(`${API_URL}/api/databases/list`, { headers: authHeaders });
         const data = await res.json().catch(() => null);
         const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
         if (cancelled) return;

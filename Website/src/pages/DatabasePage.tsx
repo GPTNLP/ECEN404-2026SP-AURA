@@ -195,7 +195,7 @@ export default function DatabasePage() {
 
   const refreshDatabases = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/databases`, { headers: authHeaders });
+      const res = await fetch(`${API_BASE}/api/databases/list`, { headers: authHeaders });
       const data = await res.json().catch(() => null);
       const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
       setDbList(list);
