@@ -73,7 +73,7 @@ rag_system = None
 esp_serial = None
 
 runtime_config = {
-    "poll_seconds": 0.08,
+    "poll_seconds": 0.05,
     "heartbeat_seconds": HEARTBEAT_SECONDS,
     "status_seconds": STATUS_SECONDS,
 }

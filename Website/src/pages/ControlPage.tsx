@@ -56,6 +56,7 @@ export default function ControlPage() {
 
   const holdIntervalRef = useRef<number | null>(null);
   const activeMoveRef = useRef<MoveCmd | null>(null);
+  const stopSentRef = useRef<boolean>(false);
 
   const clearHoldInterval = useCallback(() => {
     if (holdIntervalRef.current !== null) {
@@ -64,58 +65,77 @@ export default function ControlPage() {
     }
   }, []);
 
+  const sendSingleStop = useCallback(() => {
+    if (stopSentRef.current) return;
+    stopSentRef.current = true;
+    sendMove("stop");
+  }, []);
+
   const stopMove = useCallback(() => {
+    if (!activeMoveRef.current) return;
     clearHoldInterval();
     activeMoveRef.current = null;
-    sendMove("stop");
-  }, [clearHoldInterval]);
+    sendSingleStop();
+  }, [clearHoldInterval, sendSingleStop]);
 
   const startMove = useCallback(
     (cmd: MoveCmd) => {
       if (cmd === "stop" || cmd === "pitch" || cmd === "yaw") return;
 
-      if (activeMoveRef.current === cmd && holdIntervalRef.current !== null) {
-        return;
-      }
+      if (activeMoveRef.current === cmd) return;
 
       clearHoldInterval();
       activeMoveRef.current = cmd;
+      stopSentRef.current = false;
 
       sendMove(cmd);
 
       holdIntervalRef.current = window.setInterval(() => {
-        sendMove(cmd);
-      }, 120);
+        if (activeMoveRef.current === cmd) {
+          sendMove(cmd);
+        }
+      }, 100);
     },
     [clearHoldInterval]
   );
 
   useEffect(() => {
-    const handleGlobalRelease = () => {
-      if (activeMoveRef.current) {
-        stopMove();
-      }
-    };
+    const handlePointerUp = () => stopMove();
 
-    window.addEventListener("mouseup", handleGlobalRelease);
-    window.addEventListener("touchend", handleGlobalRelease);
-    window.addEventListener("touchcancel", handleGlobalRelease);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
 
     return () => {
-      window.removeEventListener("mouseup", handleGlobalRelease);
-      window.removeEventListener("touchend", handleGlobalRelease);
-      window.removeEventListener("touchcancel", handleGlobalRelease);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
       clearHoldInterval();
     };
-  }, [clearHoldInterval, stopMove]);
+  }, [stopMove, clearHoldInterval]);
 
   const handleStopAndReset = () => {
     clearHoldInterval();
     activeMoveRef.current = null;
+    stopSentRef.current = false;
     setPitch(0);
     setYaw(0);
     sendMove("stop");
   };
+
+  const bindMoveButton = (cmd: MoveCmd) => ({
+    onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      (e.currentTarget as HTMLButtonElement).setPointerCapture?.(e.pointerId);
+      startMove(cmd);
+    },
+    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      stopMove();
+    },
+    onPointerCancel: (e: React.PointerEvent<HTMLButtonElement>) => {
+      e.preventDefault();
+      stopMove();
+    },
+  });
 
   return (
     <div className="page">
@@ -138,17 +158,7 @@ export default function ControlPage() {
             <div className="dpad">
               <button
                 className="dpad-btn up"
-                onMouseDown={() => startMove("forward")}
-                onMouseUp={stopMove}
-                onMouseLeave={stopMove}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startMove("forward");
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopMove();
-                }}
+                {...bindMoveButton("forward")}
                 aria-label="Move forward"
               >
                 <span>▲</span>
@@ -156,17 +166,7 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn left"
-                onMouseDown={() => startMove("left")}
-                onMouseUp={stopMove}
-                onMouseLeave={stopMove}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startMove("left");
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopMove();
-                }}
+                {...bindMoveButton("left")}
                 aria-label="Move left"
               >
                 <span>◀</span>
@@ -182,17 +182,7 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn right"
-                onMouseDown={() => startMove("right")}
-                onMouseUp={stopMove}
-                onMouseLeave={stopMove}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startMove("right");
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopMove();
-                }}
+                {...bindMoveButton("right")}
                 aria-label="Move right"
               >
                 <span>▶</span>
@@ -200,17 +190,7 @@ export default function ControlPage() {
 
               <button
                 className="dpad-btn down"
-                onMouseDown={() => startMove("backward")}
-                onMouseUp={stopMove}
-                onMouseLeave={stopMove}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startMove("backward");
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopMove();
-                }}
+                {...bindMoveButton("backward")}
                 aria-label="Move backward"
               >
                 <span>▼</span>
