@@ -1,5 +1,5 @@
-import cv2
 import time
+import cv2
 from camera import JetsonCamera
 
 
@@ -7,23 +7,20 @@ def main():
     cam = JetsonCamera()
     cam.start()
 
-    print("Camera module started. Press q to quit.")
+    print("Starting camera...")
+    time.sleep(2)
 
-    try:
-        while True:
-            frame = cam.get_frame()
-            if frame is not None:
-                cv2.imshow("Jetson Camera Module Test", frame)
+    frame = cam.get_frame()
+    if frame is None:
+        print("ERROR: No frame received.")
+    else:
+        ok = cv2.imwrite("test_frame.jpg", frame)
+        if ok:
+            print("Saved test_frame.jpg successfully.")
+        else:
+            print("ERROR: Failed to save test_frame.jpg.")
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-
-            time.sleep(0.01)
-
-    finally:
-        cam.stop()
-        cv2.destroyAllWindows()
+    cam.stop()
 
 
 if __name__ == "__main__":
