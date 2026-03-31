@@ -3,11 +3,13 @@ import sys
 import time
 import asyncio
 from pathlib import Path
+from typing import Iterator
+
 from pypdf import PdfReader
 
 import serial
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -39,6 +41,7 @@ from heartbeat import build_heartbeat_payload
 from status import build_status_payload
 from device_info import collect_device_info
 from lightrag_local import LightRAG, OllamaClient
+from camera import camera_service, get_camera_status
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -329,7 +332,6 @@ async def command_loop():
                 if cmd in {"forward", "backward", "left", "right", "pitch", "yaw", "stop"}:
                     if esp_serial:
                         try:
-                            # prevent rapid duplicate spam for same command in tiny window
                             if cmd == last_cmd and (now - last_cmd_time) < 0.04:
                                 await asyncio.to_thread(api.ack_command, {
                                     "command_id": command_id,
@@ -426,6 +428,7 @@ async def command_loop():
 
         await asyncio.sleep(runtime_config["poll_seconds"])
 
+
 async def parse_intent(user_msg: str):
     client = OllamaClient("http://127.0.0.1:11434", EMBEDDING_MODEL, DEFAULT_MODEL)
     system = "Classify user input as 'MOVEMENT' or 'QUESTION'. Reply with one word."
@@ -476,6 +479,19 @@ async def handle_user_message(user_msg: str):
     await ui_manager.broadcast({"type": "status", "data": "Ready"})
 
 
+def mjpeg_generator(mode: str) -> Iterator[bytes]:
+    while True:
+        frame = camera_service.get_jpeg(mode)
+        if frame is None:
+            time.sleep(0.03)
+            continue
+
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        )
+
+
 @app.on_event("startup")
 async def startup_event():
     print("[STARTUP] initializing hardware")
@@ -483,6 +499,15 @@ async def startup_event():
 
     print("[STARTUP] initializing rag")
     init_rag()
+
+    print("[STARTUP] initializing camera")
+    try:
+        camera_service.start()
+        print("[CAMERA] started")
+        send_or_queue_log("info", "camera_started", "Camera service started")
+    except Exception as e:
+        print(f"[CAMERA] failed to start: {e}")
+        send_or_queue_log("warning", "camera_start_failed", f"Camera failed to start: {e}")
 
     try:
         await register_device()
@@ -500,9 +525,61 @@ async def startup_event():
     send_or_queue_log("info", "startup_complete", "Jetson agent startup complete")
 
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        camera_service.stop()
+        print("[CAMERA] stopped")
+    except Exception as e:
+        print(f"[CAMERA] stop error: {e}")
+
+
 @app.get("/")
 async def serve_ui():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/camera/status")
+async def camera_status():
+    return get_camera_status()
+
+
+@app.get("/camera/detections")
+async def camera_detections():
+    return {
+        "mode": camera_service.get_mode(),
+        "detections": camera_service.get_detections(),
+    }
+
+
+@app.post("/camera/mode")
+async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
+    camera_service.set_mode(mode)
+    return {"ok": True, "mode": camera_service.get_mode()}
+
+
+@app.get("/camera/stream")
+async def camera_stream():
+    status = camera_service.get_status()
+    if not status["camera_ready"]:
+        raise HTTPException(status_code=503, detail="Camera not ready")
+
+    return StreamingResponse(
+        mjpeg_generator("raw"),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/camera/detection-stream")
+async def camera_detection_stream():
+    status = camera_service.get_status()
+    if not status["camera_ready"]:
+        raise HTTPException(status_code=503, detail="Camera not ready")
+
+    return StreamingResponse(
+        mjpeg_generator("detection"),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @app.websocket("/ws")
