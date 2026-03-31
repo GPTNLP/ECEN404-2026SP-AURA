@@ -1,4 +1,6 @@
 import cv2
+import threading
+import time
 
 
 def gstreamer_pipeline(
@@ -30,34 +32,88 @@ def gstreamer_pipeline(
     )
 
 
-def main():
-    pipeline = gstreamer_pipeline()
-    print("Using pipeline:")
-    print(pipeline)
+class JetsonCamera:
+    def __init__(
+        self,
+        sensor_id=0,
+        width=1280,
+        height=720,
+        fps=30,
+        flip_method=0,
+    ):
+        self.sensor_id = sensor_id
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.flip_method = flip_method
 
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        self.cap = None
+        self.frame = None
+        self.running = False
+        self.lock = threading.Lock()
+        self.thread = None
 
-    if not cap.isOpened():
-        print("ERROR: Could not open CSI camera.")
-        return
+    def start(self):
+        if self.running:
+            return
 
-    print("Camera opened successfully. Press q to quit.")
+        pipeline = gstreamer_pipeline(
+            sensor_id=self.sensor_id,
+            capture_width=self.width,
+            capture_height=self.height,
+            display_width=self.width,
+            display_height=self.height,
+            framerate=self.fps,
+            flip_method=self.flip_method,
+        )
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("ERROR: Failed to read frame.")
-            break
+        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
 
-        cv2.imshow("Jetson Camera Test", frame)
+        if not self.cap.isOpened():
+            raise RuntimeError("Could not open Jetson CSI camera.")
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
+        self.running = True
+        self.thread = threading.Thread(target=self._update_loop, daemon=True)
+        self.thread.start()
 
-    cap.release()
-    cv2.destroyAllWindows()
+    def _update_loop(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                with self.lock:
+                    self.frame = frame
+            else:
+                time.sleep(0.01)
 
+    def get_frame(self):
+        with self.lock:
+            if self.frame is None:
+                return None
+            return self.frame.copy()
 
-if __name__ == "__main__":
-    main()
+    def get_jpeg_bytes(self, quality=80):
+        frame = self.get_frame()
+        if frame is None:
+            return None
+
+        ok, buffer = cv2.imencode(
+            ".jpg",
+            frame,
+            [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+        )
+        if not ok:
+            return None
+
+        return buffer.tobytes()
+
+    def stop(self):
+        self.running = False
+
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
+        if self.cap is not None:
+            self.cap.release()
+
+        self.cap = None
+        self.thread = None
