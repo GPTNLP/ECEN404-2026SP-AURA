@@ -479,17 +479,21 @@ async def handle_user_message(user_msg: str):
     await ui_manager.broadcast({"type": "status", "data": "Ready"})
 
 
-def mjpeg_generator(mode: str) -> Iterator[bytes]:
-    while True:
-        frame = camera_service.get_jpeg(mode)
-        if frame is None:
-            time.sleep(0.03)
-            continue
+def mjpeg_generator() -> Iterator[bytes]:
+    camera_service.add_stream_client()
+    try:
+        while True:
+            frame = camera_service.get_jpeg()
+            if frame is None:
+                time.sleep(0.03)
+                continue
 
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-        )
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            )
+    finally:
+        camera_service.remove_stream_client()
 
 
 @app.on_event("startup")
@@ -500,14 +504,8 @@ async def startup_event():
     print("[STARTUP] initializing rag")
     init_rag()
 
-    print("[STARTUP] initializing camera")
-    try:
-        camera_service.start()
-        print("[CAMERA] started")
-        send_or_queue_log("info", "camera_started", "Camera service started")
-    except Exception as e:
-        print(f"[CAMERA] failed to start: {e}")
-        send_or_queue_log("warning", "camera_start_failed", f"Camera failed to start: {e}")
+    print("[STARTUP] camera service idle until activated")
+    send_or_queue_log("info", "camera_idle", "Camera service is idle until activated")
 
     try:
         await register_device()
@@ -528,7 +526,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     try:
-        camera_service.stop()
+        camera_service.deactivate()
         print("[CAMERA] stopped")
     except Exception as e:
         print(f"[CAMERA] stop error: {e}")
@@ -552,32 +550,40 @@ async def camera_detections():
     }
 
 
+@app.post("/camera/activate")
+async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
+    try:
+        camera_service.activate(mode)
+        return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
+
+
+@app.post("/camera/deactivate")
+async def deactivate_camera():
+    camera_service.deactivate()
+    return {"ok": True, "enabled": False}
+
+
 @app.post("/camera/mode")
 async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
-    camera_service.set_mode(mode)
-    return {"ok": True, "mode": camera_service.get_mode()}
+    status = camera_service.get_status()
+    if not status.get("enabled"):
+        camera_service.activate(mode)
+    else:
+        camera_service.set_mode(mode)
+
+    return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
 
 
 @app.get("/camera/stream")
 async def camera_stream():
     status = camera_service.get_status()
-    if not status["camera_ready"]:
-        raise HTTPException(status_code=503, detail="Camera not ready")
+    if not status.get("enabled"):
+        raise HTTPException(status_code=503, detail="Camera is not activated")
 
     return StreamingResponse(
-        mjpeg_generator("raw"),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-    )
-
-
-@app.get("/camera/detection-stream")
-async def camera_detection_stream():
-    status = camera_service.get_status()
-    if not status["camera_ready"]:
-        raise HTTPException(status_code=503, detail="Camera not ready")
-
-    return StreamingResponse(
-        mjpeg_generator("detection"),
+        mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -615,4 +621,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

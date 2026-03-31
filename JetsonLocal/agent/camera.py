@@ -7,17 +7,16 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
 
 
 def gstreamer_pipeline(
     sensor_id: int = 0,
-    capture_width: int = 1920,
-    capture_height: int = 1080,
-    display_width: int = 1920,
-    display_height: int = 1080,
+    capture_width: int = 1280,
+    capture_height: int = 720,
+    display_width: int = 1280,
+    display_height: int = 720,
     framerate: int = 30,
     flip_method: int = 0,
 ) -> str:
@@ -28,7 +27,7 @@ def gstreamer_pipeline(
         f"nvvidconv flip-method={flip_method} ! "
         f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
         f"videoconvert ! "
-        f"video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1"
+        f"video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
     )
 
 
@@ -36,13 +35,14 @@ class CameraService:
     def __init__(
         self,
         sensor_id: int = 0,
-        width: int = 1920,
-        height: int = 1080,
+        width: int = 1280,
+        height: int = 720,
         fps: int = 30,
         flip_method: int = 0,
-        jpeg_quality: int = 80,
+        jpeg_quality: int = 70,
         detect_conf: float = 0.25,
-        infer_size: int = 640,
+        infer_size: int = 416,
+        idle_timeout_seconds: int = 10,
     ):
         self.sensor_id = sensor_id
         self.width = width
@@ -52,19 +52,25 @@ class CameraService:
         self.jpeg_quality = jpeg_quality
         self.detect_conf = detect_conf
         self.infer_size = infer_size
+        self.idle_timeout_seconds = idle_timeout_seconds
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
 
         self.lock = threading.Lock()
-        self.latest_raw_frame: Optional[np.ndarray] = None
-        self.latest_annotated_frame: Optional[np.ndarray] = None
+
         self.latest_raw_jpeg: Optional[bytes] = None
         self.latest_annotated_jpeg: Optional[bytes] = None
         self.latest_detections: list[dict] = []
+
         self.mode = "raw"
+        self.enabled = False
         self.last_error: Optional[str] = None
+        self.last_access_ts = 0.0
+        self.stream_clients = 0
+
+        self.consecutive_failures = 0
 
         self.kernel = np.array(
             [
@@ -81,10 +87,7 @@ class CameraService:
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
-    def start(self) -> None:
-        if self.running:
-            return
-
+    def _open_camera(self) -> cv2.VideoCapture:
         pipeline = gstreamer_pipeline(
             sensor_id=self.sensor_id,
             capture_width=self.width,
@@ -94,11 +97,75 @@ class CameraService:
             framerate=self.fps,
             flip_method=self.flip_method,
         )
-
-        self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not self.cap.isOpened():
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
             raise RuntimeError("Could not open Jetson CSI camera.")
+        return cap
 
+    def _close_camera(self) -> None:
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+        self.cap = None
+        self.latest_raw_jpeg = None
+        self.latest_annotated_jpeg = None
+        self.latest_detections = []
+
+    def activate(self, mode: str = "raw") -> None:
+        mode = (mode or "raw").strip().lower()
+        if mode not in {"raw", "detection"}:
+            mode = "raw"
+
+        with self.lock:
+            self.mode = mode
+            self.enabled = True
+            self.last_access_ts = time.time()
+
+        if not self.running:
+            self.start()
+
+    def deactivate(self) -> None:
+        with self.lock:
+            self.enabled = False
+            self.stream_clients = 0
+            self.last_access_ts = 0.0
+
+        self.stop()
+
+    def set_mode(self, mode: str) -> None:
+        mode = (mode or "").strip().lower()
+        if mode not in {"raw", "detection"}:
+            return
+
+        with self.lock:
+            self.mode = mode
+            self.last_access_ts = time.time()
+
+    def get_mode(self) -> str:
+        with self.lock:
+            return self.mode
+
+    def mark_access(self) -> None:
+        with self.lock:
+            self.last_access_ts = time.time()
+
+    def add_stream_client(self) -> None:
+        with self.lock:
+            self.stream_clients += 1
+            self.last_access_ts = time.time()
+
+    def remove_stream_client(self) -> None:
+        with self.lock:
+            self.stream_clients = max(0, self.stream_clients - 1)
+            self.last_access_ts = time.time()
+
+    def start(self) -> None:
+        if self.running:
+            return
+
+        self.cap = self._open_camera()
         self.running = True
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
@@ -107,18 +174,14 @@ class CameraService:
         self.running = False
         if self.thread is not None:
             self.thread.join(timeout=2.0)
-        if self.cap is not None:
-            self.cap.release()
-        self.cap = None
+        self._close_camera()
         self.thread = None
 
-    def set_mode(self, mode: str) -> None:
-        mode = (mode or "").strip().lower()
-        if mode in {"raw", "detection"}:
-            self.mode = mode
-
-    def get_mode(self) -> str:
-        return self.mode
+    def restart_camera(self) -> None:
+        self._close_camera()
+        time.sleep(1.0)
+        self.cap = self._open_camera()
+        self.consecutive_failures = 0
 
     def _encode_jpeg(self, frame: np.ndarray) -> Optional[bytes]:
         ok, buf = cv2.imencode(
@@ -172,7 +235,7 @@ class CameraService:
                     f"{label} {conf:.2f}",
                     (x1, max(25, y1 - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
+                    0.7,
                     (0, 255, 0),
                     2,
                     cv2.LINE_AA,
@@ -180,43 +243,79 @@ class CameraService:
 
         return annotated, detections
 
+    def _should_stop_for_idle(self) -> bool:
+        with self.lock:
+            if not self.enabled:
+                return True
+            if self.stream_clients > 0:
+                return False
+            if self.last_access_ts <= 0:
+                return True
+            return (time.time() - self.last_access_ts) > self.idle_timeout_seconds
+
     def _loop(self) -> None:
         while self.running:
             try:
+                if self._should_stop_for_idle():
+                    self.running = False
+                    break
+
                 if self.cap is None:
-                    time.sleep(0.05)
-                    continue
+                    self.cap = self._open_camera()
 
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
-                    self.last_error = "Failed to read frame from camera."
-                    time.sleep(0.02)
+                    self.consecutive_failures += 1
+                    self.last_error = f"Failed to read frame ({self.consecutive_failures})"
+                    time.sleep(0.05)
+
+                    if self.consecutive_failures >= 10:
+                        self.last_error = "Camera read timeout, restarting pipeline"
+                        self.restart_camera()
                     continue
 
-                annotated, detections = self._run_detection(frame)
+                self.consecutive_failures = 0
 
                 raw_jpeg = self._encode_jpeg(frame)
-                ann_jpeg = self._encode_jpeg(annotated)
 
                 with self.lock:
-                    self.latest_raw_frame = frame
-                    self.latest_annotated_frame = annotated
+                    current_mode = self.mode
+
+                if current_mode == "detection":
+                    annotated, detections = self._run_detection(frame)
+                    annotated_jpeg = self._encode_jpeg(annotated)
+                else:
+                    annotated_jpeg = None
+                    detections = []
+
+                with self.lock:
                     self.latest_raw_jpeg = raw_jpeg
-                    self.latest_annotated_jpeg = ann_jpeg
+                    self.latest_annotated_jpeg = annotated_jpeg
                     self.latest_detections = detections
                     self.last_error = None
 
+                time.sleep(0.01)
+
             except Exception as e:
                 self.last_error = str(e)
-                time.sleep(0.05)
+                time.sleep(0.2)
+                try:
+                    self.restart_camera()
+                except Exception as inner:
+                    self.last_error = f"{e} | restart failed: {inner}"
+                    time.sleep(1.0)
 
-    def get_jpeg(self, mode: str = "raw") -> Optional[bytes]:
+        self._close_camera()
+
+    def get_jpeg(self) -> Optional[bytes]:
+        self.mark_access()
         with self.lock:
-            if mode == "detection":
+            if self.mode == "detection":
                 return self.latest_annotated_jpeg
             return self.latest_raw_jpeg
 
     def get_detections(self) -> list[dict]:
+        self.mark_access()
         with self.lock:
             return list(self.latest_detections)
 
@@ -224,7 +323,10 @@ class CameraService:
         with self.lock:
             return {
                 "camera_ready": self.cap is not None and self.cap.isOpened() if self.cap else False,
+                "enabled": self.enabled,
+                "running": self.running,
                 "mode": self.mode,
+                "stream_clients": self.stream_clients,
                 "model_path": str(MODEL_PATH),
                 "model_loaded": self.model is not None,
                 "raw_frame_ready": self.latest_raw_jpeg is not None,
@@ -233,6 +335,7 @@ class CameraService:
                 "last_error": self.last_error,
                 "resolution": {"width": self.width, "height": self.height},
                 "fps": self.fps,
+                "idle_timeout_seconds": self.idle_timeout_seconds,
             }
 
 
