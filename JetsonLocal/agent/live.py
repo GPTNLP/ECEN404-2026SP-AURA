@@ -3,7 +3,7 @@ import numpy as np
 from ultralytics import YOLO
 
 # 🔥 LOAD MODEL
-model = YOLO("../models/component_best.pt")  # change if needed
+model = YOLO("models/component_best.pt")  # change if needed
 
 def gstreamer_pipeline():
     return (
