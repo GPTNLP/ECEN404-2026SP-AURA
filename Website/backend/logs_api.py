@@ -14,11 +14,18 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 router = APIRouter(prefix="/logs", tags=["logs"])
 
-LOG_DIR = Path(os.getenv("LOG_DIR", str(Path(__file__).resolve().parent / "storage")))
-LOG_FILE = LOG_DIR / "chat_logs.jsonl"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+STORAGE_DIR = Path(
+    os.getenv("AURA_STORAGE_DIR")
+    or str(Path(__file__).resolve().parent / "storage")
+)
+LOG_FILE = STORAGE_DIR / "chat_logs.jsonl"
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_INGEST_SECRET = os.getenv("LOG_INGEST_SECRET", "")
+
+print(f"[LOGS] STORAGE_DIR = {STORAGE_DIR}")
+print(f"[LOGS] LOG_FILE = {LOG_FILE}")
+
 
 def require_admin(request: Request) -> Dict[str, Any]:
     payload = require_auth(request)
@@ -26,10 +33,12 @@ def require_admin(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="Admin only")
     return payload
 
+
 def _append_log(obj: Dict[str, Any]) -> None:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
 
 def _read_logs(limit: int, offset: int) -> List[Dict[str, Any]]:
     if not LOG_FILE.exists():
@@ -54,6 +63,7 @@ def _read_logs(limit: int, offset: int) -> List[Dict[str, Any]]:
             continue
     return out
 
+
 class LogWrite(BaseModel):
     event: str = "chat"
     prompt: Optional[str] = None
@@ -61,6 +71,7 @@ class LogWrite(BaseModel):
     model: Optional[str] = None
     latency_ms: Optional[int] = None
     meta: Optional[Dict[str, Any]] = None
+
 
 class LogIngest(BaseModel):
     event: str = "chat"
@@ -71,6 +82,7 @@ class LogIngest(BaseModel):
     model: Optional[str] = None
     latency_ms: Optional[int] = None
     meta: Optional[Dict[str, Any]] = None
+
 
 @router.post("/write")
 def write_log(data: LogWrite, request: Request):
@@ -95,6 +107,7 @@ def write_log(data: LogWrite, request: Request):
     }
     _append_log(obj)
     return {"ok": True}
+
 
 @router.post("/ingest")
 def ingest_log(data: LogIngest, request: Request):
@@ -125,6 +138,7 @@ def ingest_log(data: LogIngest, request: Request):
     _append_log(obj)
     return {"ok": True}
 
+
 @router.get("/mine")
 def my_logs(request: Request, limit: int = 200, offset: int = 0):
     """
@@ -148,6 +162,7 @@ def my_logs(request: Request, limit: int = 200, offset: int = 0):
         "offset": offset,
         "items": page,
     }
+
 
 @router.get("/list")
 def list_logs(

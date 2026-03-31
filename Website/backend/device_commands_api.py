@@ -26,13 +26,18 @@ ALLOWED_COMMANDS = {
     "yaw",
 }
 
-# movement-style commands should not stack up in a queue
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
-STORAGE_DIR = Path(os.getenv("LOG_DIR", Path(__file__).resolve().parent / "storage"))
+STORAGE_DIR = Path(
+    os.getenv("AURA_STORAGE_DIR")
+    or (Path(__file__).resolve().parent / "storage")
+)
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMANDS_FILE = STORAGE_DIR / "device_commands.json"
+
+print(f"[DEVICE_COMMANDS] STORAGE_DIR = {STORAGE_DIR}")
+print(f"[DEVICE_COMMANDS] COMMANDS_FILE = {COMMANDS_FILE}")
 
 
 def _load_commands() -> list[dict]:
@@ -92,8 +97,6 @@ def queue_device_command(payload: DeviceCommandIn, request: Request):
     now_ms = int(time.time() * 1000)
     now_s = int(time.time())
 
-    # For movement commands, replace any currently active movement command
-    # for the same device so stale inputs do not pile up.
     if payload.command in MOVEMENT_COMMANDS:
         filtered: list[dict] = []
         for item in commands:
@@ -118,6 +121,8 @@ def queue_device_command(payload: DeviceCommandIn, request: Request):
     commands.append(entry)
     _save_commands(commands)
 
+    print(f"[DEVICE_COMMANDS] queued {payload.command} for {payload.device_id} -> {COMMANDS_FILE}")
+
     return {"ok": True, "queued": entry}
 
 
@@ -129,21 +134,14 @@ def get_next_device_command(
     _require_device_secret(x_device_secret)
 
     commands = _load_commands()
-    next_index = None
     next_cmd = None
 
-    # Return the oldest pending command for this device.
-    # Because movement commands are coalesced above, this stays responsive.
-    for idx, item in enumerate(commands):
+    for item in commands:
         if item.get("device_id") == device_id and item.get("status") == "pending":
             item["status"] = "delivered"
             item["delivered_at"] = int(time.time())
-            next_index = idx
             next_cmd = item
             break
-
-    if next_index is not None:
-        commands[next_index] = next_cmd
 
     _save_commands(commands)
 
