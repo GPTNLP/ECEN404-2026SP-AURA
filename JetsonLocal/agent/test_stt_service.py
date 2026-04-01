@@ -1,4 +1,5 @@
 from stt_service import SpeechToTextService
+from voice_commands import detect_command
 
 
 def main():
@@ -21,6 +22,11 @@ def main():
 
         print("\n[TRANSCRIPT]")
         print(text if text else "(no speech detected)")
+
+        command = detect_command(text or "")
+
+        print("\n[COMMAND DETECTED]")
+        print(command if command else "None")
 
 
 if __name__ == "__main__":
