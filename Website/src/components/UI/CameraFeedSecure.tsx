@@ -102,103 +102,55 @@ export default function CameraFeedSecure() {
 
   if (!API_BASE) {
     return (
-      <div
-        className="cam-card-header"
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          {/* LEFT SIDE */}
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            <div className="cam-title">Live Camera Feed</div>
-            <div className={`cam-status ${ok ? "good" : "bad"}`}>
-              {ok ? "● Live" : "● Waiting"}
-            </div>
-          </div>
-
-          {/* RIGHT SIDE (buttons) */}
-          <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={() => setCameraMode("raw")} disabled={busy || mode === "raw"}>
-              Raw
-            </button>
-
-            <button onClick={() => setCameraMode("detection")} disabled={busy || mode === "detection"}>
-              Detection
-            </button>
-
-            <button onClick={() => setStreamNonce((n) => n + 1)} disabled={busy}>
-              Refresh
-            </button>
-          </div>
-        </div>
+      <div className="cam-card">
+        <div className="cam-title">Missing API base</div>
+      </div>
     );
   }
 
   return (
     <div className="cam-card">
-      <div className="cam-card-header">
-        <div className="cam-title">Live Camera Feed</div>
-        <div className={`cam-status ${ok ? "good" : "bad"}`}>{ok ? "● Live" : "● Waiting"}</div>
+      {/* HEADER */}
+      <div
+        className="cam-card-header"
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        {/* LEFT */}
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <div className="cam-title">Live Camera Feed</div>
+          <div className={`cam-status ${ok ? "good" : "bad"}`}>
+            {ok ? "● Live" : "● Waiting"}
+          </div>
+        </div>
+
+        {/* RIGHT (BUTTONS) */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => setCameraMode("raw")} disabled={busy || mode === "raw"}>
+            Raw
+          </button>
+
+          <button onClick={() => setCameraMode("detection")} disabled={busy || mode === "detection"}>
+            Detection
+          </button>
+
+          <button onClick={() => setStreamNonce((n) => n + 1)} disabled={busy}>
+            Refresh
+          </button>
+        </div>
       </div>
 
-      <div className="cam-toolbar" style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-        <button
-          onClick={() => setCameraMode("raw")}
-          disabled={busy || mode === "raw"}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid var(--card-border)",
-            background: "var(--card-bg)",
-            fontWeight: 900,
-            cursor: busy ? "not-allowed" : "pointer",
-            opacity: busy || mode === "raw" ? 0.7 : 1,
-          }}
-        >
-          Raw
-        </button>
-
-        <button
-          onClick={() => setCameraMode("detection")}
-          disabled={busy || mode === "detection"}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid var(--card-border)",
-            background: "var(--card-bg)",
-            fontWeight: 900,
-            cursor: busy ? "not-allowed" : "pointer",
-            opacity: busy || mode === "detection" ? 0.7 : 1,
-          }}
-        >
-          Detection
-        </button>
-
-        <button
-          onClick={() => setStreamNonce((n) => n + 1)}
-          disabled={busy}
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            border: "1px solid var(--card-border)",
-            background: "var(--card-bg)",
-            fontWeight: 900,
-            cursor: busy ? "not-allowed" : "pointer",
-            opacity: busy ? 0.7 : 1,
-          }}
-        >
-          Refresh
-        </button>
-      </div>
-
+      {/* STATUS TEXT */}
       <div className="cam-substatus" style={{ marginBottom: 10 }}>
         {statusText}
       </div>
 
+      {/* VIDEO */}
       <div className="cam-frame" style={{ position: "relative" }}>
         <img
           key={streamSrc}
