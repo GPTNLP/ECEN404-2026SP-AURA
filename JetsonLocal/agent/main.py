@@ -3,7 +3,7 @@ import sys
 import time
 import asyncio
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 from pypdf import PdfReader
 
@@ -80,6 +80,15 @@ runtime_config = {
     "heartbeat_seconds": HEARTBEAT_SECONDS,
     "status_seconds": STATUS_SECONDS,
 }
+
+CAMERA_UPLOAD_TARGET_FPS = 10.0
+CAMERA_UPLOAD_MIN_INTERVAL = 1.0 / CAMERA_UPLOAD_TARGET_FPS
+camera_upload_lock = asyncio.Lock()
+camera_upload_latest_jpeg: Optional[bytes] = None
+camera_upload_latest_mode = "raw"
+camera_upload_latest_seq = 0
+camera_upload_sent_seq = -1
+camera_upload_last_send_ts = 0.0
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
@@ -193,6 +202,7 @@ def init_rag():
     global rag_system
     db_path = os.path.join(str(STORAGE_DIR), LOCAL_DB_NAME)
     os.makedirs(db_path, exist_ok=True)
+
     try:
         rag_system = LightRAG(
             working_dir=db_path,
@@ -270,8 +280,8 @@ async def heartbeat_loop():
 async def status_loop():
     while True:
         payload = build_status_payload()
-
         connection_text = "Connected to website"
+
         try:
             await asyncio.to_thread(api.status, payload)
             print(
@@ -291,7 +301,6 @@ async def status_loop():
             "db_name": (payload.get("extra") or {}).get("db_name", LOCAL_DB_NAME),
             "connection": connection_text,
         })
-
         await asyncio.sleep(runtime_config["status_seconds"])
 
 
@@ -313,17 +322,64 @@ async def config_loop():
 
 
 async def camera_upload_loop():
+    global camera_upload_latest_jpeg
+    global camera_upload_latest_mode
+    global camera_upload_latest_seq
+
     while True:
         try:
             status = camera_service.get_status()
             if status.get("enabled") and status.get("running"):
-                mode = camera_service.get_mode()
                 jpeg = camera_service.get_jpeg()
                 if jpeg:
-                    await asyncio.to_thread(api.upload_camera_frame, DEVICE_ID, mode, jpeg)
+                    mode = camera_service.get_mode()
+                    async with camera_upload_lock:
+                        camera_upload_latest_jpeg = jpeg
+                        camera_upload_latest_mode = mode
+                        camera_upload_latest_seq += 1
+        except Exception as e:
+            print(f"[CAMERA_CAPTURE] failed: {e}")
+
+        await asyncio.sleep(CAMERA_UPLOAD_MIN_INTERVAL)
+
+
+async def camera_upload_sender_loop():
+    global camera_upload_sent_seq
+    global camera_upload_last_send_ts
+
+    while True:
+        seq_to_send = None
+        mode_to_send = None
+        jpeg_to_send = None
+
+        try:
+            async with camera_upload_lock:
+                if camera_upload_latest_seq != camera_upload_sent_seq and camera_upload_latest_jpeg:
+                    seq_to_send = camera_upload_latest_seq
+                    mode_to_send = camera_upload_latest_mode
+                    jpeg_to_send = camera_upload_latest_jpeg
+
+            if seq_to_send is not None and jpeg_to_send is not None:
+                now = time.time()
+                since_last = now - camera_upload_last_send_ts
+                if since_last < CAMERA_UPLOAD_MIN_INTERVAL:
+                    await asyncio.sleep(CAMERA_UPLOAD_MIN_INTERVAL - since_last)
+
+                started = time.time()
+                await asyncio.to_thread(api.upload_camera_frame, DEVICE_ID, mode_to_send, jpeg_to_send)
+                elapsed = time.time() - started
+                camera_upload_last_send_ts = time.time()
+                camera_upload_sent_seq = seq_to_send
+                print(
+                    f"[CAMERA_UPLOAD] sent seq={seq_to_send} "
+                    f"bytes={len(jpeg_to_send)} mode={mode_to_send} dt={elapsed:.3f}s"
+                )
+            else:
+                await asyncio.sleep(0.02)
+
         except Exception as e:
             print(f"[CAMERA_UPLOAD] failed: {e}")
-        await asyncio.sleep(0.35)
+            await asyncio.sleep(0.10)
 
 
 async def command_loop():
@@ -381,7 +437,6 @@ async def command_loop():
                                     f"Executed command: {cmd}",
                                     {"command_id": command_id, "serial_message": serial_msg.strip()},
                                 )
-
                         except Exception as e:
                             print(f"[COMMAND] serial send failed: {e}")
                             await asyncio.to_thread(api.ack_command, {
@@ -456,7 +511,6 @@ async def command_loop():
                         try:
                             res = await rag_system.aquery(query)
                             ai_reply = res.get("answer", "No answer found.")
-
                             await asyncio.to_thread(api.ack_command, {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
@@ -505,26 +559,39 @@ async def parse_intent(user_msg: str):
         return "QUESTION"
 
 
-async def handle_user_message(user_msg: str):
-    user_msg = (user_msg or "").strip()
-    if not user_msg:
-        return
+def listen_mic():
+    try:
+        import speech_recognition as sr
+    except Exception:
+        return ""
 
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        r.adjust_for_ambient_noise(source)
+        asyncio.run(ui_manager.broadcast({"type": "status", "data": "Listening..."}))
+        audio = r.listen(source)
+
+    try:
+        return r.recognize_google(audio)
+    except Exception:
+        return ""
+
+
+async def handle_user_message(user_msg: str):
     await ui_manager.broadcast({"type": "chat", "sender": "user", "text": user_msg})
     await ui_manager.broadcast({"type": "status", "data": "Processing..."})
 
     intent = await parse_intent(user_msg)
 
     if intent == "MOVEMENT":
-        cmd = user_msg.lower().strip()
-        if cmd not in MOVEMENT_COMMANDS:
-            ai_reply = f"Unsupported movement command: {cmd}"
-        else:
+        if esp_serial:
             try:
-                await asyncio.to_thread(send_serial_command, cmd)
-                ai_reply = f"Movement command '{cmd}' sent to ESP."
+                ack = send_serial_command(user_msg)
+                ai_reply = f"Movement command sent. {ack}"
             except Exception as e:
-                ai_reply = f"Failed to send movement command to ESP: {e}"
+                ai_reply = f"Movement failed: {e}"
+        else:
+            ai_reply = "ESP serial is not connected."
     else:
         if rag_system:
             try:
@@ -533,15 +600,65 @@ async def handle_user_message(user_msg: str):
             except Exception as e:
                 ai_reply = f"RAG query failed: {e}"
         else:
-            ai_reply = "RAG database offline."
-
-    send_or_queue_log("info", "assistant_interaction", "Assistant handled user message", {
-        "user_message": user_msg,
-        "reply_preview": ai_reply[:200],
-    })
+            ai_reply = "RAG Database offline."
 
     await ui_manager.broadcast({"type": "chat", "sender": "ai", "text": ai_reply})
     await ui_manager.broadcast({"type": "status", "data": "Ready"})
+
+
+@app.get("/")
+async def serve_ui():
+    return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/health")
+async def health():
+    return {
+        "ok": True,
+        "device_id": DEVICE_ID,
+        "camera": camera_service.get_status(),
+        "rag_ready": rag_system is not None,
+        "serial_ready": esp_serial is not None,
+    }
+
+
+@app.get("/camera/status")
+async def camera_status():
+    return get_camera_status()
+
+
+@app.get("/camera/detections")
+async def camera_detections():
+    return {
+        "mode": camera_service.get_mode(),
+        "detections": camera_service.get_detections(),
+    }
+
+
+@app.post("/camera/activate")
+async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
+    try:
+        camera_service.activate(mode)
+        return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
+
+
+@app.post("/camera/deactivate")
+async def deactivate_camera():
+    camera_service.deactivate()
+    return {"ok": True, "enabled": False}
+
+
+@app.post("/camera/mode")
+async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
+    status = camera_service.get_status()
+    if not status.get("enabled"):
+        camera_service.activate(mode)
+    else:
+        camera_service.set_mode(mode)
+
+    return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
 
 
 def mjpeg_generator() -> Iterator[bytes]:
@@ -584,6 +701,7 @@ async def startup_event():
     asyncio.create_task(flush_loop())
     asyncio.create_task(command_loop())
     asyncio.create_task(camera_upload_loop())
+    asyncio.create_task(camera_upload_sender_loop())
 
     print("[STARTUP] background loops started")
     send_or_queue_log("info", "startup_complete", "Jetson agent startup complete")
@@ -596,50 +714,6 @@ async def shutdown_event():
         print("[CAMERA] stopped")
     except Exception as e:
         print(f"[CAMERA] stop error: {e}")
-
-
-@app.get("/")
-async def serve_ui():
-    return FileResponse(str(STATIC_DIR / "index.html"))
-
-
-@app.get("/camera/status")
-async def camera_status():
-    return get_camera_status()
-
-
-@app.get("/camera/detections")
-async def camera_detections():
-    return {
-        "mode": camera_service.get_mode(),
-        "detections": camera_service.get_detections(),
-    }
-
-
-@app.post("/camera/activate")
-async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
-    try:
-        camera_service.activate(mode)
-        return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
-
-
-@app.post("/camera/deactivate")
-async def deactivate_camera():
-    camera_service.deactivate()
-    return {"ok": True, "enabled": False}
-
-
-@app.post("/camera/mode")
-async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
-    status = camera_service.get_status()
-    if not status.get("enabled"):
-        camera_service.activate(mode)
-    else:
-        camera_service.set_mode(mode)
-
-    return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
 
 
 @app.get("/camera/stream")

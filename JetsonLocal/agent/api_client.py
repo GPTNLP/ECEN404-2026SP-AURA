@@ -9,9 +9,11 @@ class ApiClient:
     def __init__(self):
         self.base_url = API_BASE_URL.rstrip("/")
         self.timeout = 15
+        self.camera_timeout = 4
+        self.session = requests.Session()
 
     def download_document(self, path: str, dest_path: str):
-        r = requests.get(
+        r = self.session.get(
             self._url("/api/documents/download"),
             params={"path": path},
             headers=self._headers(),
@@ -33,7 +35,7 @@ class ApiClient:
                 files.append(("files", (fn, open(fp, "rb"))))
 
         if files:
-            r = requests.post(
+            r = self.session.post(
                 url,
                 files=files,
                 headers={"X-Device-Secret": DEVICE_SHARED_SECRET},
@@ -44,15 +46,16 @@ class ApiClient:
                 f.close()
 
     def upload_camera_frame(self, device_id: str, mode: str, jpeg_bytes: bytes) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/camera/frame"),
             params={"device_id": device_id, "mode": mode},
             data=jpeg_bytes,
             headers={
                 "Content-Type": "image/jpeg",
                 "X-Device-Secret": DEVICE_SHARED_SECRET,
+                "Connection": "keep-alive",
             },
-            timeout=self.timeout,
+            timeout=self.camera_timeout,
         )
         r.raise_for_status()
         return r.json()
@@ -69,12 +72,12 @@ class ApiClient:
         return f"{self.base_url}{path}"
 
     def health(self) -> Dict[str, Any]:
-        r = requests.get(self._url("/health"), timeout=self.timeout)
+        r = self.session.get(self._url("/health"), timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
     def register(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/register"),
             json=payload,
             headers=self._headers(),
@@ -84,7 +87,7 @@ class ApiClient:
         return r.json()
 
     def heartbeat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/heartbeat"),
             json=payload,
             headers=self._headers(),
@@ -94,7 +97,7 @@ class ApiClient:
         return r.json()
 
     def status(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/status"),
             json=payload,
             headers=self._headers(),
@@ -104,7 +107,7 @@ class ApiClient:
         return r.json()
 
     def log(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/logs"),
             json=payload,
             headers=self._headers(),
@@ -114,7 +117,7 @@ class ApiClient:
         return r.json()
 
     def get_config(self, device_id: str) -> Dict[str, Any]:
-        r = requests.get(
+        r = self.session.get(
             self._url("/device/config"),
             params={"device_id": device_id},
             headers={"X-Device-Secret": DEVICE_SHARED_SECRET},
@@ -124,7 +127,7 @@ class ApiClient:
         return r.json()
 
     def get_next_command(self, device_id: str) -> Dict[str, Any]:
-        r = requests.get(
+        r = self.session.get(
             self._url("/device/command/next"),
             params={"device_id": device_id},
             headers={"X-Device-Secret": DEVICE_SHARED_SECRET},
@@ -134,7 +137,7 @@ class ApiClient:
         return r.json()
 
     def ack_command(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        r = requests.post(
+        r = self.session.post(
             self._url("/device/command/ack"),
             json=payload,
             headers=self._headers(),
