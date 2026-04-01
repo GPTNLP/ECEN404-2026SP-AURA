@@ -15,29 +15,24 @@ from faster_whisper import WhisperModel
 # ============================================================
 # TUNING
 # ============================================================
-# Raise these in noisy environments
-WAKE_AUDIO_THRESHOLD = 0.035       # ignore quiet / far audio for wake checks
-COMMAND_AUDIO_THRESHOLD = 0.020    # ignore quiet command chunks
-END_SILENCE_SECONDS = 1.1          # how long silence before command is "done"
-WAKE_CHUNK_SECONDS = 1.5           # wake check chunk length
-COMMAND_CHUNK_SECONDS = 0.35       # command loop chunk size
-COMMAND_TIMEOUT_SECONDS = 10.0     # if user says nothing after wake, go back
-NEAR_FIELD_BOOST = 1.0             # keep at 1.0 usually; lower if clipping
-USE_ONLY_LEFT_CHANNEL = True       # NanoMic shows 2 input channels; use one
+WAKE_AUDIO_THRESHOLD = 0.035
+COMMAND_AUDIO_THRESHOLD = 0.020
+END_SILENCE_SECONDS = 1.1
+WAKE_CHUNK_SECONDS = 2.0
+COMMAND_CHUNK_SECONDS = 0.35
+COMMAND_TIMEOUT_SECONDS = 10.0
+NEAR_FIELD_BOOST = 1.0
+USE_ONLY_LEFT_CHANNEL = True
+
+# how many wake words must appear in the wake chunk
+# 1 = more permissive
+# 2 = stricter
+WAKE_MATCH_MODE = 1
 
 
 # ============================================================
 # PHRASES / RULES
 # ============================================================
-WAKE_PATTERNS = [
-    r"\bhey\s+aura\b",
-    r"\bhi\s+aura\b",
-    r"\bok(?:ay)?\s+aura\b",
-    r"\byo\s+aura\b",
-    r"\bhey\s+ora\b",
-    r"\bhey\s+arua\b",
-]
-
 MOVEMENT_PATTERNS = {
     "forward": [
         "move forward",
@@ -91,6 +86,18 @@ BAD_WORD_PATTERNS = [
     r"\bass\b",
 ]
 
+# very forgiving wake aliases
+# since whisper is hearing "aura" as "or a", "ora", "or", etc.
+WAKE_PREFIXES = ["hey", "hi", "ok", "okay", "yo"]
+WAKE_AURA_ALIASES = [
+    "aura",
+    "ora",
+    "or a",
+    "or",
+    "oura",
+    "arua",
+]
+
 
 # ============================================================
 # TEXT HELPERS
@@ -120,29 +127,87 @@ def contains_bad_language(text: str) -> bool:
     return False
 
 
-def contains_wake_phrase(text: str) -> bool:
+def wake_score(text: str):
+    """
+    Returns:
+      (matched: bool, cleaned_text_after_wake: str, debug_reason: str)
+
+    Very forgiving logic:
+    - exact-ish pair like "hey aura", "hey or a", "okay ora"
+    - also supports one-shot like "hey or a move forward"
+    """
     norm = normalize_text(text)
-    for pattern in WAKE_PATTERNS:
-        if re.search(pattern, norm):
-            return True
-    return False
+    if not norm:
+        return False, "", "empty"
+
+    tokens = norm.split()
+
+    # Build possible wake phrases
+    candidates = []
+    for prefix in WAKE_PREFIXES:
+        for alias in WAKE_AURA_ALIASES:
+            candidates.append(f"{prefix} {alias}")
+
+    # Strong match: exact candidate appears anywhere
+    for cand in candidates:
+        cand_norm = normalize_text(cand)
+        pattern = rf"\b{re.escape(cand_norm)}\b"
+        m = re.search(pattern, norm)
+        if m:
+            leftover = norm[m.end():].strip()
+            return True, leftover, f"exact:{cand_norm}"
+
+    # Token-based fuzzy-ish match:
+    # e.g. ["hey", "or", "a", "move", "forward"]
+    # or  ["hey", "ora", "move", "forward"]
+    for i in range(len(tokens)):
+        if tokens[i] in WAKE_PREFIXES:
+            # prefix + one-token alias
+            if i + 1 < len(tokens):
+                two = f"{tokens[i]} {tokens[i+1]}"
+                if tokens[i+1] in {"aura", "ora", "or", "oura", "arua"}:
+                    leftover = " ".join(tokens[i+2:]).strip()
+                    return True, leftover, f"token_pair:{two}"
+
+            # prefix + two-token alias ("or a")
+            if i + 2 < len(tokens):
+                three = f"{tokens[i]} {tokens[i+1]} {tokens[i+2]}"
+                if f"{tokens[i+1]} {tokens[i+2]}" == "or a":
+                    leftover = " ".join(tokens[i+3:]).strip()
+                    return True, leftover, f"token_triplet:{three}"
+
+    # More permissive fallback:
+    # allow wake if both a prefix and aura-ish alias exist anywhere
+    has_prefix = any(tok in WAKE_PREFIXES for tok in tokens)
+    has_auraish = (
+        "aura" in tokens or
+        "ora" in tokens or
+        "or" in tokens or
+        "oura" in tokens or
+        "arua" in tokens or
+        "or a" in norm
+    )
+
+    if WAKE_MATCH_MODE == 1 and has_prefix and has_auraish:
+        # remove the first prefix and first aura-ish fragment loosely
+        cleaned = norm
+        cleaned = re.sub(r"\b(hey|hi|ok|okay|yo)\b", " ", cleaned, count=1)
+        cleaned = re.sub(r"\b(aura|ora|or|oura|arua)\b", " ", cleaned, count=1)
+        cleaned = re.sub(r"\bor a\b", " ", cleaned, count=1)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return True, cleaned, "fallback_prefix+auraish"
+
+    return False, "", "no_match"
 
 
 def remove_wake_phrase(text: str) -> str:
-    norm = normalize_text(text)
-    for pattern in WAKE_PATTERNS:
-        norm = re.sub(pattern, " ", norm)
-    norm = re.sub(r"\s+", " ", norm).strip()
-    return norm
+    matched, leftover, _ = wake_score(text)
+    if matched:
+        return leftover
+    return normalize_text(text)
 
 
 def classify_intent(text: str) -> str:
-    """
-    Returns:
-      - "movement"
-      - "llm"
-      - "empty"
-    """
     norm = normalize_text(text)
     if not norm:
         return "empty"
@@ -159,11 +224,6 @@ def detect_last_movement_command(text: str):
     if not norm:
         return None
 
-    # Stricter logic:
-    # 1) If there is an explicit action phrase, use it
-    # 2) If input is very short, allow raw direction words
-    # 3) Otherwise do NOT trigger on words like "right" in normal questions
-
     has_action_word = any(re.search(rf"\b{re.escape(word)}\b", norm) for word in ACTION_WORDS)
     word_count = len(norm.split())
 
@@ -173,7 +233,6 @@ def detect_last_movement_command(text: str):
         for phrase in phrases:
             phrase_norm = normalize_text(phrase)
 
-            # Reject plain "left"/"right"/"forward"/etc in long sentences
             is_single_word_direction = phrase_norm in {"left", "right", "forward", "back", "backward", "stop"}
 
             if is_single_word_direction and word_count > 2 and not has_action_word:
@@ -220,9 +279,6 @@ class SpeechToText:
         self.log_path = os.path.expanduser(log_path)
 
     def _prepare_audio(self, audio: np.ndarray) -> np.ndarray:
-        """
-        Make audio mono and optionally use only one channel.
-        """
         if audio.ndim == 1:
             mono = audio.astype(np.float32)
         else:
@@ -305,31 +361,20 @@ class SpeechToText:
         return peak, mean
 
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
-        """
-        Returns:
-          (woke: bool, text: str, leftover_text: str)
-        leftover_text is the text after removing wake phrase,
-        so it supports:
-          'hey aura move forward'
-        in one shot.
-        """
         audio = self.record_fixed(chunk_seconds)
         peak, mean = self.analyze_level(audio)
 
         if peak < WAKE_AUDIO_THRESHOLD:
-            return False, "", ""
+            return False, "", "", "too_quiet"
 
         text = self._transcribe_audio_array(audio)
         if not text:
-            return False, "", ""
+            return False, "", "", "no_text"
 
-        print(f"[WAKE CHECK] {text}")
+        matched, leftover, reason = wake_score(text)
+        print(f"[WAKE CHECK] {text}  | reason={reason}")
 
-        if not contains_wake_phrase(text):
-            return False, text, ""
-
-        leftover = remove_wake_phrase(text)
-        return True, text, leftover
+        return matched, text, leftover, reason
 
     def listen_until_done(
         self,
@@ -395,13 +440,11 @@ def handle_user_text(text: str):
     print(f"CLEANED TEXT: {cleaned}")
 
     if intent == "movement" and movement:
-        print(f"ACTION TYPE: MOVEMENT")
+        print("ACTION TYPE: MOVEMENT")
         print(f"COMMAND: {movement}")
-        # later: send to ESP32 here
     elif intent == "llm":
         print("ACTION TYPE: LLM")
         print(f"LLM QUERY: {cleaned if cleaned else text}")
-        # later: send to LLM here
     else:
         print("ACTION TYPE: NONE")
         print("No usable command or query detected.")
@@ -417,7 +460,7 @@ def main():
         input_device=4,
         device_sample_rate=48000,
         target_sample_rate=16000,
-        channels=2,   # NanoMic reports 2 input channels
+        channels=2,
         device="cpu",
         compute_type="int8",
         language="en",
@@ -431,24 +474,19 @@ def main():
     print(" AURA VOICE MODE")
     print("=" * 60)
     print("Say 'Hey AURA' to activate.")
-    print("You can say either:")
-    print("  - 'Hey AURA' ... then pause ... then speak")
-    print("  - 'Hey AURA move forward' all in one shot")
-    print("If no speech is heard after wake, it returns to wake mode.")
+    print("It now accepts misheard versions like 'hey ora' or 'hey or a'.")
     print("Press Ctrl+C to exit.")
     print("-" * 60)
 
     try:
         while True:
-            woke, wake_text, leftover = stt.listen_for_wake_word()
+            woke, wake_text, leftover, reason = stt.listen_for_wake_word()
 
             if not woke:
                 continue
 
-            print("[AURA] Wake word detected.")
+            print(f"[AURA] Wake word detected. reason={reason}")
 
-            # One-shot case:
-            # "hey aura move forward actually go left"
             if leftover:
                 print("[AURA] Immediate speech detected after wake phrase.")
                 final_text = leftover
