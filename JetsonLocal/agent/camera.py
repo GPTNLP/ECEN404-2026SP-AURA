@@ -5,12 +5,16 @@ from typing import Dict, Any, Optional
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
+
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
 
-# fixed camera settings
 CAMERA_SENSOR_ID = 0
 CAMERA_WIDTH = 1280
 CAMERA_HEIGHT = 720
@@ -21,23 +25,33 @@ CAMERA_IDLE_TIMEOUT_SECONDS = 10
 CAMERA_DETECT_CONF = 0.25
 CAMERA_INFER_SIZE = 416
 
+# Set to an integer like 2 or 3 if you want to force a specific Argus sensor mode.
+# Leaving this as None lets Argus choose automatically.
+CAMERA_SENSOR_MODE: Optional[int] = None
 
-def gstreamer_pipeline(
-    sensor_id: int = CAMERA_SENSOR_ID,
-    capture_width: int = CAMERA_WIDTH,
-    capture_height: int = CAMERA_HEIGHT,
-    display_width: int = CAMERA_WIDTH,
-    display_height: int = CAMERA_HEIGHT,
-    framerate: int = CAMERA_FPS,
-    flip_method: int = CAMERA_FLIP_METHOD,
+
+def build_gstreamer_pipeline(
+    sensor_id: int,
+    capture_width: int,
+    capture_height: int,
+    display_width: int,
+    display_height: int,
+    framerate: int,
+    flip_method: int,
+    sensor_mode: Optional[int] = None,
+    use_bufapi: bool = True,
 ) -> str:
+    sensor_mode_part = f"sensor-mode={sensor_mode} " if sensor_mode is not None else ""
+    bufapi_part = "bufapi-version=true " if use_bufapi else ""
+
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"nvarguscamerasrc sensor-id={sensor_id} {sensor_mode_part}{bufapi_part}! "
         f"video/x-raw(memory:NVMM), "
         f"width=(int){capture_width}, "
         f"height=(int){capture_height}, "
         f"format=(string)NV12, "
         f"framerate=(fraction){framerate}/1 ! "
+        f"queue max-size-buffers=1 leaky=downstream ! "
         f"nvvidconv flip-method={flip_method} ! "
         f"video/x-raw, "
         f"width=(int){display_width}, "
@@ -61,6 +75,7 @@ class CameraService:
         detect_conf: float = CAMERA_DETECT_CONF,
         infer_size: int = CAMERA_INFER_SIZE,
         idle_timeout_seconds: int = CAMERA_IDLE_TIMEOUT_SECONDS,
+        sensor_mode: Optional[int] = CAMERA_SENSOR_MODE,
     ):
         self.sensor_id = sensor_id
         self.width = width
@@ -71,11 +86,11 @@ class CameraService:
         self.detect_conf = detect_conf
         self.infer_size = infer_size
         self.idle_timeout_seconds = idle_timeout_seconds
+        self.sensor_mode = sensor_mode
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
-
         self.lock = threading.Lock()
 
         self.latest_raw_jpeg: Optional[bytes] = None
@@ -87,7 +102,6 @@ class CameraService:
         self.last_error: Optional[str] = None
         self.last_access_ts = 0.0
         self.stream_clients = 0
-
         self.consecutive_failures = 0
         self.capture_backend = "argus"
 
@@ -101,22 +115,66 @@ class CameraService:
         )
 
         self.model = None
-        if MODEL_PATH.exists():
+        if YOLO is None:
+            self.last_error = "ultralytics is not installed; detection disabled"
+        elif MODEL_PATH.exists():
             try:
                 self.model = YOLO(str(MODEL_PATH))
+                self.last_error = None
             except Exception as e:
                 self.model = None
                 self.last_error = f"Failed to load model: {e}"
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
+    def _pipeline_candidates(self) -> list[tuple[str, str]]:
+        candidates: list[tuple[str, str]] = []
+
+        # Best option for JetPack 5/6. This commonly fixes NvBufSurfaceFromFd / dmabuf issues.
+        candidates.append(
+            (
+                "argus-bufapi",
+                build_gstreamer_pipeline(
+                    sensor_id=self.sensor_id,
+                    capture_width=self.width,
+                    capture_height=self.height,
+                    display_width=self.width,
+                    display_height=self.height,
+                    framerate=self.fps,
+                    flip_method=self.flip_method,
+                    sensor_mode=self.sensor_mode,
+                    use_bufapi=True,
+                ),
+            )
+        )
+
+        # Fallback without bufapi-version, just in case a setup behaves differently.
+        candidates.append(
+            (
+                "argus-legacy",
+                build_gstreamer_pipeline(
+                    sensor_id=self.sensor_id,
+                    capture_width=self.width,
+                    capture_height=self.height,
+                    display_width=self.width,
+                    display_height=self.height,
+                    framerate=self.fps,
+                    flip_method=self.flip_method,
+                    sensor_mode=self.sensor_mode,
+                    use_bufapi=False,
+                ),
+            )
+        )
+
+        return candidates
+
     def _read_probe_frame(
         self,
         cap: cv2.VideoCapture,
-        warmup_frames: int = 12,
-        tries: int = 30,
+        warmup_frames: int = 10,
+        tries: int = 40,
         delay_s: float = 0.08,
-    ):
+    ) -> Optional[np.ndarray]:
         for _ in range(warmup_frames):
             try:
                 cap.read()
@@ -133,28 +191,39 @@ class CameraService:
         return None
 
     def _open_camera(self) -> cv2.VideoCapture:
-        pipeline = gstreamer_pipeline(
-            sensor_id=self.sensor_id,
-            capture_width=self.width,
-            capture_height=self.height,
-            display_width=self.width,
-            display_height=self.height,
-            framerate=self.fps,
-            flip_method=self.flip_method,
-        )
+        errors: list[str] = []
 
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
-            raise RuntimeError("Could not open Jetson CSI camera.")
+        for backend_name, pipeline in self._pipeline_candidates():
+            cap = None
+            try:
+                print(f"[CAMERA] trying backend={backend_name}")
+                print(f"[CAMERA] pipeline={pipeline}")
 
-        frame = self._read_probe_frame(cap)
-        if frame is None:
-            cap.release()
-            raise RuntimeError("Jetson CSI camera opened but failed to read a usable frame after warmup.")
+                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                if not cap.isOpened():
+                    raise RuntimeError("VideoCapture did not open")
 
-        self.capture_backend = "argus"
-        self.last_error = None
-        return cap
+                frame = self._read_probe_frame(cap)
+                if frame is None:
+                    raise RuntimeError("Opened camera but never received a usable frame")
+
+                self.capture_backend = backend_name
+                self.last_error = None
+                print(f"[CAMERA] opened successfully on backend={backend_name}")
+                return cap
+
+            except Exception as e:
+                err = f"{backend_name}: {e}"
+                errors.append(err)
+                print(f"[CAMERA] backend failed: {err}")
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                time.sleep(0.6)
+
+        raise RuntimeError(" | ".join(errors))
 
     def _close_camera(self) -> None:
         if self.cap is not None:
@@ -227,12 +296,15 @@ class CameraService:
 
     def stop(self) -> None:
         self.running = False
+
         if self.thread is not None:
             self.thread.join(timeout=2.0)
+
         self._close_camera()
         self.thread = None
 
     def restart_camera(self) -> None:
+        print("[CAMERA] restarting camera")
         self._close_camera()
         time.sleep(1.0)
         self.cap = self._open_camera()
@@ -254,8 +326,8 @@ class CameraService:
 
         sharp = cv2.filter2D(frame, -1, self.kernel)
         h, w = sharp.shape[:2]
-
         infer = cv2.resize(sharp, (self.infer_size, self.infer_size))
+
         results = self.model(infer, verbose=False, conf=self.detect_conf)
 
         annotated = sharp.copy()
@@ -319,7 +391,7 @@ class CameraService:
                     self.cap = self._open_camera()
 
                 ret, frame = self.cap.read()
-                if not ret or frame is None:
+                if not ret or frame is None or getattr(frame, "size", 0) == 0:
                     self.consecutive_failures += 1
                     self.last_error = (
                         f"Failed to read frame ({self.consecutive_failures}) "
@@ -333,10 +405,10 @@ class CameraService:
                             f"restarting camera"
                         )
                         self.restart_camera()
+
                     continue
 
                 self.consecutive_failures = 0
-
                 raw_jpeg = self._encode_jpeg(frame)
 
                 with self.lock:
@@ -359,14 +431,18 @@ class CameraService:
 
             except Exception as e:
                 self.last_error = str(e)
+                print(f"[CAMERA] loop error: {e}")
                 time.sleep(0.2)
+
                 try:
                     self.restart_camera()
                 except Exception as inner:
                     self.last_error = f"{e} | restart failed: {inner}"
+                    print(f"[CAMERA] restart failed: {inner}")
                     time.sleep(1.0)
 
         self._close_camera()
+        print("[CAMERA] stopped")
 
     def get_jpeg(self) -> Optional[bytes]:
         self.mark_access()
@@ -399,6 +475,7 @@ class CameraService:
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "capture_backend": self.capture_backend,
                 "sensor_id": self.sensor_id,
+                "sensor_mode": self.sensor_mode,
                 "flip_method": self.flip_method,
             }
 
