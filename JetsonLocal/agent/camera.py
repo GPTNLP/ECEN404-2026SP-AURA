@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def gstreamer_pipeline(
     sensor_id: int = 0,
     capture_width: int = 1280,
@@ -22,12 +37,19 @@ def gstreamer_pipeline(
 ) -> str:
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
-        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+        f"video/x-raw(memory:NVMM), "
+        f"width=(int){capture_width}, "
+        f"height=(int){capture_height}, "
+        f"format=(string)NV12, "
+        f"framerate=(fraction){framerate}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+        f"video/x-raw, "
+        f"width=(int){display_width}, "
+        f"height=(int){display_height}, "
+        f"format=(string)BGRx ! "
         f"videoconvert ! "
-        f"video/x-raw, format=(string)BGR ! appsink drop=true max-buffers=1 sync=false"
+        f"video/x-raw, format=(string)BGR ! "
+        f"appsink drop=true max-buffers=1 sync=false"
     )
 
 
@@ -71,6 +93,10 @@ class CameraService:
         self.stream_clients = 0
 
         self.consecutive_failures = 0
+        self.capture_backend = "none"
+
+        self.use_usb_fallback = _env_bool("CAMERA_USE_USB_FALLBACK", True)
+        self.usb_index = _env_int("CAMERA_USB_INDEX", 0)
 
         self.kernel = np.array(
             [
@@ -83,11 +109,15 @@ class CameraService:
 
         self.model = None
         if MODEL_PATH.exists():
-            self.model = YOLO(str(MODEL_PATH))
+            try:
+                self.model = YOLO(str(MODEL_PATH))
+            except Exception as e:
+                self.model = None
+                self.last_error = f"Failed to load model: {e}"
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
-    def _open_camera(self) -> cv2.VideoCapture:
+    def _open_argus_camera(self) -> cv2.VideoCapture:
         pipeline = gstreamer_pipeline(
             sensor_id=self.sensor_id,
             capture_width=self.width,
@@ -97,10 +127,61 @@ class CameraService:
             framerate=self.fps,
             flip_method=self.flip_method,
         )
+
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if not cap.isOpened():
-            raise RuntimeError("Could not open Jetson CSI camera.")
+            raise RuntimeError("Could not open Jetson Argus camera pipeline.")
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.release()
+            raise RuntimeError("Argus pipeline opened but failed to read first frame.")
+
         return cap
+
+    def _open_usb_camera(self) -> cv2.VideoCapture:
+        cap = cv2.VideoCapture(self.usb_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open USB/V4L2 camera index {self.usb_index}.")
+
+        # Best-effort settings only
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.release()
+            raise RuntimeError(f"USB/V4L2 camera index {self.usb_index} opened but failed to read first frame.")
+
+        return cap
+
+    def _open_camera(self) -> cv2.VideoCapture:
+        errors = []
+
+        try:
+            cap = self._open_argus_camera()
+            self.capture_backend = "argus"
+            self.last_error = None
+            return cap
+        except Exception as e:
+            errors.append(f"argus: {e}")
+
+        if self.use_usb_fallback:
+            try:
+                cap = self._open_usb_camera()
+                self.capture_backend = "usb"
+                self.last_error = f"Argus failed, using USB/V4L2 fallback on index {self.usb_index}"
+                return cap
+            except Exception as e:
+                errors.append(f"usb: {e}")
+
+        self.capture_backend = "none"
+        raise RuntimeError(" | ".join(errors))
 
     def _close_camera(self) -> None:
         if self.cap is not None:
@@ -108,10 +189,12 @@ class CameraService:
                 self.cap.release()
             except Exception:
                 pass
+
         self.cap = None
         self.latest_raw_jpeg = None
         self.latest_annotated_jpeg = None
         self.latest_detections = []
+        self.capture_backend = "none"
 
     def activate(self, mode: str = "raw") -> None:
         mode = (mode or "raw").strip().lower()
@@ -266,11 +349,11 @@ class CameraService:
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
                     self.consecutive_failures += 1
-                    self.last_error = f"Failed to read frame ({self.consecutive_failures})"
+                    self.last_error = f"Failed to read frame ({self.consecutive_failures}) on backend={self.capture_backend}"
                     time.sleep(0.05)
 
                     if self.consecutive_failures >= 10:
-                        self.last_error = "Camera read timeout, restarting pipeline"
+                        self.last_error = f"Camera read timeout on backend={self.capture_backend}, restarting pipeline"
                         self.restart_camera()
                     continue
 
@@ -292,7 +375,13 @@ class CameraService:
                     self.latest_raw_jpeg = raw_jpeg
                     self.latest_annotated_jpeg = annotated_jpeg
                     self.latest_detections = detections
-                    self.last_error = None
+
+                    # Preserve fallback info if USB is in use
+                    if self.capture_backend == "usb":
+                        if self.last_error is None or "fallback" not in self.last_error.lower():
+                            self.last_error = f"Argus unavailable, using USB/V4L2 fallback on index {self.usb_index}"
+                    else:
+                        self.last_error = None
 
                 time.sleep(0.01)
 
@@ -336,6 +425,9 @@ class CameraService:
                 "resolution": {"width": self.width, "height": self.height},
                 "fps": self.fps,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
+                "capture_backend": self.capture_backend,
+                "usb_index": self.usb_index,
+                "usb_fallback_enabled": self.use_usb_fallback,
             }
 
 
