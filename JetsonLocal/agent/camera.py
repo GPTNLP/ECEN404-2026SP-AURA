@@ -1,4 +1,3 @@
-import os
 import threading
 import time
 from pathlib import Path
@@ -11,36 +10,26 @@ from ultralytics import YOLO
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
 
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-
-def _env_str(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip()
+# fixed camera settings
+CAMERA_SENSOR_ID = 0
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
+CAMERA_FPS = 30
+CAMERA_FLIP_METHOD = 0
+CAMERA_JPEG_QUALITY = 70
+CAMERA_IDLE_TIMEOUT_SECONDS = 10
+CAMERA_DETECT_CONF = 0.25
+CAMERA_INFER_SIZE = 416
 
 
 def gstreamer_pipeline(
-    sensor_id: int = 0,
-    capture_width: int = 1280,
-    capture_height: int = 720,
-    display_width: int = 1280,
-    display_height: int = 720,
-    framerate: int = 30,
-    flip_method: int = 0,
+    sensor_id: int = CAMERA_SENSOR_ID,
+    capture_width: int = CAMERA_WIDTH,
+    capture_height: int = CAMERA_HEIGHT,
+    display_width: int = CAMERA_WIDTH,
+    display_height: int = CAMERA_HEIGHT,
+    framerate: int = CAMERA_FPS,
+    flip_method: int = CAMERA_FLIP_METHOD,
 ) -> str:
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
@@ -63,15 +52,15 @@ def gstreamer_pipeline(
 class CameraService:
     def __init__(
         self,
-        sensor_id: int = 0,
-        width: int = 1280,
-        height: int = 720,
-        fps: int = 30,
-        flip_method: int = 0,
-        jpeg_quality: int = 70,
-        detect_conf: float = 0.25,
-        infer_size: int = 416,
-        idle_timeout_seconds: int = 10,
+        sensor_id: int = CAMERA_SENSOR_ID,
+        width: int = CAMERA_WIDTH,
+        height: int = CAMERA_HEIGHT,
+        fps: int = CAMERA_FPS,
+        flip_method: int = CAMERA_FLIP_METHOD,
+        jpeg_quality: int = CAMERA_JPEG_QUALITY,
+        detect_conf: float = CAMERA_DETECT_CONF,
+        infer_size: int = CAMERA_INFER_SIZE,
+        idle_timeout_seconds: int = CAMERA_IDLE_TIMEOUT_SECONDS,
     ):
         self.sensor_id = sensor_id
         self.width = width
@@ -82,8 +71,6 @@ class CameraService:
         self.detect_conf = detect_conf
         self.infer_size = infer_size
         self.idle_timeout_seconds = idle_timeout_seconds
-
-        self.camera_backend = _env_str("CAMERA_BACKEND", "argus").lower()
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.thread: Optional[threading.Thread] = None
@@ -102,7 +89,7 @@ class CameraService:
         self.stream_clients = 0
 
         self.consecutive_failures = 0
-        self.capture_backend = "none"
+        self.capture_backend = "argus"
 
         self.kernel = np.array(
             [
@@ -145,7 +132,7 @@ class CameraService:
 
         return None
 
-    def _open_argus_camera(self) -> cv2.VideoCapture:
+    def _open_camera(self) -> cv2.VideoCapture:
         pipeline = gstreamer_pipeline(
             sensor_id=self.sensor_id,
             capture_width=self.width,
@@ -165,16 +152,6 @@ class CameraService:
             cap.release()
             raise RuntimeError("Jetson CSI camera opened but failed to read a usable frame after warmup.")
 
-        return cap
-
-    def _open_camera(self) -> cv2.VideoCapture:
-        if self.camera_backend != "argus":
-            raise RuntimeError(
-                f"Unsupported CAMERA_BACKEND={self.camera_backend}. "
-                f"Set CAMERA_BACKEND=argus for this camera."
-            )
-
-        cap = self._open_argus_camera()
         self.capture_backend = "argus"
         self.last_error = None
         return cap
@@ -190,7 +167,6 @@ class CameraService:
         self.latest_raw_jpeg = None
         self.latest_annotated_jpeg = None
         self.latest_detections = []
-        self.capture_backend = "none"
 
     def activate(self, mode: str = "raw") -> None:
         mode = (mode or "raw").strip().lower()
@@ -422,23 +398,12 @@ class CameraService:
                 "fps": self.fps,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "capture_backend": self.capture_backend,
-                "camera_backend_requested": self.camera_backend,
                 "sensor_id": self.sensor_id,
                 "flip_method": self.flip_method,
             }
 
 
-camera_service = CameraService(
-    sensor_id=_env_int("CAMERA_SENSOR_ID", 0),
-    width=_env_int("CAMERA_WIDTH", 1280),
-    height=_env_int("CAMERA_HEIGHT", 720),
-    fps=_env_int("CAMERA_FPS", 30),
-    flip_method=_env_int("CAMERA_FLIP_METHOD", 0),
-    jpeg_quality=_env_int("CAMERA_JPEG_QUALITY", 70),
-    detect_conf=_env_float("CAMERA_DETECT_CONF", 0.25),
-    infer_size=_env_int("CAMERA_INFER_SIZE", 416),
-    idle_timeout_seconds=_env_int("CAMERA_IDLE_TIMEOUT_SECONDS", 10),
-)
+camera_service = CameraService()
 
 
 def get_camera_status() -> Dict[str, Any]:
