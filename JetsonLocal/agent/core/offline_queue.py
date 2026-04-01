@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from config import PENDING_LOGS_FILE, PENDING_STATUS_FILE
+from JetsonLocal.agent.core.config import PENDING_LOGS_FILE, PENDING_STATUS_FILE
 
 
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:

@@ -2,7 +2,7 @@ import json
 import time
 from typing import Any, Dict, Optional
 
-from config import AGENT_LOG_FILE, DEVICE_ID
+from JetsonLocal.agent.core.config import AGENT_LOG_FILE, DEVICE_ID
 
 
 def _now() -> int:

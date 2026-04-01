@@ -2,7 +2,7 @@ import requests
 from typing import Any, Dict
 import os
 
-from config import API_BASE_URL, DEVICE_SHARED_SECRET
+from core.config import API_BASE_URL, DEVICE_SHARED_SECRET
 
 
 class ApiClient:

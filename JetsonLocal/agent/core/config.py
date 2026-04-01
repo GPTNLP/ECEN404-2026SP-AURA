@@ -1,14 +1,23 @@
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent
-JETSONLOCAL_DIR = BASE_DIR.parent
+# --- PATH FIX: Adjusted for the new 'core/' subfolder ---
+BASE_DIR = Path(__file__).resolve().parent      # This is now the 'core' folder
+AGENT_DIR = BASE_DIR.parent                     # This is the 'agent' folder
+JETSONLOCAL_DIR = AGENT_DIR.parent              # This is the 'JetsonLocal' root folder
+
+if str(JETSONLOCAL_DIR) not in sys.path:
+    sys.path.insert(0, str(JETSONLOCAL_DIR))
+
+# These will now correctly point to JetsonLocal/static and JetsonLocal/storage
+STATIC_DIR = JETSONLOCAL_DIR / "static"
 STORAGE_DIR = JETSONLOCAL_DIR / "storage"
+
 LOGS_DIR = STORAGE_DIR / "logs"
 QUEUE_DIR = STORAGE_DIR / "queue"
 STATE_DIR = STORAGE_DIR / "state"
-STATIC_DIR = JETSONLOCAL_DIR / "static"
 
 ENV_PATH = JETSONLOCAL_DIR / ".env"
 if ENV_PATH.exists():
