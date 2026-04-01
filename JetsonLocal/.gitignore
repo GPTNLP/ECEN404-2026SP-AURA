@@ -1,3 +1,13 @@
+# ========================
+# Environment variables
+# ========================
+.env
+.env.*
+# Note: We deliberately DO NOT ignore .env.example so the template gets committed.
+
+# ========================
+# Python
+# ========================
 __pycache__/
 *.pyc
 *.pyo
@@ -5,18 +15,23 @@ __pycache__/
 venv/
 .venv/
 aura_env/
-.env
-storage/
-.vscode/
-.DS_Store
-Thumbs.db
-*.log
 build/
 dist/
 *.egg-info/
 
+# ========================
+# Runtime Data & Storage
+# ========================
+storage/
 
-# env files
-.env
-.env.*
-.env.example
+# ========================
+# Logs
+# ========================
+*.log
+
+# ========================
+# OS / Editor junk
+# ========================
+.vscode/
+.DS_Store
+Thumbs.db
