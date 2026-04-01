@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from pypdf import PdfReader
-
 import serial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -42,6 +41,13 @@ from status import build_status_payload
 from device_info import collect_device_info
 from lightrag_local import LightRAG, OllamaClient
 from camera import camera_service, get_camera_status
+from stt_faster import (
+    SpeechToText,
+    detect_last_movement_command,
+    remove_wake_phrase,
+    censor_text,
+    contains_bad_language,
+)
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -72,8 +78,10 @@ class ConnectionManager:
 
 ui_manager = ConnectionManager()
 api = ApiClient()
+
 rag_system = None
 esp_serial = None
+stt_service = None
 
 runtime_config = {
     "poll_seconds": 0.05,
@@ -128,7 +136,6 @@ def init_hardware():
 
 def ensure_serial():
     global esp_serial
-
     try:
         if esp_serial is not None and esp_serial.is_open:
             return True
@@ -217,6 +224,28 @@ def init_rag():
         send_or_queue_log("warning", "rag_init_failed", f"RAG init failed: {e}")
 
 
+def init_stt():
+    global stt_service
+    try:
+        stt_service = SpeechToText(
+            model_size="base",
+            input_device=4,
+            device_sample_rate=48000,
+            target_sample_rate=16000,
+            channels=2,
+            device="cpu",
+            compute_type="int8",
+            language="en",
+            task="transcribe",
+        )
+        print("[STT] initialized")
+        send_or_queue_log("info", "stt_initialized", "Speech-to-text initialized")
+    except Exception as e:
+        stt_service = None
+        print(f"[STT] init failed: {e}")
+        send_or_queue_log("warning", "stt_init_failed", f"STT init failed: {e}")
+
+
 def build_register_payload():
     info = collect_device_info()
     return {
@@ -294,13 +323,16 @@ async def status_loop():
             send_or_queue_log("warning", "status_failed", f"Status upload failed: {e}")
             connection_text = "Robot only / website offline"
 
-        await ui_manager.broadcast({
-            "type": "telemetry",
-            "cpu_percent": payload.get("cpu_percent"),
-            "gpu_percent": (payload.get("extra") or {}).get("gpu_percent"),
-            "db_name": (payload.get("extra") or {}).get("db_name", LOCAL_DB_NAME),
-            "connection": connection_text,
-        })
+        await ui_manager.broadcast(
+            {
+                "type": "telemetry",
+                "cpu_percent": payload.get("cpu_percent"),
+                "gpu_percent": (payload.get("extra") or {}).get("gpu_percent"),
+                "db_name": (payload.get("extra") or {}).get("db_name", LOCAL_DB_NAME),
+                "connection": connection_text,
+            }
+        )
+
         await asyncio.sleep(runtime_config["status_seconds"])
 
 
@@ -368,8 +400,10 @@ async def camera_upload_sender_loop():
                 started = time.time()
                 await asyncio.to_thread(api.upload_camera_frame, DEVICE_ID, mode_to_send, jpeg_to_send)
                 elapsed = time.time() - started
+
                 camera_upload_last_send_ts = time.time()
                 camera_upload_sent_seq = seq_to_send
+
                 print(
                     f"[CAMERA_UPLOAD] sent seq={seq_to_send} "
                     f"bytes={len(jpeg_to_send)} mode={mode_to_send} dt={elapsed:.3f}s"
@@ -403,15 +437,17 @@ async def command_loop():
                     if esp_serial:
                         try:
                             if cmd == last_cmd and (now - last_cmd_time) < 0.04:
-                                await asyncio.to_thread(api.ack_command, {
-                                    "command_id": command_id,
-                                    "device_id": DEVICE_ID,
-                                    "status": "completed",
-                                    "note": f"Duplicate command skipped: {cmd}",
-                                })
+                                await asyncio.to_thread(
+                                    api.ack_command,
+                                    {
+                                        "command_id": command_id,
+                                        "device_id": DEVICE_ID,
+                                        "status": "completed",
+                                        "note": f"Duplicate command skipped: {cmd}",
+                                    },
+                                )
                             else:
                                 val = payload.get("value", "")
-
                                 if cmd in {"forward", "backward", "left", "right", "stop"}:
                                     serial_msg = f"MOVE:{cmd}\n"
                                 else:
@@ -424,12 +460,15 @@ async def command_loop():
                                 last_cmd = cmd
                                 last_cmd_time = now
 
-                                await asyncio.to_thread(api.ack_command, {
-                                    "command_id": command_id,
-                                    "device_id": DEVICE_ID,
-                                    "status": "completed",
-                                    "note": f"Sent to ESP as {serial_msg.strip()}",
-                                })
+                                await asyncio.to_thread(
+                                    api.ack_command,
+                                    {
+                                        "command_id": command_id,
+                                        "device_id": DEVICE_ID,
+                                        "status": "completed",
+                                        "note": f"Sent to ESP as {serial_msg.strip()}",
+                                    },
+                                )
 
                                 send_or_queue_log(
                                     "info",
@@ -439,71 +478,95 @@ async def command_loop():
                                 )
                         except Exception as e:
                             print(f"[COMMAND] serial send failed: {e}")
-                            await asyncio.to_thread(api.ack_command, {
+                            await asyncio.to_thread(
+                                api.ack_command,
+                                {
+                                    "command_id": command_id,
+                                    "device_id": DEVICE_ID,
+                                    "status": "failed",
+                                    "note": f"Serial send failed: {e}",
+                                },
+                            )
+                    else:
+                        print("[COMMAND] ESP serial not connected")
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "failed",
-                                "note": f"Serial send failed: {e}",
-                            })
-                    else:
-                        print("[COMMAND] ESP serial not connected")
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": "ESP serial is not connected",
-                        })
+                                "note": "ESP serial is not connected",
+                            },
+                        )
 
                 elif cmd == "camera_activate_raw":
                     try:
                         camera_service.activate("raw")
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                            "note": "Camera activated in raw mode",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in raw mode",
+                            },
+                        )
                     except Exception as e:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": f"Camera raw activation failed: {e}",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera raw activation failed: {e}",
+                            },
+                        )
 
                 elif cmd == "camera_activate_detection":
                     try:
                         camera_service.activate("detection")
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                            "note": "Camera activated in detection mode",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in detection mode",
+                            },
+                        )
                     except Exception as e:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": f"Camera detection activation failed: {e}",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera detection activation failed: {e}",
+                            },
+                        )
 
                 elif cmd == "camera_deactivate":
                     try:
                         camera_service.deactivate()
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                            "note": "Camera deactivated",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera deactivated",
+                            },
+                        )
                     except Exception as e:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": f"Camera deactivation failed: {e}",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera deactivation failed: {e}",
+                            },
+                        )
 
                 elif cmd == "chat_prompt":
                     query = payload.get("query", "")
@@ -511,36 +574,48 @@ async def command_loop():
                         try:
                             res = await rag_system.aquery(query)
                             ai_reply = res.get("answer", "No answer found.")
-                            await asyncio.to_thread(api.ack_command, {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "completed",
-                                "result": {"answer": ai_reply, "sources": res.get("sources", [])}
-                            })
+                            await asyncio.to_thread(
+                                api.ack_command,
+                                {
+                                    "command_id": command_id,
+                                    "device_id": DEVICE_ID,
+                                    "status": "completed",
+                                    "result": {"answer": ai_reply, "sources": res.get("sources", [])},
+                                },
+                            )
                         except Exception as e:
-                            await asyncio.to_thread(api.ack_command, {
+                            await asyncio.to_thread(
+                                api.ack_command,
+                                {
+                                    "command_id": command_id,
+                                    "device_id": DEVICE_ID,
+                                    "status": "failed",
+                                    "note": str(e),
+                                },
+                            )
+                    else:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "failed",
-                                "note": str(e)
-                            })
-                    else:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": "RAG system offline or empty query"
-                        })
+                                "note": "RAG system offline or empty query",
+                            },
+                        )
 
                 else:
                     print(f"[COMMAND] invalid command ignored: {cmd}")
                     if command_id:
-                        await asyncio.to_thread(api.ack_command, {
-                            "command_id": command_id,
-                            "device_id": DEVICE_ID,
-                            "status": "failed",
-                            "note": f"Invalid command: {cmd}",
-                        })
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Invalid command: {cmd}",
+                            },
+                        )
 
         except Exception as e:
             print(f"[COMMAND] poll failed: {e}")
@@ -548,57 +623,58 @@ async def command_loop():
         await asyncio.sleep(runtime_config["poll_seconds"])
 
 
-async def parse_intent(user_msg: str):
-    client = OllamaClient("http://127.0.0.1:11434", EMBEDDING_MODEL, DEFAULT_MODEL)
-    system = "Classify user input as 'MOVEMENT' or 'QUESTION'. Reply with one word."
-    prompt = f"Input: '{user_msg}'"
-    try:
-        res = await client.generate(prompt, system=system, timeout_s=5.0)
-        return "MOVEMENT" if "MOVEMENT" in res.upper() else "QUESTION"
-    except Exception:
-        return "QUESTION"
+async def execute_user_request(user_msg: str, source: str = "websocket"):
+    clean_msg = (user_msg or "").strip()
+    if not clean_msg:
+        return
 
-
-def listen_mic():
-    try:
-        import speech_recognition as sr
-    except Exception:
-        return ""
-
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source)
-        asyncio.run(ui_manager.broadcast({"type": "status", "data": "Listening..."}))
-        audio = r.listen(source)
-
-    try:
-        return r.recognize_google(audio)
-    except Exception:
-        return ""
-
-
-async def handle_user_message(user_msg: str):
-    await ui_manager.broadcast({"type": "chat", "sender": "user", "text": user_msg})
+    await ui_manager.broadcast({"type": "chat", "sender": "user", "text": clean_msg})
     await ui_manager.broadcast({"type": "status", "data": "Processing..."})
 
-    intent = await parse_intent(user_msg)
+    movement_cmd = detect_last_movement_command(clean_msg)
 
-    if intent == "MOVEMENT":
+    if movement_cmd:
         if esp_serial:
             try:
-                ack = send_serial_command(user_msg)
-                ai_reply = f"Movement command sent. {ack}"
+                ack = send_serial_command(movement_cmd)
+                ai_reply = f"Movement command sent: {movement_cmd}. {ack}"
+
+                send_or_queue_log(
+                    "info",
+                    "voice_or_text_movement",
+                    f"Executed movement command from {source}: {movement_cmd}",
+                    {"source": source, "raw_text": clean_msg, "command": movement_cmd},
+                )
             except Exception as e:
                 ai_reply = f"Movement failed: {e}"
+                send_or_queue_log(
+                    "warning",
+                    "voice_or_text_movement_failed",
+                    f"Movement failed from {source}: {e}",
+                    {"source": source, "raw_text": clean_msg, "command": movement_cmd},
+                )
         else:
             ai_reply = "ESP serial is not connected."
     else:
         if rag_system:
             try:
-                res = await rag_system.aquery(user_msg)
+                res = await rag_system.aquery(clean_msg)
                 ai_reply = res.get("answer", "No answer found.")
+
+                send_or_queue_log(
+                    "info",
+                    "voice_or_text_rag_query",
+                    f"Handled RAG query from {source}",
+                    {"source": source, "query": clean_msg},
+                )
             except Exception as e:
                 ai_reply = f"RAG query failed: {e}"
+                send_or_queue_log(
+                    "warning",
+                    "voice_or_text_rag_failed",
+                    f"RAG query failed from {source}: {e}",
+                    {"source": source, "query": clean_msg},
+                )
         else:
             ai_reply = "RAG Database offline."
 
@@ -606,76 +682,67 @@ async def handle_user_message(user_msg: str):
     await ui_manager.broadcast({"type": "status", "data": "Ready"})
 
 
-@app.get("/")
-async def serve_ui():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+async def handle_user_message(user_msg: str):
+    await execute_user_request(user_msg, source="websocket")
 
 
-@app.get("/health")
-async def health():
-    return {
-        "ok": True,
-        "device_id": DEVICE_ID,
-        "camera": camera_service.get_status(),
-        "rag_ready": rag_system is not None,
-        "serial_ready": esp_serial is not None,
-    }
+async def voice_loop():
+    global stt_service
 
-
-@app.get("/camera/status")
-async def camera_status():
-    return get_camera_status()
-
-
-@app.get("/camera/detections")
-async def camera_detections():
-    return {
-        "mode": camera_service.get_mode(),
-        "detections": camera_service.get_detections(),
-    }
-
-
-@app.post("/camera/activate")
-async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
-    try:
-        camera_service.activate(mode)
-        return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
-
-
-@app.post("/camera/deactivate")
-async def deactivate_camera():
-    camera_service.deactivate()
-    return {"ok": True, "enabled": False}
-
-
-@app.post("/camera/mode")
-async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
-    status = camera_service.get_status()
-    if not status.get("enabled"):
-        camera_service.activate(mode)
-    else:
-        camera_service.set_mode(mode)
-
-    return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
-
-
-def mjpeg_generator() -> Iterator[bytes]:
-    camera_service.add_stream_client()
-    try:
-        while True:
-            frame = camera_service.get_jpeg()
-            if frame is None:
-                time.sleep(0.03)
+    while True:
+        try:
+            if stt_service is None:
+                await asyncio.sleep(2.0)
                 continue
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            woke, wake_text, leftover, reason = await asyncio.to_thread(
+                stt_service.listen_for_wake_word
             )
-    finally:
-        camera_service.remove_stream_client()
+
+            if not woke:
+                await asyncio.sleep(0.05)
+                continue
+
+            print(f"[VOICE] wake detected: reason={reason} wake_text={wake_text!r}")
+            await ui_manager.broadcast({"type": "status", "data": "Listening..."})
+
+            if leftover:
+                print(f"[VOICE] immediate speech after wake: {leftover}")
+                final_text = leftover.strip()
+            else:
+                final_text = await asyncio.to_thread(stt_service.listen_until_done)
+                final_text = (final_text or "").strip()
+
+            if not final_text:
+                print("[VOICE] no speech heard after wake")
+                await ui_manager.broadcast({"type": "status", "data": "Ready"})
+                await asyncio.sleep(0.1)
+                continue
+
+            final_text = remove_wake_phrase(final_text).strip()
+
+            if not final_text:
+                print("[VOICE] only wake phrase heard, no command/query")
+                await ui_manager.broadcast({"type": "status", "data": "Ready"})
+                await asyncio.sleep(0.1)
+                continue
+
+            try:
+                stt_service.log_transcript(censor_text(final_text))
+            except Exception as e:
+                print(f"[VOICE] transcript log failed: {e}")
+
+            if contains_bad_language(final_text):
+                print("[VOICE] bad language detected in transcript")
+
+            print(f"[VOICE] final_text={final_text!r}")
+            await execute_user_request(final_text, source="voice")
+
+        except Exception as e:
+            print(f"[VOICE] loop failed: {e}")
+            send_or_queue_log("warning", "voice_loop_failed", f"Voice loop failed: {e}")
+            await ui_manager.broadcast({"type": "status", "data": "Ready"})
+            await asyncio.sleep(1.0)
 
 
 @app.on_event("startup")
@@ -685,6 +752,9 @@ async def startup_event():
 
     print("[STARTUP] initializing rag")
     init_rag()
+
+    print("[STARTUP] initializing stt")
+    init_stt()
 
     print("[STARTUP] camera service idle until activated")
     send_or_queue_log("info", "camera_idle", "Camera service is idle until activated")
@@ -702,63 +772,146 @@ async def startup_event():
     asyncio.create_task(command_loop())
     asyncio.create_task(camera_upload_loop())
     asyncio.create_task(camera_upload_sender_loop())
+    asyncio.create_task(voice_loop())
 
     print("[STARTUP] background loops started")
     send_or_queue_log("info", "startup_complete", "Jetson agent startup complete")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    try:
-        camera_service.deactivate()
-        print("[CAMERA] stopped")
-    except Exception as e:
-        print(f"[CAMERA] stop error: {e}")
+@app.get("/")
+async def root():
+    index_path = STATIC_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"ok": True, "service": "AURA Edge API", "device_id": DEVICE_ID}
+
+
+@app.get("/health")
+async def health():
+    return {
+        "ok": True,
+        "device_id": DEVICE_ID,
+        "rag_online": rag_system is not None,
+        "serial_connected": bool(esp_serial is not None),
+        "camera": get_camera_status(),
+        "stt_online": stt_service is not None,
+    }
+
+
+@app.get("/camera/status")
+async def camera_status():
+    return get_camera_status()
+
+
+@app.post("/camera/activate")
+async def camera_activate(mode: str = Query("raw")):
+    if mode not in {"raw", "detection"}:
+        raise HTTPException(status_code=400, detail="mode must be 'raw' or 'detection'")
+    camera_service.activate(mode)
+    return {"ok": True, "mode": mode}
+
+
+@app.post("/camera/deactivate")
+async def camera_deactivate():
+    camera_service.deactivate()
+    return {"ok": True}
+
+
+def mjpeg_frame_generator() -> Iterator[bytes]:
+    boundary = b"--frame\r\n"
+    content_type = b"Content-Type: image/jpeg\r\n\r\n"
+
+    while True:
+        jpeg = camera_service.get_jpeg()
+        if jpeg:
+            yield boundary + content_type + jpeg + b"\r\n"
+        time.sleep(0.03)
 
 
 @app.get("/camera/stream")
 async def camera_stream():
-    status = camera_service.get_status()
-    if not status.get("enabled"):
-        raise HTTPException(status_code=503, detail="Camera is not activated")
-
+    if not camera_service.get_status().get("running"):
+        camera_service.activate(camera_service.get_mode() or "raw")
     return StreamingResponse(
-        mjpeg_generator(),
+        mjpeg_frame_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@app.get("/camera/snapshot")
+async def camera_snapshot():
+    jpeg = camera_service.get_jpeg()
+    if not jpeg:
+        raise HTTPException(status_code=404, detail="No frame available")
+    return StreamingResponse(iter([jpeg]), media_type="image/jpeg")
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ui_manager.connect(websocket)
-    print("[WS] client connected")
+    await websocket.send_json({"type": "status", "data": "Connected"})
     try:
-        await websocket.send_json({
-            "type": "status",
-            "data": "Ready"
-        })
-        await websocket.send_json({
-            "type": "telemetry",
-            "cpu_percent": None,
-            "gpu_percent": None,
-            "db_name": LOCAL_DB_NAME,
-            "connection": "Connected to robot"
-        })
-
         while True:
-            raw = await websocket.receive_text()
-            msg = raw.strip()
-            if not msg:
-                continue
-            await handle_user_message(msg)
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "chat":
+                user_msg = (data.get("text") or "").strip()
+                await handle_user_message(user_msg)
+
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+
+            elif msg_type == "camera_activate":
+                mode = (data.get("mode") or "raw").strip().lower()
+                if mode not in {"raw", "detection"}:
+                    mode = "raw"
+                camera_service.activate(mode)
+                await websocket.send_json({"type": "camera_status", "data": get_camera_status()})
+
+            elif msg_type == "camera_deactivate":
+                camera_service.deactivate()
+                await websocket.send_json({"type": "camera_status", "data": get_camera_status()})
+
+            elif msg_type == "movement":
+                cmd = (data.get("command") or "").strip().lower()
+                if cmd not in MOVEMENT_COMMANDS:
+                    await websocket.send_json({"type": "error", "data": f"Invalid movement command: {cmd}"})
+                    continue
+
+                try:
+                    ack = send_serial_command(cmd)
+                    await websocket.send_json(
+                        {
+                            "type": "movement_result",
+                            "ok": True,
+                            "command": cmd,
+                            "ack": ack,
+                        }
+                    )
+                except Exception as e:
+                    await websocket.send_json(
+                        {
+                            "type": "movement_result",
+                            "ok": False,
+                            "command": cmd,
+                            "error": str(e),
+                        }
+                    )
+
+            else:
+                await websocket.send_json({"type": "error", "data": f"Unknown message type: {msg_type}"})
 
     except WebSocketDisconnect:
-        print("[WS] client disconnected")
         ui_manager.disconnect(websocket)
-    except Exception as e:
-        print(f"[WS] error: {e}")
+    except Exception:
         ui_manager.disconnect(websocket)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+    )
