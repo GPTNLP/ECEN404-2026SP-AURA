@@ -113,20 +113,29 @@ def remove_wake_phrase(text: str) -> str:
 def detect_last_movement_command(text: str):
     norm = normalize_text(text)
 
+    # Only trigger if there's an action verb present
+    ACTION_WORDS = ["move", "go", "turn", "stop", "halt"]
+
+    has_action_word = any(word in norm for word in ACTION_WORDS)
+
+    # If no action word AND not a short command → ignore
+    if not has_action_word and len(norm.split()) > 2:
+        return None
+
     matches = []
     for command, phrases in MOVEMENT_PATTERNS.items():
         for phrase in phrases:
             phrase_norm = normalize_text(phrase)
             pattern = rf"\b{re.escape(phrase_norm)}\b"
+
             for match in re.finditer(pattern, norm):
-                matches.append((match.start(), command, phrase_norm))
+                matches.append((match.start(), command))
 
     if not matches:
         return None
 
     matches.sort(key=lambda x: x[0])
     return matches[-1][1]
-
 
 class SpeechToText:
     def __init__(
