@@ -26,13 +26,6 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _env_str(name: str, default: str) -> str:
     value = os.getenv(name)
     if value is None:
@@ -54,21 +47,6 @@ def argus_pipeline(
         f"format=(string)NV12, framerate=(fraction){fps}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
         f"video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
-        f"videoconvert ! "
-        f"video/x-raw, format=(string)BGR ! "
-        f"appsink drop=true max-buffers=1 sync=false"
-    )
-
-
-def v4l2_pipeline(
-    device: str,
-    width: int,
-    height: int,
-    fps: int,
-) -> str:
-    return (
-        f"v4l2src device={device} ! "
-        f"video/x-raw, width=(int){width}, height=(int){height}, framerate=(fraction){fps}/1 ! "
         f"videoconvert ! "
         f"video/x-raw, format=(string)BGR ! "
         f"appsink drop=true max-buffers=1 sync=false"
@@ -140,13 +118,23 @@ class CameraService:
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
-    def _read_probe_frame(self, cap: cv2.VideoCapture, tries: int = 20, delay_s: float = 0.08):
+    def _read_probe_frame(self, cap: cv2.VideoCapture, tries: int = 30, delay_s: float = 0.10):
         for _ in range(tries):
             ok, frame = cap.read()
             if ok and frame is not None and getattr(frame, "size", 0) > 0:
                 return frame
             time.sleep(delay_s)
         return None
+
+    def _apply_capture_settings(self, cap: cv2.VideoCapture) -> None:
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
 
     def _open_argus_camera(self) -> cv2.VideoCapture:
         pipeline = argus_pipeline(
@@ -161,49 +149,38 @@ class CameraService:
         if not cap.isOpened():
             raise RuntimeError("Could not open Argus camera pipeline.")
 
-        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        frame = self._read_probe_frame(cap)
         if frame is None:
             cap.release()
             raise RuntimeError("Argus pipeline opened but failed to read first frame.")
 
         return cap
 
-    def _open_v4l2_camera(self) -> cv2.VideoCapture:
-        pipeline = v4l2_pipeline(
-            device=self.camera_device,
-            width=self.width,
-            height=self.height,
-            fps=self.fps,
-        )
-
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    def _open_v4l2_path_camera(self) -> cv2.VideoCapture:
+        cap = cv2.VideoCapture(self.camera_device, cv2.CAP_V4L2)
         if not cap.isOpened():
-            raise RuntimeError(f"Could not open V4L2 pipeline for {self.camera_device}.")
+            raise RuntimeError(f"Could not open V4L2 device path {self.camera_device}.")
 
-        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        self._apply_capture_settings(cap)
+
+        frame = self._read_probe_frame(cap)
         if frame is None:
             cap.release()
-            raise RuntimeError(f"V4L2 pipeline opened but failed to read first frame from {self.camera_device}.")
+            raise RuntimeError(f"V4L2 device path opened but failed to read first frame from {self.camera_device}.")
 
         return cap
 
-    def _open_usb_camera(self) -> cv2.VideoCapture:
+    def _open_usb_index_camera(self) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(self.usb_index, cv2.CAP_V4L2)
         if not cap.isOpened():
-            raise RuntimeError(f"Could not open USB/V4L2 camera index {self.usb_index}.")
+            raise RuntimeError(f"Could not open V4L2 camera index {self.usb_index}.")
 
-        try:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            cap.set(cv2.CAP_PROP_FPS, self.fps)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
+        self._apply_capture_settings(cap)
 
-        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        frame = self._read_probe_frame(cap)
         if frame is None:
             cap.release()
-            raise RuntimeError(f"USB/V4L2 camera index {self.usb_index} opened but failed to read first frame.")
+            raise RuntimeError(f"V4L2 camera index opened but failed to read first frame from index {self.usb_index}.")
 
         return cap
 
@@ -211,24 +188,23 @@ class CameraService:
         backend = self.camera_backend
         errors = []
 
-        order = []
         if backend == "argus":
             order = ["argus"]
         elif backend == "v4l2":
-            order = ["v4l2"]
+            order = ["v4l2_path", "usb_index"]
         elif backend == "usb":
-            order = ["usb"]
+            order = ["usb_index", "v4l2_path"]
         else:
-            order = ["v4l2", "argus", "usb"]
+            order = ["v4l2_path", "usb_index", "argus"]
 
         for candidate in order:
             try:
-                if candidate == "v4l2":
-                    cap = self._open_v4l2_camera()
-                elif candidate == "argus":
+                if candidate == "argus":
                     cap = self._open_argus_camera()
+                elif candidate == "v4l2_path":
+                    cap = self._open_v4l2_path_camera()
                 else:
-                    cap = self._open_usb_camera()
+                    cap = self._open_usb_index_camera()
 
                 self.capture_backend = candidate
                 self.last_error = None
@@ -409,7 +385,7 @@ class CameraService:
                     time.sleep(0.05)
 
                     if self.consecutive_failures >= 10:
-                        self.last_error = f"Camera read timeout on backend={self.capture_backend}, restarting pipeline"
+                        self.last_error = f"Camera read timeout on backend={self.capture_backend}, restarting camera"
                         self.restart_camera()
                     continue
 
