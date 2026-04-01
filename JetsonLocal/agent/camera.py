@@ -191,11 +191,11 @@ class CameraService:
         if backend == "argus":
             order = ["argus"]
         elif backend == "v4l2":
-            order = ["v4l2_path", "usb_index"]
+            order = ["v4l2_path"]
         elif backend == "usb":
-            order = ["usb_index", "v4l2_path"]
+            order = ["usb_index"]
         else:
-            order = ["v4l2_path", "usb_index", "argus"]
+            order = ["v4l2_path", "argus"]
 
         for candidate in order:
             try:
