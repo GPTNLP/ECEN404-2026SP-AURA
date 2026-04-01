@@ -9,7 +9,7 @@ from pypdf import PdfReader
 
 import serial
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -549,17 +549,13 @@ def mjpeg_generator() -> Iterator[bytes]:
     try:
         while True:
             frame = camera_service.get_jpeg()
-
             if frame is None:
-                time.sleep(0.01)
+                time.sleep(0.03)
                 continue
 
             yield (
                 b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n" +
-                frame +
-                b"\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
             )
     finally:
         camera_service.remove_stream_client()
@@ -607,55 +603,6 @@ async def serve_ui():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
-@app.get("/camera/view", response_class=HTMLResponse)
-async def camera_view():
-    return """
-    <!doctype html>
-    <html>
-    <head>
-        <title>AURA Camera Viewer</title>
-        <style>
-            body {
-                background: #111;
-                color: white;
-                font-family: Arial, sans-serif;
-                text-align: center;
-                margin: 0;
-                padding: 20px;
-            }
-            img {
-                max-width: 95vw;
-                max-height: 80vh;
-                border: 2px solid #444;
-                background: black;
-            }
-            .row {
-                margin-top: 16px;
-            }
-            button {
-                margin: 0 8px;
-                padding: 10px 16px;
-                font-size: 16px;
-                cursor: pointer;
-            }
-        </style>
-    </head>
-    <body>
-        <h1>AURA Camera Viewer</h1>
-        <img id="stream" src="/camera/stream" alt="camera stream" />
-        <div class="row">
-            <button onclick="fetch('/camera/activate?mode=raw', {method:'POST'})">Activate Raw</button>
-            <button onclick="fetch('/camera/mode?mode=raw', {method:'POST'})">Raw Mode</button>
-            <button onclick="fetch('/camera/mode?mode=detection', {method:'POST'})">Detection Mode</button>
-            <button onclick="fetch('/camera/deactivate', {method:'POST'})">Deactivate</button>
-            <button onclick="window.open('/camera/snapshot', '_blank')">Snapshot</button>
-            <button onclick="window.open('/camera/status', '_blank')">Status</button>
-        </div>
-    </body>
-    </html>
-    """
-
-
 @app.get("/camera/status")
 async def camera_status():
     return get_camera_status()
@@ -667,19 +614,6 @@ async def camera_detections():
         "mode": camera_service.get_mode(),
         "detections": camera_service.get_detections(),
     }
-
-
-@app.get("/camera/snapshot")
-async def camera_snapshot():
-    status = camera_service.get_status()
-    if not status.get("enabled"):
-        raise HTTPException(status_code=503, detail="Camera is not activated")
-
-    frame = camera_service.get_jpeg()
-    if frame is None:
-        raise HTTPException(status_code=503, detail="No frame available")
-
-    return Response(content=frame, media_type="image/jpeg")
 
 
 @app.post("/camera/activate")
@@ -717,12 +651,6 @@ async def camera_stream():
     return StreamingResponse(
         mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Connection": "close",
-        },
     )
 
 
