@@ -19,6 +19,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -26,27 +33,42 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def gstreamer_pipeline(
-    sensor_id: int = 0,
-    capture_width: int = 1280,
-    capture_height: int = 720,
-    display_width: int = 1280,
-    display_height: int = 720,
-    framerate: int = 30,
-    flip_method: int = 0,
+def _env_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip()
+
+
+def argus_pipeline(
+    sensor_id: int,
+    width: int,
+    height: int,
+    fps: int,
+    flip_method: int,
 ) -> str:
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
         f"video/x-raw(memory:NVMM), "
-        f"width=(int){capture_width}, "
-        f"height=(int){capture_height}, "
-        f"format=(string)NV12, "
-        f"framerate=(fraction){framerate}/1 ! "
+        f"width=(int){width}, height=(int){height}, "
+        f"format=(string)NV12, framerate=(fraction){fps}/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw, "
-        f"width=(int){display_width}, "
-        f"height=(int){display_height}, "
-        f"format=(string)BGRx ! "
+        f"video/x-raw, width=(int){width}, height=(int){height}, format=(string)BGRx ! "
+        f"videoconvert ! "
+        f"video/x-raw, format=(string)BGR ! "
+        f"appsink drop=true max-buffers=1 sync=false"
+    )
+
+
+def v4l2_pipeline(
+    device: str,
+    width: int,
+    height: int,
+    fps: int,
+) -> str:
+    return (
+        f"v4l2src device={device} ! "
+        f"video/x-raw, width=(int){width}, height=(int){height}, framerate=(fraction){fps}/1 ! "
         f"videoconvert ! "
         f"video/x-raw, format=(string)BGR ! "
         f"appsink drop=true max-buffers=1 sync=false"
@@ -76,6 +98,10 @@ class CameraService:
         self.infer_size = infer_size
         self.idle_timeout_seconds = idle_timeout_seconds
 
+        self.camera_backend = _env_str("CAMERA_BACKEND", "auto").lower()
+        self.camera_device = _env_str("CAMERA_DEVICE", "/dev/video0")
+        self.usb_index = _env_int("CAMERA_USB_INDEX", 0)
+
         self.cap: Optional[cv2.VideoCapture] = None
         self.thread: Optional[threading.Thread] = None
         self.running = False
@@ -94,9 +120,6 @@ class CameraService:
 
         self.consecutive_failures = 0
         self.capture_backend = "none"
-
-        self.use_usb_fallback = _env_bool("CAMERA_USE_USB_FALLBACK", True)
-        self.usb_index = _env_int("CAMERA_USB_INDEX", 0)
 
         self.kernel = np.array(
             [
@@ -117,34 +140,58 @@ class CameraService:
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
+    def _read_probe_frame(self, cap: cv2.VideoCapture, tries: int = 20, delay_s: float = 0.08):
+        for _ in range(tries):
+            ok, frame = cap.read()
+            if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                return frame
+            time.sleep(delay_s)
+        return None
+
     def _open_argus_camera(self) -> cv2.VideoCapture:
-        pipeline = gstreamer_pipeline(
+        pipeline = argus_pipeline(
             sensor_id=self.sensor_id,
-            capture_width=self.width,
-            capture_height=self.height,
-            display_width=self.width,
-            display_height=self.height,
-            framerate=self.fps,
+            width=self.width,
+            height=self.height,
+            fps=self.fps,
             flip_method=self.flip_method,
         )
 
         cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
         if not cap.isOpened():
-            raise RuntimeError("Could not open Jetson Argus camera pipeline.")
+            raise RuntimeError("Could not open Argus camera pipeline.")
 
-        ok, frame = cap.read()
-        if not ok or frame is None:
+        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        if frame is None:
             cap.release()
             raise RuntimeError("Argus pipeline opened but failed to read first frame.")
 
         return cap
 
+    def _open_v4l2_camera(self) -> cv2.VideoCapture:
+        pipeline = v4l2_pipeline(
+            device=self.camera_device,
+            width=self.width,
+            height=self.height,
+            fps=self.fps,
+        )
+
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open V4L2 pipeline for {self.camera_device}.")
+
+        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        if frame is None:
+            cap.release()
+            raise RuntimeError(f"V4L2 pipeline opened but failed to read first frame from {self.camera_device}.")
+
+        return cap
+
     def _open_usb_camera(self) -> cv2.VideoCapture:
-        cap = cv2.VideoCapture(self.usb_index)
+        cap = cv2.VideoCapture(self.usb_index, cv2.CAP_V4L2)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open USB/V4L2 camera index {self.usb_index}.")
 
-        # Best-effort settings only
         try:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -153,32 +200,41 @@ class CameraService:
         except Exception:
             pass
 
-        ok, frame = cap.read()
-        if not ok or frame is None:
+        frame = self._read_probe_frame(cap, tries=25, delay_s=0.08)
+        if frame is None:
             cap.release()
             raise RuntimeError(f"USB/V4L2 camera index {self.usb_index} opened but failed to read first frame.")
 
         return cap
 
     def _open_camera(self) -> cv2.VideoCapture:
+        backend = self.camera_backend
         errors = []
 
-        try:
-            cap = self._open_argus_camera()
-            self.capture_backend = "argus"
-            self.last_error = None
-            return cap
-        except Exception as e:
-            errors.append(f"argus: {e}")
+        order = []
+        if backend == "argus":
+            order = ["argus"]
+        elif backend == "v4l2":
+            order = ["v4l2"]
+        elif backend == "usb":
+            order = ["usb"]
+        else:
+            order = ["v4l2", "argus", "usb"]
 
-        if self.use_usb_fallback:
+        for candidate in order:
             try:
-                cap = self._open_usb_camera()
-                self.capture_backend = "usb"
-                self.last_error = f"Argus failed, using USB/V4L2 fallback on index {self.usb_index}"
+                if candidate == "v4l2":
+                    cap = self._open_v4l2_camera()
+                elif candidate == "argus":
+                    cap = self._open_argus_camera()
+                else:
+                    cap = self._open_usb_camera()
+
+                self.capture_backend = candidate
+                self.last_error = None
                 return cap
             except Exception as e:
-                errors.append(f"usb: {e}")
+                errors.append(f"{candidate}: {e}")
 
         self.capture_backend = "none"
         raise RuntimeError(" | ".join(errors))
@@ -375,13 +431,7 @@ class CameraService:
                     self.latest_raw_jpeg = raw_jpeg
                     self.latest_annotated_jpeg = annotated_jpeg
                     self.latest_detections = detections
-
-                    # Preserve fallback info if USB is in use
-                    if self.capture_backend == "usb":
-                        if self.last_error is None or "fallback" not in self.last_error.lower():
-                            self.last_error = f"Argus unavailable, using USB/V4L2 fallback on index {self.usb_index}"
-                    else:
-                        self.last_error = None
+                    self.last_error = None
 
                 time.sleep(0.01)
 
@@ -426,12 +476,23 @@ class CameraService:
                 "fps": self.fps,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "capture_backend": self.capture_backend,
+                "camera_backend_requested": self.camera_backend,
+                "camera_device": self.camera_device,
                 "usb_index": self.usb_index,
-                "usb_fallback_enabled": self.use_usb_fallback,
             }
 
 
-camera_service = CameraService()
+camera_service = CameraService(
+    sensor_id=_env_int("CAMERA_SENSOR_ID", 0),
+    width=_env_int("CAMERA_WIDTH", 1280),
+    height=_env_int("CAMERA_HEIGHT", 720),
+    fps=_env_int("CAMERA_FPS", 30),
+    flip_method=_env_int("CAMERA_FLIP_METHOD", 0),
+    jpeg_quality=_env_int("CAMERA_JPEG_QUALITY", 70),
+    detect_conf=_env_float("CAMERA_DETECT_CONF", 0.25),
+    infer_size=_env_int("CAMERA_INFER_SIZE", 416),
+    idle_timeout_seconds=_env_int("CAMERA_IDLE_TIMEOUT_SECONDS", 10),
+)
 
 
 def get_camera_status() -> Dict[str, Any]:
