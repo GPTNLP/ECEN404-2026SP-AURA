@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+
 from security import require_role
 
 router = APIRouter(tags=["camera_bridge"])
@@ -40,7 +41,6 @@ def _require_device_secret(x_device_secret: str | None) -> None:
 
     if not expected:
         raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET is not configured on backend")
-
     if provided != expected:
         raise HTTPException(status_code=401, detail="Invalid device secret")
 
@@ -85,10 +85,8 @@ def activate_camera(
     mode: str = Query("raw", pattern="^(raw|detection)$"),
 ):
     require_role(request, "admin")
-
     command = "camera_activate_detection" if mode == "detection" else "camera_activate_raw"
     queued = _queue_command(device_id=device_id, command=command)
-
     return {
         "ok": True,
         "queued": queued,
@@ -103,9 +101,7 @@ def deactivate_camera(
     device_id: str = Query(...),
 ):
     require_role(request, "admin")
-
     queued = _queue_command(device_id=device_id, command="camera_deactivate")
-
     return {
         "ok": True,
         "queued": queued,
@@ -130,7 +126,10 @@ async def upload_camera_frame(
     frame_path = _latest_frame_path(device_id)
     meta_path = _latest_meta_path(device_id)
 
-    frame_path.write_bytes(body)
+    tmp_path = frame_path.with_suffix(".tmp")
+    tmp_path.write_bytes(body)
+    tmp_path.replace(frame_path)
+
     meta_path.write_text(
         json.dumps(
             {
@@ -153,21 +152,74 @@ async def upload_camera_frame(
 
 
 @router.get("/camera/latest")
-def get_latest_camera_frame(
-    device_id: str = Query(...),
-):
+def get_latest_camera_frame(device_id: str = Query(...)):
     frame_path = _latest_frame_path(device_id)
     if not frame_path.exists():
         raise HTTPException(status_code=404, detail="No camera frame available yet")
 
-    return FileResponse(frame_path, media_type="image/jpeg")
+    return FileResponse(
+        frame_path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/camera/stream")
+def stream_camera(device_id: str = Query(...)):
+    frame_path = _latest_frame_path(device_id)
+
+    boundary = "frame"
+
+    def gen():
+        last_mtime_ns = -1
+
+        while True:
+            try:
+                if not frame_path.exists():
+                    time.sleep(0.05)
+                    continue
+
+                stat = frame_path.stat()
+                if stat.st_mtime_ns == last_mtime_ns:
+                    time.sleep(0.01)
+                    continue
+
+                jpg = frame_path.read_bytes()
+                last_mtime_ns = stat.st_mtime_ns
+
+                yield (
+                    b"--" + boundary.encode() + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(jpg)).encode() + b"\r\n"
+                    b"Cache-Control: no-store\r\n\r\n" +
+                    jpg + b"\r\n"
+                )
+
+            except GeneratorExit:
+                break
+            except Exception:
+                time.sleep(0.05)
+
+    return StreamingResponse(
+        gen(),
+        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/camera/latest/meta")
-def get_latest_camera_meta(
-    device_id: str = Query(...),
-):
+def get_latest_camera_meta(device_id: str = Query(...)):
     meta_path = _latest_meta_path(device_id)
+
     if not meta_path.exists():
         return {
             "ok": True,

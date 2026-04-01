@@ -81,7 +81,7 @@ runtime_config = {
     "status_seconds": STATUS_SECONDS,
 }
 
-CAMERA_UPLOAD_TARGET_FPS = 10.0
+CAMERA_UPLOAD_TARGET_FPS = 30.0
 CAMERA_UPLOAD_MIN_INTERVAL = 1.0 / CAMERA_UPLOAD_TARGET_FPS
 camera_upload_lock = asyncio.Lock()
 camera_upload_latest_jpeg: Optional[bytes] = None

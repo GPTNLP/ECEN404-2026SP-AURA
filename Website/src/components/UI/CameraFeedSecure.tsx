@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "../../styles/cameraFeed.css";
 import { useAuth } from "../../services/authService";
 
@@ -12,13 +12,10 @@ export default function CameraFeedSecure() {
 
   const [ok, setOk] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [src, setSrc] = useState("");
   const [mode, setMode] = useState<CameraMode>("raw");
   const [busy, setBusy] = useState(false);
   const [statusText, setStatusText] = useState("Idle");
-
-  const mountedRef = useRef(false);
-  const refreshTimerRef = useRef<number | null>(null);
+  const [streamNonce, setStreamNonce] = useState(0);
 
   const base = (API_BASE || "").replace(/\/+$/, "");
 
@@ -26,33 +23,10 @@ export default function CameraFeedSecure() {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   });
 
-  const buildFrameUrl = () => {
+  const streamSrc = useMemo(() => {
     if (!base) return "";
-    return `${base}/camera/latest?device_id=${encodeURIComponent(DEVICE_ID)}&t=${Date.now()}&r=${Math.random()}`;
-  };
-
-  const hardClose = () => {
-    setSrc("");
-    setOk(false);
-  };
-
-  const startPolling = () => {
-    if (refreshTimerRef.current) {
-      window.clearInterval(refreshTimerRef.current);
-    }
-
-    refreshTimerRef.current = window.setInterval(() => {
-      if (!mountedRef.current) return;
-      setSrc(buildFrameUrl());
-    }, 350);
-  };
-
-  const stopPolling = () => {
-    if (refreshTimerRef.current) {
-      window.clearInterval(refreshTimerRef.current);
-      refreshTimerRef.current = null;
-    }
-  };
+    return `${base}/camera/stream?device_id=${encodeURIComponent(DEVICE_ID)}&mode=${encodeURIComponent(mode)}&n=${streamNonce}`;
+  }, [base, mode, streamNonce]);
 
   const activateCamera = async (newMode: CameraMode) => {
     if (!base) return;
@@ -77,24 +51,22 @@ export default function CameraFeedSecure() {
       }
 
       setMode(newMode);
+      setOk(false);
+      setErr(null);
       setStatusText(newMode === "raw" ? "Raw mode active" : "Detection mode active");
-
-      setSrc(buildFrameUrl());
-      startPolling();
+      setStreamNonce((n) => n + 1);
     } catch (e: any) {
       setErr(e?.message || "Failed to activate camera");
       setStatusText("Camera start failed");
-      hardClose();
+      setOk(false);
     } finally {
       setBusy(false);
     }
   };
 
   const setCameraMode = async (newMode: CameraMode) => {
-    if (!base) return;
     if (busy) return;
     if (mode === newMode) return;
-
     await activateCamera(newMode);
   };
 
@@ -111,38 +83,18 @@ export default function CameraFeedSecure() {
         }
       );
     } catch {
-      // ignore on unmount
+      // ignore
     } finally {
-      stopPolling();
       setStatusText("Camera off");
-      hardClose();
+      setOk(false);
+      setStreamNonce((n) => n + 1);
     }
   };
 
   useEffect(() => {
-    mountedRef.current = true;
     activateCamera("raw");
 
-    const onFocus = () => {
-      if (!mountedRef.current) return;
-      setSrc(buildFrameUrl());
-    };
-
-    const onVis = () => {
-      if (!mountedRef.current) return;
-      if (document.visibilityState === "visible" && src) {
-        setSrc(buildFrameUrl());
-      }
-    };
-
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVis);
-
     return () => {
-      mountedRef.current = false;
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVis);
-      stopPolling();
       deactivateCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -155,22 +107,19 @@ export default function CameraFeedSecure() {
           <div className="cam-title">Live Camera Feed</div>
           <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
         </div>
-        <div className="cam-help">
-          Add <code>VITE_CAMERA_API_BASE</code> and <code>VITE_DEVICE_ID</code> to your frontend env.
-        </div>
+        <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
       </div>
     );
   }
 
   return (
     <div className="cam-card">
-      <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ flex: 1 }}>
-          <div className="cam-title">Live Camera Feed</div>
-          <div className={`cam-status ${ok ? "good" : "bad"}`}>● {ok ? "Connected" : "Disconnected"}</div>
-          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{statusText}</div>
-        </div>
+      <div className="cam-card-header">
+        <div className="cam-title">Live Camera Feed</div>
+        <div className={`cam-status ${ok ? "good" : "bad"}`}>{ok ? "● Live" : "● Waiting"}</div>
+      </div>
 
+      <div className="cam-toolbar" style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
         <button
           onClick={() => setCameraMode("raw")}
           disabled={busy || mode === "raw"}
@@ -178,9 +127,9 @@ export default function CameraFeedSecure() {
             padding: "10px 12px",
             borderRadius: 12,
             border: "1px solid var(--card-border)",
-            background: mode === "raw" ? "var(--accent, #dbeafe)" : "var(--card-bg)",
+            background: "var(--card-bg)",
             fontWeight: 900,
-            cursor: busy || mode === "raw" ? "not-allowed" : "pointer",
+            cursor: busy ? "not-allowed" : "pointer",
             opacity: busy || mode === "raw" ? 0.7 : 1,
           }}
         >
@@ -194,9 +143,9 @@ export default function CameraFeedSecure() {
             padding: "10px 12px",
             borderRadius: 12,
             border: "1px solid var(--card-border)",
-            background: mode === "detection" ? "var(--accent, #dbeafe)" : "var(--card-bg)",
+            background: "var(--card-bg)",
             fontWeight: 900,
-            cursor: busy || mode === "detection" ? "not-allowed" : "pointer",
+            cursor: busy ? "not-allowed" : "pointer",
             opacity: busy || mode === "detection" ? 0.7 : 1,
           }}
         >
@@ -204,7 +153,7 @@ export default function CameraFeedSecure() {
         </button>
 
         <button
-          onClick={() => activateCamera(mode)}
+          onClick={() => setStreamNonce((n) => n + 1)}
           disabled={busy}
           style={{
             padding: "10px 12px",
@@ -220,24 +169,25 @@ export default function CameraFeedSecure() {
         </button>
       </div>
 
+      <div className="cam-substatus" style={{ marginBottom: 10 }}>
+        {statusText}
+      </div>
+
       <div className="cam-frame" style={{ position: "relative" }}>
-        {src ? (
-          <img
-            className="cam-img"
-            src={src}
-            alt="Camera stream"
-            onLoad={() => {
-              setOk(true);
-              setErr(null);
-            }}
-            onError={() => {
-              setOk(false);
-              setErr("Frame unavailable yet");
-            }}
-          />
-        ) : (
-          <div className="cam-help">Connecting...</div>
-        )}
+        <img
+          key={streamSrc}
+          className="cam-img"
+          src={streamSrc}
+          alt="Camera stream"
+          onLoad={() => {
+            setOk(true);
+            setErr(null);
+          }}
+          onError={() => {
+            setOk(false);
+            setErr("Stream unavailable");
+          }}
+        />
       </div>
 
       {err && <div className="cam-error">{err}</div>}
