@@ -83,7 +83,7 @@ export default function CameraFeedSecure() {
         }
       );
     } catch {
-      // ignore
+        // ignore
     } finally {
       setStatusText("Camera off");
       setOk(false);
@@ -103,79 +103,40 @@ export default function CameraFeedSecure() {
   if (!API_BASE) {
     return (
       <div className="cam-card">
-        <div className="cam-title">Missing API base</div>
+        <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div className="cam-title">Live Camera Feed</div>
+            <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
+          </div>
+        </div>
+        <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
       </div>
     );
   }
 
-  const buttonBaseStyle: React.CSSProperties = {
-    padding: "10px 16px",
-    borderRadius: "12px",
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.04)",
-    color: "var(--text-primary, #fff)",
-    fontWeight: 700,
-    fontSize: "0.95rem",
-    cursor: busy ? "not-allowed" : "pointer",
-    transition: "all 0.18s ease",
-    minWidth: "96px",
-    backdropFilter: "blur(6px)",
-  };
-
-  const activeButtonStyle: React.CSSProperties = {
-    background: "linear-gradient(135deg, rgba(99,102,241,0.95), rgba(139,92,246,0.95))",
-    border: "1px solid rgba(139,92,246,0.95)",
-    color: "#fff",
-    boxShadow: "0 0 0 1px rgba(139,92,246,0.15), 0 8px 24px rgba(99,102,241,0.28)",
-  };
-
-  const inactiveButtonStyle: React.CSSProperties = {
-    opacity: busy ? 0.6 : 0.92,
-  };
-
   return (
     <div className="cam-card">
-      <div
-        className="cam-card-header"
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 18,
-          flexWrap: "wrap",
-          paddingBottom: 12,
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ flex: 1 }}>
           <div className="cam-title">Live Camera Feed</div>
-          <div
-            className={`cam-status ${ok ? "good" : "bad"}`}
-            style={{
-              fontWeight: 700,
-              fontSize: "0.95rem",
-            }}
-          >
-            {ok ? "● Live" : "● Waiting"}
+          <div className={`cam-status ${ok ? "good" : "bad"}`}>
+            ● {ok ? "Connected" : "Disconnected"}
           </div>
+          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{statusText}</div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            justifyContent: "flex-end",
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="cam-toolbar" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
             onClick={() => setCameraMode("raw")}
-            disabled={busy}
+            disabled={busy || mode === "raw"}
             style={{
-              ...buttonBaseStyle,
-              ...(mode === "raw" ? activeButtonStyle : inactiveButtonStyle),
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid var(--card-border)",
+              background: mode === "raw" ? "var(--accent, #dbeafe)" : "var(--card-bg)",
+              fontWeight: 900,
+              cursor: busy || mode === "raw" ? "not-allowed" : "pointer",
+              opacity: busy || mode === "raw" ? 0.7 : 1,
             }}
           >
             Raw
@@ -183,10 +144,15 @@ export default function CameraFeedSecure() {
 
           <button
             onClick={() => setCameraMode("detection")}
-            disabled={busy}
+            disabled={busy || mode === "detection"}
             style={{
-              ...buttonBaseStyle,
-              ...(mode === "detection" ? activeButtonStyle : inactiveButtonStyle),
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid var(--card-border)",
+              background: mode === "detection" ? "var(--accent, #dbeafe)" : "var(--card-bg)",
+              fontWeight: 900,
+              cursor: busy || mode === "detection" ? "not-allowed" : "pointer",
+              opacity: busy || mode === "detection" ? 0.7 : 1,
             }}
           >
             Detection
@@ -196,8 +162,13 @@ export default function CameraFeedSecure() {
             onClick={() => setStreamNonce((n) => n + 1)}
             disabled={busy}
             style={{
-              ...buttonBaseStyle,
-              ...inactiveButtonStyle,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid var(--card-border)",
+              background: "var(--card-bg)",
+              fontWeight: 900,
+              cursor: busy ? "not-allowed" : "pointer",
+              opacity: busy ? 0.7 : 1,
             }}
           >
             Refresh
@@ -205,26 +176,7 @@ export default function CameraFeedSecure() {
         </div>
       </div>
 
-      <div
-        className="cam-substatus"
-        style={{
-          marginBottom: 12,
-          fontSize: "1rem",
-          fontWeight: 500,
-          opacity: 0.92,
-        }}
-      >
-        {statusText}
-      </div>
-
-      <div
-        className="cam-frame"
-        style={{
-          position: "relative",
-          overflow: "hidden",
-          borderRadius: 22,
-        }}
-      >
+      <div className="cam-frame" style={{ position: "relative" }}>
         <img
           key={streamSrc}
           className="cam-img"
