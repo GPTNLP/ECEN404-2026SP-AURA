@@ -40,7 +40,7 @@ from offline_queue import queue_log, queue_status, flush_logs, flush_statuses
 from heartbeat import build_heartbeat_payload
 from status import build_status_payload
 from device_info import collect_device_info
-from JetsonLocal.agent.lightrag_local import LightRAG, OllamaClient
+from lightrag_local import LightRAG, OllamaClient
 from camera import camera_service, get_camera_status
 
 app = FastAPI(title="AURA Edge API (Jetson Orin Nano)")
