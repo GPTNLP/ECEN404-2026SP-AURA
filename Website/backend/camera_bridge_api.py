@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+
 from security import require_role
 
 router = APIRouter(tags=["camera_bridge"])
@@ -19,6 +20,7 @@ FRAMES_DIR = STORAGE_DIR / "camera_frames"
 FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMANDS_FILE = STORAGE_DIR / "device_commands.json"
+CAMERA_FRAME_STALE_SECONDS = int(os.getenv("CAMERA_FRAME_STALE_SECONDS", "3"))
 
 
 def _load_commands() -> list[dict]:
@@ -40,7 +42,6 @@ def _require_device_secret(x_device_secret: str | None) -> None:
 
     if not expected:
         raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET is not configured on backend")
-
     if provided != expected:
         raise HTTPException(status_code=401, detail="Invalid device secret")
 
@@ -57,6 +58,25 @@ def _latest_frame_path(device_id: str) -> Path:
 
 def _latest_meta_path(device_id: str) -> Path:
     return _frame_dir(device_id) / "latest.json"
+
+
+def _read_latest_meta(device_id: str) -> dict:
+    meta_path = _latest_meta_path(device_id)
+    if not meta_path.exists():
+        return {}
+
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _frame_is_fresh(device_id: str) -> bool:
+    meta = _read_latest_meta(device_id)
+    updated_at = int(meta.get("updated_at", 0) or 0)
+    if updated_at <= 0:
+        return False
+    return (int(time.time()) - updated_at) <= CAMERA_FRAME_STALE_SECONDS
 
 
 def _queue_command(device_id: str, command: str, payload: dict | None = None) -> dict:
@@ -160,6 +180,9 @@ def get_latest_camera_frame(
     if not frame_path.exists():
         raise HTTPException(status_code=404, detail="No camera frame available yet")
 
+    if not _frame_is_fresh(device_id):
+        raise HTTPException(status_code=404, detail="Camera frame is stale")
+
     return FileResponse(frame_path, media_type="image/jpeg")
 
 
@@ -167,22 +190,26 @@ def get_latest_camera_frame(
 def get_latest_camera_meta(
     device_id: str = Query(...),
 ):
-    meta_path = _latest_meta_path(device_id)
-    if not meta_path.exists():
+    meta = _read_latest_meta(device_id)
+    if not meta:
         return {
             "ok": True,
             "device_id": device_id,
             "available": False,
+            "fresh": False,
+            "stale_after_seconds": CAMERA_FRAME_STALE_SECONDS,
         }
 
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except Exception:
-        meta = {}
+    updated_at = int(meta.get("updated_at", 0) or 0)
+    age_seconds = int(time.time()) - updated_at if updated_at > 0 else None
+    fresh = _frame_is_fresh(device_id)
 
     return {
         "ok": True,
         "device_id": device_id,
         "available": True,
+        "fresh": fresh,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": CAMERA_FRAME_STALE_SECONDS,
         **meta,
     }

@@ -19,6 +19,7 @@ export default function CameraFeedSecure() {
 
   const mountedRef = useRef(false);
   const refreshTimerRef = useRef<number | null>(null);
+  const metaTimerRef = useRef<number | null>(null);
 
   const base = (API_BASE || "").replace(/\/+$/, "");
 
@@ -36,21 +37,64 @@ export default function CameraFeedSecure() {
     setOk(false);
   };
 
+  const pollMeta = async () => {
+    if (!base) return;
+
+    try {
+      const res = await fetch(
+        `${base}/camera/latest/meta?device_id=${encodeURIComponent(DEVICE_ID)}`,
+        {
+          method: "GET",
+          credentials: "include",
+          headers: authHeaders(),
+        }
+      );
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || !data?.available || !data?.fresh) {
+        setOk(false);
+        setStatusText("Disconnected");
+        return;
+      }
+
+      setOk(true);
+      setStatusText(
+        data.mode === "detection" ? "Detection mode active" : "Raw mode active"
+      );
+    } catch {
+      setOk(false);
+      setStatusText("Disconnected");
+    }
+  };
+
   const startPolling = () => {
     if (refreshTimerRef.current) {
       window.clearInterval(refreshTimerRef.current);
+    }
+    if (metaTimerRef.current) {
+      window.clearInterval(metaTimerRef.current);
     }
 
     refreshTimerRef.current = window.setInterval(() => {
       if (!mountedRef.current) return;
       setSrc(buildFrameUrl());
     }, 350);
+
+    metaTimerRef.current = window.setInterval(() => {
+      if (!mountedRef.current) return;
+      void pollMeta();
+    }, 1000);
   };
 
   const stopPolling = () => {
     if (refreshTimerRef.current) {
       window.clearInterval(refreshTimerRef.current);
       refreshTimerRef.current = null;
+    }
+    if (metaTimerRef.current) {
+      window.clearInterval(metaTimerRef.current);
+      metaTimerRef.current = null;
     }
   };
 
@@ -78,9 +122,9 @@ export default function CameraFeedSecure() {
 
       setMode(newMode);
       setStatusText(newMode === "raw" ? "Raw mode active" : "Detection mode active");
-
       setSrc(buildFrameUrl());
       startPolling();
+      void pollMeta();
     } catch (e: any) {
       setErr(e?.message || "Failed to activate camera");
       setStatusText("Camera start failed");
@@ -94,7 +138,6 @@ export default function CameraFeedSecure() {
     if (!base) return;
     if (busy) return;
     if (mode === newMode) return;
-
     await activateCamera(newMode);
   };
 
@@ -121,17 +164,20 @@ export default function CameraFeedSecure() {
 
   useEffect(() => {
     mountedRef.current = true;
-    activateCamera("raw");
+
+    void activateCamera("raw");
 
     const onFocus = () => {
       if (!mountedRef.current) return;
       setSrc(buildFrameUrl());
+      void pollMeta();
     };
 
     const onVis = () => {
       if (!mountedRef.current) return;
-      if (document.visibilityState === "visible" && src) {
+      if (document.visibilityState === "visible") {
         setSrc(buildFrameUrl());
+        void pollMeta();
       }
     };
 
@@ -143,36 +189,37 @@ export default function CameraFeedSecure() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVis);
       stopPolling();
-      deactivateCamera();
+      void deactivateCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!API_BASE) {
     return (
-      <div className="cam-card">
-        <div className="cam-card-header">
-          <div className="cam-title">Live Camera Feed</div>
-          <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
+      <section className="camera-feed-card">
+        <div className="camera-feed-header">
+          <h2>Live Camera Feed</h2>
+          <div className="camera-status-badge disconnected">● Missing VITE_CAMERA_API_BASE</div>
         </div>
-        <div className="cam-help">
-          Add <code>VITE_CAMERA_API_BASE</code> and <code>VITE_DEVICE_ID</code> to your frontend env.
-        </div>
-      </div>
+        <p>Add `VITE_CAMERA_API_BASE` and `VITE_DEVICE_ID` to your frontend env.</p>
+      </section>
     );
   }
 
   return (
-    <div className="cam-card">
-      <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ flex: 1 }}>
-          <div className="cam-title">Live Camera Feed</div>
-          <div className={`cam-status ${ok ? "good" : "bad"}`}>● {ok ? "Connected" : "Disconnected"}</div>
-          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{statusText}</div>
+    <section className="camera-feed-card">
+      <div className="camera-feed-header">
+        <h2>Live Camera Feed</h2>
+        <div className={`camera-status-badge ${ok ? "connected" : "disconnected"}`}>
+          ● {ok ? "Connected" : "Disconnected"}
         </div>
+      </div>
 
+      <div style={{ marginBottom: 12, fontWeight: 700 }}>{statusText}</div>
+
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <button
-          onClick={() => setCameraMode("raw")}
+          onClick={() => void setCameraMode("raw")}
           disabled={busy || mode === "raw"}
           style={{
             padding: "10px 12px",
@@ -188,7 +235,7 @@ export default function CameraFeedSecure() {
         </button>
 
         <button
-          onClick={() => setCameraMode("detection")}
+          onClick={() => void setCameraMode("detection")}
           disabled={busy || mode === "detection"}
           style={{
             padding: "10px 12px",
@@ -204,7 +251,7 @@ export default function CameraFeedSecure() {
         </button>
 
         <button
-          onClick={() => activateCamera(mode)}
+          onClick={() => void activateCamera(mode)}
           disabled={busy}
           style={{
             padding: "10px 12px",
@@ -220,27 +267,26 @@ export default function CameraFeedSecure() {
         </button>
       </div>
 
-      <div className="cam-frame" style={{ position: "relative" }}>
-        {src ? (
-          <img
-            className="cam-img"
-            src={src}
-            alt="Camera stream"
-            onLoad={() => {
-              setOk(true);
-              setErr(null);
-            }}
-            onError={() => {
-              setOk(false);
-              setErr("Frame unavailable yet");
-            }}
-          />
-        ) : (
-          <div className="cam-help">Connecting...</div>
-        )}
-      </div>
+      {src ? (
+        <img
+          className="camera-frame"
+          src={src}
+          alt="AURA live feed"
+          onLoad={() => {
+            setOk(true);
+            setErr(null);
+          }}
+          onError={() => {
+            setOk(false);
+            setErr("Frame unavailable");
+            setStatusText("Disconnected");
+          }}
+        />
+      ) : (
+        <div className="camera-placeholder">Connecting...</div>
+      )}
 
-      {err && <div className="cam-error">{err}</div>}
-    </div>
+      {err && <div style={{ marginTop: 12, color: "crimson", fontWeight: 700 }}>{err}</div>}
+    </section>
   );
 }

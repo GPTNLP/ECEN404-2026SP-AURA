@@ -24,6 +24,7 @@ DEVICE_SHARED_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
 DEVICE_DEFAULT_POLL_SECONDS = int(os.getenv("DEVICE_DEFAULT_POLL_SECONDS", "1"))
 DEVICE_DEFAULT_HEARTBEAT_SECONDS = int(os.getenv("DEVICE_DEFAULT_HEARTBEAT_SECONDS", "10"))
 DEVICE_DEFAULT_STATUS_SECONDS = int(os.getenv("DEVICE_DEFAULT_STATUS_SECONDS", "2"))
+DEVICE_OFFLINE_AFTER_SECONDS = int(os.getenv("DEVICE_OFFLINE_AFTER_SECONDS", "10"))
 
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -50,26 +51,20 @@ class DeviceHeartbeatReq(BaseModel):
 
 class DeviceStatusReq(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=100)
-
     battery_percent: Optional[float] = None
     battery_voltage: Optional[float] = None
     charging: Optional[bool] = None
-
     cpu_percent: Optional[float] = None
     ram_percent: Optional[float] = None
     disk_percent: Optional[float] = None
     temperature_c: Optional[float] = None
-
     camera_ready: Optional[bool] = None
     mic_ready: Optional[bool] = None
     speaker_ready: Optional[bool] = None
-
     ollama_ready: Optional[bool] = None
     vector_db_ready: Optional[bool] = None
-
     current_mode: Optional[str] = Field(default=None, max_length=100)
     current_task: Optional[str] = Field(default=None, max_length=200)
-
     extra: Optional[Dict[str, Any]] = None
 
 
@@ -147,6 +142,13 @@ def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
+def _is_device_online(rec: Dict[str, Any]) -> bool:
+    last_seen_at = int(rec.get("last_seen_at", 0) or 0)
+    if last_seen_at <= 0:
+        return False
+    return (_now() - last_seen_at) <= DEVICE_OFFLINE_AFTER_SECONDS
+
+
 @router.post("/register")
 def device_register(body: DeviceRegisterReq, request: Request):
     _require_device_secret(request)
@@ -158,18 +160,20 @@ def device_register(body: DeviceRegisterReq, request: Request):
     data = _read_devices()
     rec = _get_or_create_device_slot(data, device_id)
 
-    rec.update({
-        "device_id": device_id,
-        "device_name": (body.device_name or device_id).strip(),
-        "device_type": (body.device_type or "jetson").strip(),
-        "software_version": (body.software_version or "").strip(),
-        "hostname": (body.hostname or "").strip(),
-        "local_ip": (body.local_ip or "").strip(),
-        "last_register_at": _now(),
-        "last_seen_at": _now(),
-        "last_seen_ip": _client_ip(request),
-        "online": True,
-    })
+    rec.update(
+        {
+            "device_id": device_id,
+            "device_name": (body.device_name or device_id).strip(),
+            "device_type": (body.device_type or "jetson").strip(),
+            "software_version": (body.software_version or "").strip(),
+            "hostname": (body.hostname or "").strip(),
+            "local_ip": (body.local_ip or "").strip(),
+            "last_register_at": _now(),
+            "last_seen_at": _now(),
+            "last_seen_ip": _client_ip(request),
+            "online": True,
+        }
+    )
 
     _write_devices(data)
 
@@ -180,7 +184,7 @@ def device_register(body: DeviceRegisterReq, request: Request):
             "device_name": rec.get("device_name"),
             "online": rec.get("online"),
             "last_seen_at": rec.get("last_seen_at"),
-        }
+        },
     }
 
 
@@ -195,18 +199,20 @@ def device_heartbeat(body: DeviceHeartbeatReq, request: Request):
     data = _read_devices()
     rec = _get_or_create_device_slot(data, device_id)
 
-    rec.update({
-        "software_version": (body.software_version or rec.get("software_version") or "").strip(),
-        "hostname": (body.hostname or rec.get("hostname") or "").strip(),
-        "local_ip": (body.local_ip or rec.get("local_ip") or "").strip(),
-        "uptime_seconds": body.uptime_seconds,
-        "ollama_ready": body.ollama_ready,
-        "vector_db_ready": body.vector_db_ready,
-        "camera_ready": body.camera_ready,
-        "last_seen_at": _now(),
-        "last_seen_ip": _client_ip(request),
-        "online": True,
-    })
+    rec.update(
+        {
+            "software_version": (body.software_version or rec.get("software_version") or "").strip(),
+            "hostname": (body.hostname or rec.get("hostname") or "").strip(),
+            "local_ip": (body.local_ip or rec.get("local_ip") or "").strip(),
+            "uptime_seconds": body.uptime_seconds,
+            "ollama_ready": body.ollama_ready,
+            "vector_db_ready": body.vector_db_ready,
+            "camera_ready": body.camera_ready,
+            "last_seen_at": _now(),
+            "last_seen_ip": _client_ip(request),
+            "online": True,
+        }
+    )
 
     _write_devices(data)
 
@@ -277,7 +283,6 @@ def device_log(body: DeviceLogReq, request: Request):
         "meta": body.meta or {},
         "ip": _client_ip(request),
     }
-
     _append_jsonl(DEVICE_LOGS_FILE, entry)
 
     data = _read_devices()
@@ -306,7 +311,6 @@ def device_config(request: Request, device_id: str):
     data = _read_devices()
     devices = data.get("devices", {})
     rec = devices.get(device_id)
-
     if not isinstance(rec, dict):
         raise HTTPException(status_code=404, detail="Unknown device")
 
@@ -333,11 +337,23 @@ def admin_list_devices(request: Request):
 
     data = _read_devices()
     devices = data.get("devices", {})
-
     items: List[Dict[str, Any]] = []
+
+    changed = False
+
     for rec in devices.values():
-        if isinstance(rec, dict):
-            items.append(rec)
+        if not isinstance(rec, dict):
+            continue
+
+        computed_online = _is_device_online(rec)
+        if rec.get("online") != computed_online:
+            rec["online"] = computed_online
+            changed = True
+
+        items.append(rec)
+
+    if changed:
+        _write_devices(data)
 
     items.sort(key=lambda x: int(x.get("last_seen_at", 0) or 0), reverse=True)
 
@@ -345,4 +361,6 @@ def admin_list_devices(request: Request):
         "ok": True,
         "count": len(items),
         "items": items,
+        "offline_after_seconds": DEVICE_OFFLINE_AFTER_SECONDS,
+        "server_time": _now(),
     }

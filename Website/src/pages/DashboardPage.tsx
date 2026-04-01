@@ -39,11 +39,14 @@ type AdminListResponse = {
   ok: boolean;
   count: number;
   items: DeviceRecord[];
+  offline_after_seconds?: number;
+  server_time?: number;
 };
 
 const API_BASE = "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
 const DEVICE_ID = "jetson-001";
 const LS_TOKEN = "aura-auth-token";
+const OFFLINE_AFTER_SECONDS = 10;
 
 function dotColor(status: HealthStatus) {
   if (status === "OK") return "var(--status-good)";
@@ -108,10 +111,7 @@ export default function DashboardPage() {
         }
 
         const data: AdminListResponse = await res.json();
-        const found =
-          data.items.find((item) => item.device_id === DEVICE_ID) ??
-          data.items[0] ??
-          null;
+        const found = data.items.find((item) => item.device_id === DEVICE_ID) ?? data.items[0] ?? null;
 
         if (alive) {
           setDevice(found);
@@ -124,8 +124,10 @@ export default function DashboardPage() {
       }
     }
 
-    load();
-    const id = setInterval(load, 2000);
+    void load();
+    const id = setInterval(() => {
+      void load();
+    }, 2000);
 
     return () => {
       alive = false;
@@ -138,7 +140,11 @@ export default function DashboardPage() {
     return formatUpdated(device.last_seen_at);
   }, [device?.last_seen_at]);
 
-  const status = device?.online ? "ONLINE" : "OFFLINE";
+  const computedOnline =
+    !!device?.last_seen_at &&
+    Date.now() / 1000 - device.last_seen_at <= OFFLINE_AFTER_SECONDS;
+
+  const status = computedOnline ? "ONLINE" : "OFFLINE";
   const s = device?.status;
   const extra = s?.extra;
 
@@ -149,52 +155,59 @@ export default function DashboardPage() {
     healthFromBool(s?.speaker_ready) === "BAD"
       ? "BAD"
       : "OK";
-
   const thermalsHealth = thermalStatus(s?.temperature_c);
 
   return (
-    <div className="dashboard-page">
-      <div className="aura-header">
-        <div className="aura-panel">
-          <img src={robotImage} alt="AURA" className="aura-img" />
-          <div className="aura-text">
-            <h1 className="aura-title">{device?.device_name || "AURA"}</h1>
-            <div className="aura-sub">
-              Status: <b>{status}</b>
-              {updatedLabel ? <> • Updated {updatedLabel}</> : null}
-            </div>
-          </div>
+    <div className="dashboard-shell">
+      <header className="dashboard-hero">
+        <div className="dashboard-hero-copy">
+          <p className="dashboard-eyebrow">Robot Overview</p>
+          <h1>{device?.device_name || "AURA"}</h1>
+          <p className="dashboard-subtitle">
+            Status: <strong>{status}</strong>
+            {updatedLabel ? <> • Updated {updatedLabel}</> : null}
+          </p>
+          {error ? <p className="dashboard-error">Dashboard load failed: {error}</p> : null}
         </div>
-      </div>
 
-      {error ? <div className="dash-error">Dashboard load failed: {error}</div> : null}
+        <div className="dashboard-hero-art">
+          <img src={robotImage} alt="AURA robot" />
+        </div>
+      </header>
 
       <section className="dashboard-section">
-        <div className="dash-title-row">
-          <h2 className="dash-title">Filometrics</h2>
-          <div className="dash-subtitle">Live Jetson values</div>
+        <div className="section-heading">
+          <h2>Filometrics</h2>
+          <p>Live Jetson values</p>
         </div>
 
         <div className="filo-grid">
-          <FiloCard label="Battery" value={fmt(s?.battery_percent, "%", 1)} sub="Robot power" />
-          <FiloCard label="Battery Voltage" value={fmt(s?.battery_voltage, " V", 2)} sub="Pack voltage" />
-          <FiloCard label="RAM Usage" value={fmt(s?.ram_percent, "%", 1)} sub="Memory load" />
-          <FiloCard label="CPU Usage" value={fmt(s?.cpu_percent, "%", 1)} sub="Processor load" />
-          <FiloCard label="GPU Usage" value={fmt(extra?.gpu_percent, "%", 1)} sub="GPU load" />
-          <FiloCard label="Uptime" value={formatUptime(extra?.uptime_seconds)} sub="Since boot" />
+          <FiloCard label="Battery" value={fmt(s?.battery_percent, "%")} sub={fmt(s?.battery_voltage, " V", 2)} />
+          <FiloCard label="Charging" value={s?.charging == null ? "—" : s.charging ? "Yes" : "No"} sub="Power state" />
+          <FiloCard label="CPU" value={fmt(s?.cpu_percent, "%")} sub="Processor usage" />
+          <FiloCard label="RAM" value={fmt(s?.ram_percent, "%")} sub="Memory usage" />
+          <FiloCard label="Disk" value={fmt(s?.disk_percent, "%")} sub="Storage usage" />
+          <FiloCard label="Temp" value={fmt(s?.temperature_c, " °C")} sub="Thermals" />
+          <FiloCard label="Mode" value={s?.current_mode || "—"} sub={s?.current_task || "No active task"} />
+          <FiloCard label="Uptime" value={formatUptime(extra?.uptime_seconds)} sub={extra?.hostname || "Unknown host"} />
         </div>
       </section>
 
       <section className="dashboard-section">
-        <div className="dash-title-row">
-          <h2 className="dash-title">System Health</h2>
-          <div className="dash-subtitle">Quick status checks</div>
+        <div className="section-heading">
+          <h2>System Health</h2>
+          <p>Quick status checks</p>
         </div>
 
-        <div className="filo-grid">
+        <div className="health-grid">
           <HealthCard label="Motors" status={motorsHealth} />
           <HealthCard label="Sensors" status={sensorsHealth} />
           <HealthCard label="Thermals" status={thermalsHealth} />
+          <HealthCard label="Camera" status={healthFromBool(s?.camera_ready)} />
+          <HealthCard label="Microphone" status={healthFromBool(s?.mic_ready)} />
+          <HealthCard label="Speaker" status={healthFromBool(s?.speaker_ready)} />
+          <HealthCard label="Ollama" status={healthFromBool(s?.ollama_ready)} />
+          <HealthCard label="Vector DB" status={healthFromBool(s?.vector_db_ready)} />
         </div>
       </section>
     </div>
@@ -203,27 +216,25 @@ export default function DashboardPage() {
 
 function FiloCard({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
-    <div className="filo-item">
-      <div className="filo-top">
-        <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: "var(--accent)" }} />
-      </div>
-      <div className="filo-value">{value}</div>
-      <div className="filo-sub">{sub}</div>
-    </div>
+    <article className="filo-card">
+      <p className="filo-label">{label}</p>
+      <h3 className="filo-value">{value}</h3>
+      <p className="filo-sub">{sub}</p>
+    </article>
   );
 }
 
 function HealthCard({ label, status }: { label: string; status?: HealthStatus }) {
   const s = status ?? "WARN";
+
   return (
-    <div className="filo-item">
-      <div className="filo-top">
-        <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: dotColor(s) }} />
+    <article className="health-card">
+      <div className="health-card-top">
+        <span className="health-dot" style={{ background: dotColor(s) }} />
+        <p>{label}</p>
       </div>
-      <div className="filo-value">{s}</div>
-      <div className="filo-sub">Overall condition</div>
-    </div>
+      <h3>{s}</h3>
+      <p>Overall condition</p>
+    </article>
   );
 }
