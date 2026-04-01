@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse
 import uvicorn
 
 # Import from your existing files
-from config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR
-from lightrag_local import LightRAG, OllamaClient
+from JetsonLocal.agent.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR
+from JetsonLocal.agent.lightrag_local import LightRAG, OllamaClient
 
 # Configurations
 AZURE_BACKEND_URL = os.getenv("AZURE_BACKEND_URL", "http://localhost:5000")
