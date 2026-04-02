@@ -26,24 +26,53 @@ class ApiClient:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    def upload_vector_db(self, db_name: str, working_dir: str):
-        url = self._url(f"/api/databases/{db_name}/sync_up")
-        files = []
-        for fn in ["faiss.index", "embeddings.npy", "meta.json"]:
-            fp = os.path.join(working_dir, fn)
-            if os.path.exists(fp):
-                files.append(("files", (fn, open(fp, "rb"))))
+    def upload_vector_db(self, db_name: str, db_dir: str):
+        """Uploads individual LightRAG files to the website backend."""
+        url = f"{self.base_url}/api/databases/{db_name}/sync_up"
+        headers = {"X-Device-Secret": self.secret}
+        
+        files_to_send = []
+        file_handles = []
+        allowed_files = ["faiss.index", "embeddings.npy", "meta.json", "db.json"]
+        
+        for fn in allowed_files:
+            path = os.path.join(db_dir, fn)
+            if os.path.exists(path):
+                f = open(path, "rb")
+                file_handles.append(f)
+                files_to_send.append(("files", (fn, f, "application/octet-stream")))
 
-        if files:
-            r = self.session.post(
-                url,
-                files=files,
-                headers={"X-Device-Secret": DEVICE_SHARED_SECRET},
-                timeout=self.timeout,
-            )
-            r.raise_for_status()
-            for _, (_, f) in files:
+        try:
+            response = self.session.post(url, headers=headers, files=files_to_send, timeout=120.0)
+            response.raise_for_status()
+            return response.json()
+        finally:
+            for f in file_handles:
                 f.close()
+
+    def download_vector_db(self, db_name: str, dest_dir: str):
+        """Downloads individual LightRAG files from the website backend."""
+        headers = {"X-Device-Secret": self.secret}
+        allowed_files = ["faiss.index", "embeddings.npy", "meta.json", "db.json"]
+        os.makedirs(dest_dir, exist_ok=True)
+        
+        for fn in allowed_files:
+            url = f"{self.base_url}/api/databases/{db_name}/sync_down/{fn}"
+            response = self.session.get(url, headers=headers, stream=True, timeout=120.0)
+            if response.status_code == 200:
+                with open(os.path.join(dest_dir, fn), "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+    def sync_chat_log(self, log_secret: str, log_data: dict):
+        """Pushes the local JSON conversation state to the website's ML ingest pipeline."""
+        url = f"{self.base_url}/logs/ingest"
+        # The backend expects X-LOG-SECRET for ingestion
+        headers = {"X-LOG-SECRET": log_secret, "Content-Type": "application/json"}
+        try:
+            self.session.post(url, headers=headers, json=log_data, timeout=5.0)
+        except Exception:
+            pass # Fails silently if offline; relies on local JSON
 
     def upload_camera_frame(self, device_id: str, mode: str, jpeg_bytes: bytes) -> Dict[str, Any]:
         r = self.session.post(

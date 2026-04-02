@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
+from ai.chat_manager import chat_manager
 
 # --- PATH FIX: Add the 'agent' directory to sys.path so sub-folders are recognized ---
 AGENT_DIR = Path(__file__).resolve().parent
@@ -52,8 +53,9 @@ class ConnectionManager:
 ui_manager = ConnectionManager()
 
 async def handle_user_message(user_msg: str):
-    """Handles STT inputs or Chat inputs, parses intent, and routes accordingly."""
+    """Handles STT/Chat inputs and manages offline JSON history."""
     await ui_manager.broadcast({"type": "chat", "sender": "user", "text": user_msg})
+    chat_manager.add_message("user", user_msg, api, DEVICE_ID)
     
     intent = await parse_intent(user_msg)
     
@@ -67,6 +69,7 @@ async def handle_user_message(user_msg: str):
         ai_reply = await rag_manager.query(user_msg)
 
     await ui_manager.broadcast({"type": "chat", "sender": "ai", "text": ai_reply})
+    chat_manager.add_message("assistant", ai_reply, api, DEVICE_ID)
 
 # Initialize the STT service with the callback
 stt_service = STTService(callback=handle_user_message)
@@ -82,11 +85,20 @@ async def command_loop():
                 cmd = (command.get("command") or "").strip().lower()
                 payload = command.get("payload") or {}
 
-                # 1. RAG Vectorization
+                # 1. Upload PDF -> Build DB -> Sync ZIP to Cloud
                 if cmd == "build_rag":
-                    success = await rag_manager.ingest_document(payload.get("url"))
-                    status = "completed" if success else "failed"
-                    await asyncio.to_thread(api.ack_command, {"command_id": cmd_id, "device_id": DEVICE_ID, "status": status})
+                    success = await rag_manager.ingest_document_and_pack(payload.get("url"), api, DEVICE_ID)
+                    await asyncio.to_thread(api.ack_command, {"command_id": cmd_id, "device_id": DEVICE_ID, "status": "completed" if success else "failed"})
+                
+                # 2. Download Pre-built Vector DB from Cloud -> Skip PDF upload
+                elif cmd == "load_vector_db":
+                    success = await rag_manager.load_remote_db(payload.get("zip_url"), api)
+                    await asyncio.to_thread(api.ack_command, {"command_id": cmd_id, "device_id": DEVICE_ID, "status": "completed" if success else "failed"})
+
+                # 3. Sync Chat Session (Switch active thread)
+                elif cmd == "load_chat_session":
+                    chat_manager.set_session(payload.get("session_id"), payload.get("history"))
+                    await asyncio.to_thread(api.ack_command, {"command_id": cmd_id, "device_id": DEVICE_ID, "status": "completed"})
                 
                 # 2. Movement Control
                 elif cmd in serial_link.MOVEMENT_COMMANDS:
