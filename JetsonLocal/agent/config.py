@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 JETSONLOCAL_DIR = BASE_DIR.parent
+
 STORAGE_DIR = JETSONLOCAL_DIR / "storage"
 LOGS_DIR = STORAGE_DIR / "logs"
 QUEUE_DIR = STORAGE_DIR / "queue"
@@ -15,6 +17,7 @@ if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
 
 API_BASE_URL = os.getenv("AZURE_BACKEND_URL", "").rstrip("/")
+
 DEVICE_ID = os.getenv("DEVICE_ID", "jetson-001").strip()
 DEVICE_NAME = os.getenv("DEVICE_NAME", "AURA Jetson").strip()
 DEVICE_TYPE = os.getenv("DEVICE_TYPE", "jetson").strip()
@@ -37,6 +40,17 @@ INPUT_MODE = os.getenv("INPUT_MODE", "keyboard").strip().lower()
 DEFAULT_MODEL = os.getenv("AURA_LLM_MODEL", "llama3.2")
 EMBEDDING_MODEL = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
 LOCAL_DB_NAME = os.getenv("LOCAL_DB_NAME", "jetson_local_db")
+
+# camera config for USB / UVC webcams
+CAMERA_DEVICE_INDEX = int(os.getenv("CAMERA_DEVICE_INDEX", "0"))
+CAMERA_DEVICE_PATH = os.getenv("CAMERA_DEVICE_PATH", "").strip()
+CAMERA_WIDTH = int(os.getenv("CAMERA_WIDTH", "960"))
+CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "540"))
+CAMERA_FPS = int(os.getenv("CAMERA_FPS", "30"))
+CAMERA_JPEG_QUALITY = int(os.getenv("CAMERA_JPEG_QUALITY", "60"))
+CAMERA_IDLE_TIMEOUT_SECONDS = int(os.getenv("CAMERA_IDLE_TIMEOUT_SECONDS", "10"))
+CAMERA_DETECT_CONF = float(os.getenv("CAMERA_DETECT_CONF", "0.25"))
+CAMERA_INFER_SIZE = int(os.getenv("CAMERA_INFER_SIZE", "416"))
 
 for p in [STORAGE_DIR, LOGS_DIR, QUEUE_DIR, STATE_DIR]:
     p.mkdir(parents=True, exist_ok=True)

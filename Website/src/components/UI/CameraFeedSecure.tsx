@@ -25,7 +25,9 @@ export default function CameraFeedSecure() {
 
   const streamSrc = useMemo(() => {
     if (!base) return "";
-    return `${base}/camera/stream?device_id=${encodeURIComponent(DEVICE_ID)}&mode=${encodeURIComponent(mode)}&n=${streamNonce}`;
+    return `${base}/camera/stream?device_id=${encodeURIComponent(
+      DEVICE_ID
+    )}&mode=${encodeURIComponent(mode)}&n=${streamNonce}`;
   }, [base, mode, streamNonce]);
 
   const activateCamera = async (newMode: CameraMode) => {
@@ -37,7 +39,9 @@ export default function CameraFeedSecure() {
 
     try {
       const res = await fetch(
-        `${base}/camera/control/activate?device_id=${encodeURIComponent(DEVICE_ID)}&mode=${encodeURIComponent(newMode)}`,
+        `${base}/camera/control/activate?device_id=${encodeURIComponent(
+          DEVICE_ID
+        )}&mode=${encodeURIComponent(newMode)}`,
         {
           method: "POST",
           credentials: "include",
@@ -46,6 +50,7 @@ export default function CameraFeedSecure() {
       );
 
       const data = await res.json().catch(() => null);
+
       if (!res.ok) {
         throw new Error(data?.detail || `Activate failed (${res.status})`);
       }
@@ -83,7 +88,7 @@ export default function CameraFeedSecure() {
         }
       );
     } catch {
-        // ignore
+      // ignore
     } finally {
       setStatusText("Camera off");
       setOk(false);
@@ -102,30 +107,29 @@ export default function CameraFeedSecure() {
 
   if (!API_BASE) {
     return (
-      <div className="cam-card">
-        <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ flex: 1 }}>
-            <div className="cam-title">Live Camera Feed</div>
-            <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
-          </div>
+      <section className="camera-feed-card">
+        <div className="camera-feed-header">
+          <h2>Live Camera Feed</h2>
+          <div className="camera-status-badge off">● Missing VITE_CAMERA_API_BASE</div>
         </div>
-        <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
-      </div>
+        <div className="camera-feed-body">
+          <p>Set VITE_CAMERA_API_BASE in your frontend env.</p>
+        </div>
+      </section>
     );
   }
 
   return (
-    <div className="cam-card">
-      <div className="cam-card-header" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ flex: 1 }}>
-          <div className="cam-title">Live Camera Feed</div>
-          <div className={`cam-status ${ok ? "good" : "bad"}`}>
+    <section className="camera-feed-card">
+      <div className="camera-feed-header">
+        <div>
+          <h2>Live Camera Feed</h2>
+          <div className={`camera-status-badge ${ok ? "on" : "off"}`}>
             ● {ok ? "Connected" : "Disconnected"}
           </div>
-          <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{statusText}</div>
         </div>
 
-        <div className="cam-toolbar" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div className="camera-controls-inline" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
             onClick={() => setCameraMode("raw")}
             disabled={busy || mode === "raw"}
@@ -176,12 +180,14 @@ export default function CameraFeedSecure() {
         </div>
       </div>
 
-      <div className="cam-frame" style={{ position: "relative" }}>
+      <div className="camera-feed-body">
+        <div style={{ marginBottom: 10, fontWeight: 700 }}>{statusText}</div>
+
         <img
-          key={streamSrc}
-          className="cam-img"
+          key={`${mode}-${streamNonce}`}
           src={streamSrc}
-          alt="Camera stream"
+          alt="AURA live camera"
+          className="camera-feed-image"
           onLoad={() => {
             setOk(true);
             setErr(null);
@@ -191,9 +197,13 @@ export default function CameraFeedSecure() {
             setErr("Stream unavailable");
           }}
         />
-      </div>
 
-      {err && <div className="cam-error">{err}</div>}
-    </div>
+        {err && (
+          <div style={{ marginTop: 12, color: "#dc2626", fontWeight: 700 }}>
+            {err}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }

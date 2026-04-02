@@ -1,10 +1,22 @@
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import cv2
 import numpy as np
+
+from config import (
+    CAMERA_DEVICE_INDEX,
+    CAMERA_DEVICE_PATH,
+    CAMERA_WIDTH,
+    CAMERA_HEIGHT,
+    CAMERA_FPS,
+    CAMERA_JPEG_QUALITY,
+    CAMERA_IDLE_TIMEOUT_SECONDS,
+    CAMERA_DETECT_CONF,
+    CAMERA_INFER_SIZE,
+)
 
 try:
     from ultralytics import YOLO
@@ -15,78 +27,18 @@ except Exception:
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
 
-CAMERA_SENSOR_ID = 0
-CAMERA_WIDTH = 960
-CAMERA_HEIGHT = 540
-CAMERA_FPS = 30
-CAMERA_FLIP_METHOD = 0
-CAMERA_JPEG_QUALITY = 60
-CAMERA_IDLE_TIMEOUT_SECONDS = 10
-CAMERA_DETECT_CONF = 0.25
-CAMERA_INFER_SIZE = 416
-
-# Set to an integer like 2 or 3 if you want to force a specific Argus sensor mode.
-# Leaving this as None lets Argus choose automatically.
-CAMERA_SENSOR_MODE: Optional[int] = None
-
-
-def build_gstreamer_pipeline(
-    sensor_id: int,
-    capture_width: int,
-    capture_height: int,
-    display_width: int,
-    display_height: int,
-    framerate: int,
-    flip_method: int,
-    sensor_mode: Optional[int] = None,
-    use_bufapi: bool = True,
-) -> str:
-    sensor_mode_part = f"sensor-mode={sensor_mode} " if sensor_mode is not None else ""
-    bufapi_part = "bufapi-version=true " if use_bufapi else ""
-
-    return (
-        f"nvarguscamerasrc sensor-id={sensor_id} {sensor_mode_part}{bufapi_part}! "
-        f"video/x-raw(memory:NVMM), "
-        f"width=(int){capture_width}, "
-        f"height=(int){capture_height}, "
-        f"format=(string)NV12, "
-        f"framerate=(fraction){framerate}/1 ! "
-        f"queue max-size-buffers=1 leaky=downstream ! "
-        f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw, "
-        f"width=(int){display_width}, "
-        f"height=(int){display_height}, "
-        f"format=(string)BGRx ! "
-        f"videoconvert ! "
-        f"video/x-raw, format=(string)BGR ! "
-        f"appsink drop=true max-buffers=1 sync=false"
-    )
-
 
 class CameraService:
-    def __init__(
-        self,
-        sensor_id: int = CAMERA_SENSOR_ID,
-        width: int = CAMERA_WIDTH,
-        height: int = CAMERA_HEIGHT,
-        fps: int = CAMERA_FPS,
-        flip_method: int = CAMERA_FLIP_METHOD,
-        jpeg_quality: int = CAMERA_JPEG_QUALITY,
-        detect_conf: float = CAMERA_DETECT_CONF,
-        infer_size: int = CAMERA_INFER_SIZE,
-        idle_timeout_seconds: int = CAMERA_IDLE_TIMEOUT_SECONDS,
-        sensor_mode: Optional[int] = CAMERA_SENSOR_MODE,
-    ):
-        self.sensor_id = sensor_id
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.flip_method = flip_method
-        self.jpeg_quality = jpeg_quality
-        self.detect_conf = detect_conf
-        self.infer_size = infer_size
-        self.idle_timeout_seconds = idle_timeout_seconds
-        self.sensor_mode = sensor_mode
+    def __init__(self):
+        self.device_index = CAMERA_DEVICE_INDEX
+        self.device_path = CAMERA_DEVICE_PATH
+        self.width = CAMERA_WIDTH
+        self.height = CAMERA_HEIGHT
+        self.fps = CAMERA_FPS
+        self.jpeg_quality = CAMERA_JPEG_QUALITY
+        self.detect_conf = CAMERA_DETECT_CONF
+        self.infer_size = CAMERA_INFER_SIZE
+        self.idle_timeout_seconds = CAMERA_IDLE_TIMEOUT_SECONDS
 
         self.cap: Optional[cv2.VideoCapture] = None
         self.thread: Optional[threading.Thread] = None
@@ -103,7 +55,8 @@ class CameraService:
         self.last_access_ts = 0.0
         self.stream_clients = 0
         self.consecutive_failures = 0
-        self.capture_backend = "argus"
+        self.capture_backend = "usb"
+        self.active_source = None
 
         self.kernel = np.array(
             [
@@ -127,46 +80,33 @@ class CameraService:
         else:
             self.last_error = f"Model not found: {MODEL_PATH}"
 
-    def _pipeline_candidates(self) -> list[tuple[str, str]]:
-        candidates: list[tuple[str, str]] = []
+    def _source_candidates(self) -> list[tuple[str, Any]]:
+        candidates: list[tuple[str, Any]] = []
 
-        # Best option for JetPack 5/6. This commonly fixes NvBufSurfaceFromFd / dmabuf issues.
-        candidates.append(
-            (
-                "argus-bufapi",
-                build_gstreamer_pipeline(
-                    sensor_id=self.sensor_id,
-                    capture_width=self.width,
-                    capture_height=self.height,
-                    display_width=self.width,
-                    display_height=self.height,
-                    framerate=self.fps,
-                    flip_method=self.flip_method,
-                    sensor_mode=self.sensor_mode,
-                    use_bufapi=True,
-                ),
-            )
-        )
+        if self.device_path:
+            candidates.append(("v4l2-path", self.device_path))
 
-        # Fallback without bufapi-version, just in case a setup behaves differently.
-        candidates.append(
-            (
-                "argus-legacy",
-                build_gstreamer_pipeline(
-                    sensor_id=self.sensor_id,
-                    capture_width=self.width,
-                    capture_height=self.height,
-                    display_width=self.width,
-                    display_height=self.height,
-                    framerate=self.fps,
-                    flip_method=self.flip_method,
-                    sensor_mode=self.sensor_mode,
-                    use_bufapi=False,
-                ),
-            )
-        )
+        candidates.append(("v4l2-index", self.device_index))
+
+        for idx in [0, 1, 2, 3]:
+            if idx != self.device_index:
+                candidates.append((f"v4l2-index-{idx}", idx))
 
         return candidates
+
+    def _configure_cap(self, cap: cv2.VideoCapture) -> None:
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
+
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
 
     def _read_probe_frame(
         self,
@@ -193,35 +133,49 @@ class CameraService:
     def _open_camera(self) -> cv2.VideoCapture:
         errors: list[str] = []
 
-        for backend_name, pipeline in self._pipeline_candidates():
+        for source_name, source in self._source_candidates():
             cap = None
             try:
-                print(f"[CAMERA] trying backend={backend_name}")
-                print(f"[CAMERA] pipeline={pipeline}")
+                print(f"[CAMERA] trying source={source_name} value={source}")
 
-                cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+                cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    cap.release()
+                    cap = cv2.VideoCapture(source)
+
                 if not cap.isOpened():
                     raise RuntimeError("VideoCapture did not open")
+
+                self._configure_cap(cap)
 
                 frame = self._read_probe_frame(cap)
                 if frame is None:
                     raise RuntimeError("Opened camera but never received a usable frame")
 
-                self.capture_backend = backend_name
+                self.capture_backend = "usb-v4l2"
+                self.active_source = str(source)
                 self.last_error = None
-                print(f"[CAMERA] opened successfully on backend={backend_name}")
+
+                actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+
+                print(
+                    f"[CAMERA] opened successfully source={source} "
+                    f"resolution={actual_w}x{actual_h} fps={actual_fps:.2f}"
+                )
                 return cap
 
             except Exception as e:
-                err = f"{backend_name}: {e}"
+                err = f"{source_name}: {e}"
                 errors.append(err)
-                print(f"[CAMERA] backend failed: {err}")
+                print(f"[CAMERA] source failed: {err}")
                 try:
                     if cap is not None:
                         cap.release()
                 except Exception:
                     pass
-                time.sleep(0.6)
+                time.sleep(0.4)
 
         raise RuntimeError(" | ".join(errors))
 
@@ -236,6 +190,7 @@ class CameraService:
         self.latest_raw_jpeg = None
         self.latest_annotated_jpeg = None
         self.latest_detections = []
+        self.active_source = None
 
     def activate(self, mode: str = "raw") -> None:
         mode = (mode or "raw").strip().lower()
@@ -296,17 +251,15 @@ class CameraService:
 
     def stop(self) -> None:
         self.running = False
-
         if self.thread is not None:
             self.thread.join(timeout=2.0)
-
         self._close_camera()
         self.thread = None
 
     def restart_camera(self) -> None:
         print("[CAMERA] restarting camera")
         self._close_camera()
-        time.sleep(1.0)
+        time.sleep(0.8)
         self.cap = self._open_camera()
         self.consecutive_failures = 0
 
@@ -397,7 +350,7 @@ class CameraService:
                         f"Failed to read frame ({self.consecutive_failures}) "
                         f"on backend={self.capture_backend}"
                     )
-                    time.sleep(0.05)
+                    time.sleep(0.03)
 
                     if self.consecutive_failures >= 10:
                         self.last_error = (
@@ -409,6 +362,7 @@ class CameraService:
                     continue
 
                 self.consecutive_failures = 0
+
                 raw_jpeg = self._encode_jpeg(frame)
 
                 with self.lock:
@@ -433,7 +387,6 @@ class CameraService:
                 self.last_error = str(e)
                 print(f"[CAMERA] loop error: {e}")
                 time.sleep(0.2)
-
                 try:
                     self.restart_camera()
                 except Exception as inner:
@@ -458,6 +411,18 @@ class CameraService:
 
     def get_status(self) -> Dict[str, Any]:
         with self.lock:
+            actual_width = 0
+            actual_height = 0
+            actual_fps = 0.0
+
+            if self.cap is not None and self.cap.isOpened():
+                try:
+                    actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                    actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                    actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0)
+                except Exception:
+                    pass
+
             return {
                 "camera_ready": self.cap is not None and self.cap.isOpened() if self.cap else False,
                 "enabled": self.enabled,
@@ -471,12 +436,14 @@ class CameraService:
                 "detection_count": len(self.latest_detections),
                 "last_error": self.last_error,
                 "resolution": {"width": self.width, "height": self.height},
+                "actual_resolution": {"width": actual_width, "height": actual_height},
                 "fps": self.fps,
+                "actual_fps": actual_fps,
                 "idle_timeout_seconds": self.idle_timeout_seconds,
                 "capture_backend": self.capture_backend,
-                "sensor_id": self.sensor_id,
-                "sensor_mode": self.sensor_mode,
-                "flip_method": self.flip_method,
+                "device_index": self.device_index,
+                "device_path": self.device_path,
+                "active_source": self.active_source,
             }
 
 
