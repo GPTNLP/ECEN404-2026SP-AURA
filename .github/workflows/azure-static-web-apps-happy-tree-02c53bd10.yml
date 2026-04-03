@@ -34,6 +34,9 @@ jobs:
 
       - name: Build
         working-directory: Website
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_AUTH_API_BASE: ${{ vars.VITE_AUTH_API_BASE }}
         run: npm run build
 
       # ✅ Deploy the already-built dist/
