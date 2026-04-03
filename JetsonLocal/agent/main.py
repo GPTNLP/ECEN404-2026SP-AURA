@@ -1,604 +1,420 @@
 import sys
-import os
 import time
-import socket
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Optional
+from typing import Iterator
 
-import psutil
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 import uvicorn
-from fastapi import FastAPI
 
-# ------------------------------------------------------------------
+# -------------------------------------------------------------------
 # PATH SETUP
-# ------------------------------------------------------------------
-AGENT_DIR = Path(__file__).resolve().parent
-if str(AGENT_DIR) not in sys.path:
-    sys.path.insert(0, str(AGENT_DIR))
+# -------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+JETSONLOCAL_DIR = BASE_DIR.parent
 
-# ------------------------------------------------------------------
-# IMPORTS
-# ------------------------------------------------------------------
-import core.config as cfg
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+if str(JETSONLOCAL_DIR) not in sys.path:
+    sys.path.insert(0, str(JETSONLOCAL_DIR))
+
+# -------------------------------------------------------------------
+# IMPORTS - CURRENT REORG STRUCTURE
+# -------------------------------------------------------------------
+from core.config import (
+    DEVICE_ID,
+    DEVICE_NAME,
+    DEVICE_TYPE,
+    DEVICE_SOFTWARE_VERSION,
+    DEVICE_HEARTBEAT_SECONDS,
+    DEVICE_STATUS_SECONDS,
+    DEVICE_CONFIG_REFRESH_SECONDS,
+    DEVICE_OFFLINE_RETRY_SECONDS,
+    LOCAL_DB_NAME,
+)
+
 from cloud.api_client import ApiClient
+from cloud.heartbeat import build_heartbeat_payload
+from cloud.status import build_status_payload
+
+from core.logger import write_local_log
+from core.offline_queue import queue_log, queue_status, flush_logs, flush_statuses
+
 from hardware.serial_link import serial_link
-from hardware.camera import camera_service
+from hardware.camera import camera_service, get_camera_status
 
-# ------------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------------
-DEVICE_ID = getattr(cfg, "DEVICE_ID", "jetson-001")
-DEVICE_NAME = getattr(cfg, "DEVICE_NAME", "AURA Jetson")
-DEVICE_TYPE = getattr(cfg, "DEVICE_TYPE", "jetson")
-DEVICE_SOFTWARE_VERSION = getattr(cfg, "DEVICE_SOFTWARE_VERSION", "0.1.0")
-
-HEARTBEAT_SECONDS = float(getattr(cfg, "DEVICE_HEARTBEAT_SECONDS", 10))
-STATUS_SECONDS = float(getattr(cfg, "DEVICE_STATUS_SECONDS", 2))
-POLL_SECONDS = float(getattr(cfg, "DEVICE_POLL_SECONDS", 0.5))
-
+# -------------------------------------------------------------------
+# APP
+# -------------------------------------------------------------------
+app = FastAPI(title="AURA Jetson Agent")
 api = ApiClient()
 
-# ------------------------------------------------------------------
-# GLOBALS
-# ------------------------------------------------------------------
-runtime_state = {
-    "started_at": time.time(),
-    "registered": False,
-    "last_register_ok": None,
-    "last_register_error": None,
-    "last_status_ok": None,
-    "last_status_error": None,
-    "last_command_ok": None,
-    "last_command_error": None,
+runtime_config = {
+    "poll_seconds": 0.10,
+    "heartbeat_seconds": int(DEVICE_HEARTBEAT_SECONDS),
+    "status_seconds": int(DEVICE_STATUS_SECONDS),
 }
 
-last_register_message = None
-last_status_message = None
-last_command_message = None
+MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 
-# ------------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------------
-def quiet_print(prefix: str, message: str) -> None:
-    print(f"{prefix} {message}")
+# -------------------------------------------------------------------
+# LOGGING HELPERS
+# -------------------------------------------------------------------
+def send_or_queue_log(level: str, event: str, message: str, meta=None):
+    entry = write_local_log(level, event, message, meta)
+    payload = {
+        "device_id": entry.get("device_id"),
+        "level": entry.get("level"),
+        "event": entry.get("event"),
+        "message": entry.get("message"),
+        "meta": entry.get("meta"),
+    }
 
-
-def now_ts() -> int:
-    return int(time.time())
-
-
-def get_local_ip() -> str:
     try:
+        api.log(payload)
+    except Exception:
+        queue_log(payload)
+
+
+# -------------------------------------------------------------------
+# DEVICE REGISTRATION / CONFIG
+# -------------------------------------------------------------------
+def build_register_payload():
+    local_ip = "127.0.0.1"
+    hostname = "jetson"
+
+    try:
+        import socket
+
+        hostname = socket.gethostname()
+
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        local_ip = s.getsockname()[0]
         s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def get_cpu_percent() -> float:
-    try:
-        return round(psutil.cpu_percent(interval=None), 1)
-    except Exception:
-        return 0.0
-
-
-def get_ram_percent() -> float:
-    try:
-        return round(psutil.virtual_memory().percent, 1)
-    except Exception:
-        return 0.0
-
-
-def get_disk_percent() -> float:
-    try:
-        return round(psutil.disk_usage("/").percent, 1)
-    except Exception:
-        return 0.0
-
-
-def get_uptime_seconds() -> int:
-    try:
-        return int(time.time() - psutil.boot_time())
-    except Exception:
-        return int(time.time() - runtime_state["started_at"])
-
-
-def get_cpu_temp_c() -> Optional[float]:
-    paths = [
-        "/sys/devices/virtual/thermal/thermal_zone0/temp",
-        "/sys/class/thermal/thermal_zone0/temp",
-    ]
-
-    for path in paths:
-        try:
-            if os.path.exists(path):
-                raw = Path(path).read_text().strip()
-                value = float(raw)
-                if value > 1000:
-                    value /= 1000.0
-                return round(value, 1)
-        except Exception:
-            pass
-
-    try:
-        temps = psutil.sensors_temperatures(fahrenheit=False)
-        for _, entries in temps.items():
-            for entry in entries:
-                if entry.current is not None:
-                    return round(float(entry.current), 1)
     except Exception:
         pass
 
-    return None
+    return {
+        "device_id": DEVICE_ID,
+        "device_name": DEVICE_NAME,
+        "device_type": DEVICE_TYPE,
+        "software_version": DEVICE_SOFTWARE_VERSION,
+        "hostname": hostname,
+        "local_ip": local_ip,
+    }
 
 
-def get_wifi_dbm() -> Optional[int]:
-    try:
-        text = Path("/proc/net/wireless").read_text()
-        lines = [line.strip() for line in text.splitlines() if ":" in line]
-        if not lines:
-            return None
-
-        parts = lines[0].replace(":", " ").split()
-        if len(parts) >= 4:
-            level = float(parts[3].rstrip("."))
-            if level > 0:
-                level = level - 256
-            return int(level)
-    except Exception:
-        pass
-
-    return None
+async def register_device():
+    payload = build_register_payload()
+    result = await asyncio.to_thread(api.register, payload)
+    send_or_queue_log("info", "device_registered", "Device registered with backend", result)
+    return result
 
 
-def get_battery_percent() -> Optional[float]:
-    candidates = [
-        "/sys/class/power_supply/BAT0/capacity",
-        "/sys/class/power_supply/battery/capacity",
-    ]
-
-    for path in candidates:
-        try:
-            p = Path(path)
-            if p.exists():
-                return round(float(p.read_text().strip()), 1)
-        except Exception:
-            pass
-
-    return None
-
-
-def get_battery_voltage() -> Optional[float]:
-    candidates = [
-        "/sys/class/power_supply/BAT0/voltage_now",
-        "/sys/class/power_supply/battery/voltage_now",
-    ]
-
-    for path in candidates:
-        try:
-            p = Path(path)
-            if p.exists():
-                value = float(p.read_text().strip())
-                if value > 1000:
-                    value /= 1_000_000.0
-                return round(value, 2)
-        except Exception:
-            pass
-
-    return None
-
-
-def get_gpu_percent() -> Optional[float]:
-    # Jetson-specific GPU util can vary by board/setup.
-    # Return None if not available instead of fake data.
-    candidates = [
-        "/sys/devices/gpu.0/load",
-        "/sys/class/devfreq/17000000.ga10b/load",
-    ]
-
-    for path in candidates:
-        try:
-            p = Path(path)
-            if p.exists():
-                raw = float(p.read_text().strip())
-                if raw > 100:
-                    raw = raw / 10.0
-                return round(raw, 1)
-        except Exception:
-            pass
-
-    return None
-
-
-def collect_payload() -> dict:
-    battery_percent = get_battery_percent()
-    battery_voltage = get_battery_voltage()
-    cpu_percent = get_cpu_percent()
-    cpu_temp_c = get_cpu_temp_c()
-    ram_percent = get_ram_percent()
-    disk_percent = get_disk_percent()
-    gpu_percent = get_gpu_percent()
-    wifi_dbm = get_wifi_dbm()
-    uptime_seconds = get_uptime_seconds()
+async def refresh_config():
+    global runtime_config
 
     try:
-        camera_status = camera_service.get_status()
+        result = await asyncio.to_thread(api.get_config, DEVICE_ID)
+        runtime_config["poll_seconds"] = float(result.get("poll_seconds", runtime_config["poll_seconds"]))
+        runtime_config["heartbeat_seconds"] = int(result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"]))
+        runtime_config["status_seconds"] = int(result.get("status_seconds", runtime_config["status_seconds"]))
     except Exception as e:
-        camera_status = {
-            "camera_ready": False,
-            "last_error": str(e),
-        }
-
-    thermals_state = "ok"
-    if cpu_temp_c is not None:
-        if cpu_temp_c >= 80:
-            thermals_state = "warn"
-        elif cpu_temp_c >= 70:
-            thermals_state = "warn"
-
-    payload = {
-        # --------------------------------------------------------------
-        # Core identity / heartbeat
-        # --------------------------------------------------------------
-        "device_id": DEVICE_ID,
-        "device_name": DEVICE_NAME,
-        "device_type": DEVICE_TYPE,
-        "software_version": DEVICE_SOFTWARE_VERSION,
-        "hostname": socket.gethostname(),
-        "local_ip": get_local_ip(),
-        "online": True,
-        "last_seen_at": now_ts(),
-
-        # --------------------------------------------------------------
-        # TOP-LEVEL COMPAT FIELDS
-        # Put everything here too so frontend/backend can read directly
-        # --------------------------------------------------------------
-        "battery": battery_percent,
-        "battery_percent": battery_percent,
-        "battery_voltage": battery_voltage,
-        "voltage": battery_voltage,
-
-        "cpu": cpu_percent,
-        "cpu_usage": cpu_percent,
-        "cpu_percent": cpu_percent,
-        "cpu_temp": cpu_temp_c,
-        "cpu_temp_c": cpu_temp_c,
-
-        "ram": ram_percent,
-        "ram_usage": ram_percent,
-        "ram_percent": ram_percent,
-        "memory": ram_percent,
-        "memory_percent": ram_percent,
-
-        "gpu": gpu_percent,
-        "gpu_usage": gpu_percent,
-        "gpu_percent": gpu_percent,
-
-        "disk": disk_percent,
-        "disk_percent": disk_percent,
-
-        "wifi": wifi_dbm,
-        "wifi_dbm": wifi_dbm,
-
-        "uptime": uptime_seconds,
-        "uptime_seconds": uptime_seconds,
-
-        # --------------------------------------------------------------
-        # Nested metrics
-        # --------------------------------------------------------------
-        "metrics": {
-            "battery": battery_percent,
-            "battery_percent": battery_percent,
-            "battery_voltage": battery_voltage,
-            "voltage": battery_voltage,
-            "cpu": cpu_percent,
-            "cpu_usage": cpu_percent,
-            "cpu_percent": cpu_percent,
-            "cpu_temp": cpu_temp_c,
-            "cpu_temp_c": cpu_temp_c,
-            "ram": ram_percent,
-            "ram_usage": ram_percent,
-            "ram_percent": ram_percent,
-            "memory": ram_percent,
-            "memory_percent": ram_percent,
-            "gpu": gpu_percent,
-            "gpu_usage": gpu_percent,
-            "gpu_percent": gpu_percent,
-            "disk_percent": disk_percent,
-            "wifi_dbm": wifi_dbm,
-            "uptime": uptime_seconds,
-            "uptime_seconds": uptime_seconds,
-        },
-
-        # --------------------------------------------------------------
-        # UI health blocks
-        # --------------------------------------------------------------
-        "system_health": {
-            "motors": "ok",
-            "sensors": "ok",
-            "thermals": thermals_state,
-        },
-        "health": {
-            "motors": "ok",
-            "sensors": "ok",
-            "thermals": thermals_state,
-        },
-        "motors_status": "ok",
-        "sensors_status": "ok",
-        "thermals_status": thermals_state,
-
-        # --------------------------------------------------------------
-        # Camera
-        # --------------------------------------------------------------
-        "camera": camera_status,
-        "camera_ready": camera_status.get("camera_ready", False),
-    }
-
-    return payload
+        send_or_queue_log("warning", "config_refresh_failed", f"Failed to refresh config: {e}")
 
 
-# ------------------------------------------------------------------
-# API ADAPTERS
-# ------------------------------------------------------------------
-def call_api_method(
-    method_names: list[str],
-    arg_builders: list[Callable[[Callable[..., Any]], tuple[list[Any], dict[str, Any]]]],
-):
-    last_error = None
-
-    for method_name in method_names:
-        method = getattr(api, method_name, None)
-        if method is None:
-            continue
-
-        for builder in arg_builders:
-            try:
-                args, kwargs = builder(method)
-                return method(*args, **kwargs)
-            except TypeError as e:
-                last_error = e
-                continue
-            except Exception as e:
-                last_error = e
-                raise
-
-    if last_error:
-        raise last_error
-
-    raise AttributeError(f"No matching ApiClient method found among: {method_names}")
-
-
-def register_with_cloud():
-    payload = {
-        "device_id": DEVICE_ID,
-        "device_name": DEVICE_NAME,
-        "device_type": DEVICE_TYPE,
-        "software_version": DEVICE_SOFTWARE_VERSION,
-        "hostname": socket.gethostname(),
-        "local_ip": get_local_ip(),
-    }
-
-    return call_api_method(
-        ["register_device", "register", "device_register"],
-        [
-            lambda _m: ([payload], {}),
-            lambda _m: ([DEVICE_ID, payload], {}),
-            lambda _m: ([], payload),
-        ],
-    )
-
-
-def send_status_to_cloud(payload: dict):
-    return call_api_method(
-        [
-            "send_status",
-            "update_status",
-            "post_status",
-            "heartbeat",
-            "send_device_status",
-            "device_status",
-            "status",
-        ],
-        [
-            lambda _m: ([payload], {}),
-            lambda _m: ([DEVICE_ID, payload], {}),
-            lambda _m: ([], payload),
-        ],
-    )
-
-
-def get_next_command_from_cloud():
-    return call_api_method(
-        ["get_next_command", "poll_command", "next_command"],
-        [
-            lambda _m: ([DEVICE_ID], {}),
-            lambda _m: ([], {"device_id": DEVICE_ID}),
-            lambda _m: ([], {}),
-        ],
-    )
-
-
-def ack_command_to_cloud(payload: dict):
-    return call_api_method(
-        ["ack_command", "acknowledge_command", "command_ack"],
-        [
-            lambda _m: ([payload], {}),
-            lambda _m: ([DEVICE_ID, payload], {}),
-            lambda _m: ([], payload),
-        ],
-    )
-
-
-# ------------------------------------------------------------------
-# LOOPS
-# ------------------------------------------------------------------
-async def registration_loop():
-    global last_register_message
-
+# -------------------------------------------------------------------
+# BACKGROUND LOOPS
+# -------------------------------------------------------------------
+async def heartbeat_loop():
     while True:
         try:
-            result = await asyncio.to_thread(register_with_cloud)
-            runtime_state["registered"] = True
-            runtime_state["last_register_ok"] = now_ts()
-            runtime_state["last_register_error"] = None
-
-            msg = f"ok device_id={DEVICE_ID}"
-            if msg != last_register_message:
-                quiet_print("[REGISTER]", msg)
-                last_register_message = msg
-
+            payload = build_heartbeat_payload()
+            await asyncio.to_thread(api.heartbeat, payload)
         except Exception as e:
-            runtime_state["registered"] = False
-            runtime_state["last_register_error"] = str(e)
+            send_or_queue_log("warning", "heartbeat_failed", f"Heartbeat failed: {e}")
 
-            msg = str(e)
-            if msg != last_register_message:
-                quiet_print("[REGISTER]", f"failed: {msg}")
-                last_register_message = msg
-
-        await asyncio.sleep(max(HEARTBEAT_SECONDS, 10))
+        await asyncio.sleep(runtime_config["heartbeat_seconds"])
 
 
 async def status_loop():
-    global last_status_message
+    while True:
+        payload = build_status_payload()
 
-    await asyncio.sleep(1.0)
+        try:
+            await asyncio.to_thread(api.status, payload)
+        except Exception as e:
+            queue_status(payload)
+            send_or_queue_log("warning", "status_failed", f"Status upload failed: {e}")
 
+        await asyncio.sleep(runtime_config["status_seconds"])
+
+
+async def flush_loop():
     while True:
         try:
-            payload = collect_payload()
-            await asyncio.to_thread(send_status_to_cloud, payload)
+            await asyncio.to_thread(flush_logs, api.log)
+            await asyncio.to_thread(flush_statuses, api.status)
+        except Exception:
+            pass
 
-            runtime_state["last_status_ok"] = now_ts()
-            runtime_state["last_status_error"] = None
+        await asyncio.sleep(int(DEVICE_OFFLINE_RETRY_SECONDS))
 
-            cpu = payload.get("cpu_percent")
-            ram = payload.get("ram_percent")
-            batt = payload.get("battery_percent")
-            gpu = payload.get("gpu_percent")
 
-            msg = f"ok cpu={cpu} ram={ram} batt={batt} gpu={gpu}"
-            if msg != last_status_message:
-                quiet_print("[STATUS]", msg)
-                last_status_message = msg
-
-        except Exception as e:
-            runtime_state["last_status_error"] = str(e)
-
-            msg = f"failed: {e}"
-            if msg != last_status_message:
-                quiet_print("[STATUS]", msg)
-                last_status_message = msg
-
-        await asyncio.sleep(max(STATUS_SECONDS, 1.0))
+async def config_loop():
+    while True:
+        await refresh_config()
+        await asyncio.sleep(int(DEVICE_CONFIG_REFRESH_SECONDS))
 
 
 async def command_loop():
-    global last_command_message
-
     while True:
         try:
-            result = await asyncio.to_thread(get_next_command_from_cloud)
-
-            command = {}
-            if isinstance(result, dict):
-                command = result.get("command") or {}
+            result = await asyncio.to_thread(api.get_next_command, DEVICE_ID)
+            command = result.get("command")
 
             if command:
-                cmd_id = command.get("id")
+                command_id = command.get("id")
                 cmd = (command.get("command") or "").strip().lower()
                 payload = command.get("payload") or {}
 
-                if cmd in {"forward", "backward", "left", "right", "stop"}:
+                if cmd in MOVEMENT_COMMANDS:
                     try:
                         serial_link.send_command(cmd, payload.get("value", ""))
-                        ack_payload = {
-                            "command_id": cmd_id,
-                            "device_id": DEVICE_ID,
-                            "status": "completed",
-                        }
-                        await asyncio.to_thread(ack_command_to_cloud, ack_payload)
-                        runtime_state["last_command_ok"] = now_ts()
-                        runtime_state["last_command_error"] = None
-
-                        msg = f"ok {cmd}"
-                        if msg != last_command_message:
-                            quiet_print("[COMMAND]", msg)
-                            last_command_message = msg
-
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": f"Sent movement command: {cmd}",
+                            },
+                        )
                     except Exception as e:
-                        ack_payload = {
-                            "command_id": cmd_id,
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Movement failed: {e}",
+                            },
+                        )
+
+                elif cmd == "camera_activate_raw":
+                    try:
+                        camera_service.activate("raw")
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in raw mode",
+                            },
+                        )
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera raw activation failed: {e}",
+                            },
+                        )
+
+                elif cmd == "camera_activate_detection":
+                    try:
+                        camera_service.activate("detection")
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in detection mode",
+                            },
+                        )
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera detection activation failed: {e}",
+                            },
+                        )
+
+                elif cmd == "camera_deactivate":
+                    try:
+                        camera_service.deactivate()
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera deactivated",
+                            },
+                        )
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera deactivation failed: {e}",
+                            },
+                        )
+
+                else:
+                    await asyncio.to_thread(
+                        api.ack_command,
+                        {
+                            "command_id": command_id,
                             "device_id": DEVICE_ID,
                             "status": "failed",
-                            "note": str(e),
-                        }
-                        await asyncio.to_thread(ack_command_to_cloud, ack_payload)
-                        runtime_state["last_command_error"] = str(e)
+                            "note": f"Invalid command: {cmd}",
+                        },
+                    )
 
-                        msg = f"failed {cmd}: {e}"
-                        if msg != last_command_message:
-                            quiet_print("[COMMAND]", msg)
-                            last_command_message = msg
+        except Exception:
+            pass
 
-        except Exception as e:
-            runtime_state["last_command_error"] = str(e)
-            msg = f"poll failed: {e}"
-            if msg != last_command_message:
-                quiet_print("[COMMAND]", msg)
-                last_command_message = msg
-
-        await asyncio.sleep(max(POLL_SECONDS, 0.25))
+        await asyncio.sleep(runtime_config["poll_seconds"])
 
 
-# ------------------------------------------------------------------
-# FASTAPI
-# ------------------------------------------------------------------
+# -------------------------------------------------------------------
+# CAMERA STREAM
+# -------------------------------------------------------------------
+def mjpeg_generator() -> Iterator[bytes]:
+    camera_service.add_stream_client()
+    try:
+        while True:
+            frame = camera_service.get_jpeg()
+            if frame is None:
+                time.sleep(0.03)
+                continue
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            )
+    finally:
+        camera_service.remove_stream_client()
+
+
+# -------------------------------------------------------------------
+# LIFESPAN
+# -------------------------------------------------------------------
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app_instance: FastAPI):
     try:
         serial_link.connect()
+        send_or_queue_log("info", "serial_connected", "Serial initialized")
     except Exception as e:
-        quiet_print("[SERIAL]", f"connect failed: {e}")
+        send_or_queue_log("warning", "serial_unavailable", f"Serial unavailable: {e}")
 
-    asyncio.create_task(registration_loop())
+    send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
+
+    try:
+        await register_device()
+    except Exception as e:
+        send_or_queue_log("warning", "register_failed", f"Initial register failed: {e}")
+
+    asyncio.create_task(config_loop())
+    asyncio.create_task(heartbeat_loop())
     asyncio.create_task(status_loop())
+    asyncio.create_task(flush_loop())
     asyncio.create_task(command_loop())
 
-    quiet_print("[STARTUP]", "filometrics agent running")
     yield
-    quiet_print("[SHUTDOWN]", "done")
+
+    try:
+        camera_service.deactivate()
+    except Exception:
+        pass
 
 
-app = FastAPI(title="AURA Jetson Agent", lifespan=lifespan)
+app.router.lifespan_context = lifespan
 
 
+# -------------------------------------------------------------------
+# ROUTES
+# -------------------------------------------------------------------
 @app.get("/health")
 async def health():
     return {
         "ok": True,
         "device_id": DEVICE_ID,
-        "registered": runtime_state["registered"],
-        "last_register_ok": runtime_state["last_register_ok"],
-        "last_register_error": runtime_state["last_register_error"],
-        "last_status_ok": runtime_state["last_status_ok"],
-        "last_status_error": runtime_state["last_status_error"],
-        "last_command_ok": runtime_state["last_command_ok"],
-        "last_command_error": runtime_state["last_command_error"],
+        "db_name": LOCAL_DB_NAME,
+        "camera": camera_service.get_status(),
     }
 
 
-@app.get("/status")
-async def status():
-    return collect_payload()
+@app.get("/camera/status")
+async def camera_status():
+    return get_camera_status()
 
 
+@app.get("/camera/detections")
+async def camera_detections():
+    return {
+        "mode": camera_service.get_mode(),
+        "detections": camera_service.get_detections(),
+    }
+
+
+@app.post("/camera/activate")
+async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
+    try:
+        camera_service.activate(mode)
+        return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
+
+
+@app.post("/camera/deactivate")
+async def deactivate_camera():
+    camera_service.deactivate()
+    return {"ok": True, "enabled": False}
+
+
+@app.post("/camera/mode")
+async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
+    status = camera_service.get_status()
+
+    if not status.get("enabled"):
+        camera_service.activate(mode)
+    else:
+        camera_service.set_mode(mode)
+
+    return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
+
+
+@app.get("/camera/stream")
+async def camera_stream():
+    status = camera_service.get_status()
+    if not status.get("enabled"):
+        raise HTTPException(status_code=503, detail="Camera is not activated")
+
+    return StreamingResponse(
+        mjpeg_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+# -------------------------------------------------------------------
+# MAIN
+# -------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(
         app,
