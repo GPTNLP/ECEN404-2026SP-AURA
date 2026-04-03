@@ -36,6 +36,7 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           VITE_AUTH_API_BASE: ${{ vars.VITE_AUTH_API_BASE }}
+          VITE_CAMERA_API_BASE: ${{ vars.VITE_CAMERA_API_BASE }}
         run: npm run build
 
       - name: Deploy
