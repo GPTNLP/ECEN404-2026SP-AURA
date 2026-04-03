@@ -3,11 +3,12 @@ import time
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Iterator
+from typing import Iterator, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 import uvicorn
+import requests
 
 # -------------------------------------------------------------------
 # PATH SETUP
@@ -29,6 +30,8 @@ from core.config import (
     DEVICE_NAME,
     DEVICE_TYPE,
     DEVICE_SOFTWARE_VERSION,
+    DEVICE_SHARED_SECRET,
+    API_BASE_URL,
     HEARTBEAT_SECONDS,
     STATUS_SECONDS,
     CONFIG_REFRESH_SECONDS,
@@ -61,6 +64,7 @@ runtime_config = {
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 _last_messages = {}
+_last_uploaded_signature: Optional[str] = None
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -324,6 +328,54 @@ async def command_loop():
 
 
 # -------------------------------------------------------------------
+# CAMERA UPLOAD BRIDGE
+# -------------------------------------------------------------------
+def upload_latest_frame_once():
+    global _last_uploaded_signature
+
+    if not API_BASE_URL:
+        return
+
+    status = camera_service.get_status()
+    if not status.get("enabled") or not status.get("running"):
+        return
+
+    frame = camera_service.get_jpeg()
+    if not frame:
+        return
+
+    mode = camera_service.get_mode()
+    signature = f"{mode}:{len(frame)}:{frame[:16]!r}"
+
+    if signature == _last_uploaded_signature:
+        return
+
+    url = f"{API_BASE_URL.rstrip('/')}/camera/device/camera/frame"
+    headers = {
+        "X-Device-Secret": DEVICE_SHARED_SECRET,
+        "Content-Type": "image/jpeg",
+    }
+    params = {
+        "device_id": DEVICE_ID,
+        "mode": mode,
+    }
+
+    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=5)
+    resp.raise_for_status()
+    _last_uploaded_signature = signature
+
+
+async def camera_upload_loop():
+    while True:
+        try:
+            await asyncio.to_thread(upload_latest_frame_once)
+        except Exception as e:
+            quiet_print("camera_upload", f"[CAMERA_UPLOAD] failed: {e}")
+
+        await asyncio.sleep(0.2)
+
+
+# -------------------------------------------------------------------
 # CAMERA STREAM
 # -------------------------------------------------------------------
 def mjpeg_generator() -> Iterator[bytes]:
@@ -376,6 +428,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(status_loop())
     asyncio.create_task(flush_loop())
     asyncio.create_task(command_loop())
+    asyncio.create_task(camera_upload_loop())
 
     quiet_print("startup", "[STARTUP] telemetry agent running")
     yield

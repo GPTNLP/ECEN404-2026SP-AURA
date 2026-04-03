@@ -15,7 +15,7 @@ export default function CameraFeedSecure() {
   const [err, setErr] = useState<string | null>(null);
   const [mode, setMode] = useState<CameraMode>("raw");
   const [busy, setBusy] = useState(false);
-  const [streamNonce, setStreamNonce] = useState(0);
+  const [frameNonce, setFrameNonce] = useState(0);
 
   const base = (API_BASE || "").replace(/\/+$/, "");
 
@@ -23,12 +23,12 @@ export default function CameraFeedSecure() {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   });
 
-  const streamSrc = useMemo(() => {
+  const frameSrc = useMemo(() => {
     if (!base) return "";
-    return `${base}/camera/stream?device_id=${encodeURIComponent(
+    return `${base}/camera/latest?device_id=${encodeURIComponent(
       DEVICE_ID
-    )}&mode=${encodeURIComponent(mode)}&n=${streamNonce}`;
-  }, [base, mode, streamNonce]);
+    )}&mode=${encodeURIComponent(mode)}&n=${frameNonce}`;
+  }, [base, mode, frameNonce]);
 
   const activateCamera = async (newMode: CameraMode) => {
     if (!base) return;
@@ -57,7 +57,7 @@ export default function CameraFeedSecure() {
       setMode(newMode);
       setOk(false);
       setErr(null);
-      setStreamNonce((n) => n + 1);
+      setFrameNonce((n) => n + 1);
     } catch (e: any) {
       setErr(e?.message || "Failed to activate camera");
       setOk(false);
@@ -90,7 +90,7 @@ export default function CameraFeedSecure() {
       // ignore
     } finally {
       setOk(false);
-      setStreamNonce((n) => n + 1);
+      setFrameNonce((n) => n + 1);
     }
   };
 
@@ -102,6 +102,18 @@ export default function CameraFeedSecure() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!base) return;
+
+    const id = window.setInterval(() => {
+      setFrameNonce((n) => n + 1);
+    }, 250);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [base]);
 
   if (!API_BASE) {
     return (
@@ -142,7 +154,7 @@ export default function CameraFeedSecure() {
           </button>
 
           <button
-            onClick={() => setStreamNonce((n) => n + 1)}
+            onClick={() => setFrameNonce((n) => n + 1)}
             disabled={busy}
             className="cam-btn"
           >
@@ -152,29 +164,20 @@ export default function CameraFeedSecure() {
       </div>
 
       <div className="cam-frame">
-        {ok || !err ? (
-          <img
-            key={`${mode}-${streamNonce}`}
-            className="cam-img"
-            src={streamSrc}
-            alt="Stream"
-            onLoad={() => {
-              setOk(true);
-              setErr(null);
-            }}
-            onError={() => {
-              setOk(false);
-              setErr("Stream unavailable");
-            }}
-          />
-        ) : (
-          <div className="cam-placeholder">
-            <div className="cam-placeholder-title">Camera stream unavailable</div>
-            <div className="cam-placeholder-subtitle">
-              Check the Jetson camera service, then press Refresh.
-            </div>
-          </div>
-        )}
+        <img
+          key={`${mode}-${frameNonce}`}
+          className="cam-img"
+          src={frameSrc}
+          alt="Stream"
+          onLoad={() => {
+            setOk(true);
+            setErr(null);
+          }}
+          onError={() => {
+            setOk(false);
+            setErr("Stream unavailable");
+          }}
+        />
       </div>
 
       {err && <div className="cam-error">{err}</div>}
