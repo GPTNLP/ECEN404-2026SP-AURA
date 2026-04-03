@@ -11,6 +11,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 16px 18px;
   border-bottom: 1px solid rgba(120, 150, 255, 0.12);
   background: rgba(255, 255, 255, 0.02);
@@ -22,13 +23,21 @@
   color: var(--text);
 }
 
+.cam-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .cam-status {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.2px;
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-right: 8px;
 }
 
 .cam-status.good {
@@ -37,6 +46,32 @@
 
 .cam-status.bad {
   color: #ff7b7b;
+}
+
+.cam-btn {
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(120, 150, 255, 0.18);
+  background: #ffffff;
+  color: #000000;
+  font-weight: 800;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.cam-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.cam-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.cam-btn.active {
+  background: #a94f4f;
+  color: #ffffff;
+  border-color: #a94f4f;
 }
 
 .cam-frame {
@@ -52,6 +87,32 @@
   object-fit: contain;
   background: rgba(0, 0, 0, 0.35);
   border: 1px solid rgba(120, 150, 255, 0.16);
+}
+
+.cam-placeholder {
+  width: min(1300px, 100%);
+  aspect-ratio: 16 / 9;
+  border-radius: 14px;
+  border: 1px solid rgba(120, 150, 255, 0.16);
+  background: rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  text-align: center;
+  padding: 24px;
+}
+
+.cam-placeholder-title {
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.cam-placeholder-subtitle {
+  font-size: 14px;
+  opacity: 0.8;
 }
 
 .cam-error {

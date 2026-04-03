@@ -15,7 +15,6 @@ export default function CameraFeedSecure() {
   const [err, setErr] = useState<string | null>(null);
   const [mode, setMode] = useState<CameraMode>("raw");
   const [busy, setBusy] = useState(false);
-  const [statusText, setStatusText] = useState("Idle");
   const [streamNonce, setStreamNonce] = useState(0);
 
   const base = (API_BASE || "").replace(/\/+$/, "");
@@ -36,7 +35,6 @@ export default function CameraFeedSecure() {
 
     setBusy(true);
     setErr(null);
-    setStatusText(`Starting ${newMode}...`);
 
     try {
       const res = await fetch(
@@ -59,13 +57,9 @@ export default function CameraFeedSecure() {
       setMode(newMode);
       setOk(false);
       setErr(null);
-      setStatusText(
-        newMode === "raw" ? "Raw mode active" : "Detection mode active"
-      );
       setStreamNonce((n) => n + 1);
     } catch (e: any) {
       setErr(e?.message || "Failed to activate camera");
-      setStatusText("Camera start failed");
       setOk(false);
     } finally {
       setBusy(false);
@@ -95,7 +89,6 @@ export default function CameraFeedSecure() {
     } catch {
       // ignore
     } finally {
-      setStatusText("Camera off");
       setOk(false);
       setStreamNonce((n) => n + 1);
     }
@@ -112,119 +105,59 @@ export default function CameraFeedSecure() {
 
   if (!API_BASE) {
     return (
-      <section className="cam-card">
+      <div className="cam-card">
         <div className="cam-card-header">
-          <div>
-            <div className="cam-title">Live Camera Feed</div>
-            <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
-          </div>
+          <div className="cam-title">Live Camera Feed</div>
           <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
         </div>
-      </section>
+        <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
+      </div>
     );
   }
 
   return (
-    <section className="cam-card">
+    <div className="cam-card">
       <div className="cam-card-header">
-        <div>
-          <div className="cam-title">Live Camera Feed</div>
-          <div
-            style={{
-              fontSize: 12,
-              opacity: 0.8,
-              marginTop: 4,
-            }}
-          >
-            {statusText}
-          </div>
-        </div>
+        <div className="cam-title">Live Camera Feed</div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            flexWrap: "wrap",
-            justifyContent: "flex-end",
-          }}
-        >
+        <div className="cam-toolbar">
           <div className={`cam-status ${ok ? "good" : "bad"}`}>
             ● {ok ? "Connected" : "Disconnected"}
           </div>
 
-          <div
-            className="cam-toolbar"
-            style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
+          <button
+            onClick={() => setCameraMode("raw")}
+            disabled={busy || mode === "raw"}
+            className={`cam-btn ${mode === "raw" ? "active" : ""}`}
           >
-            <div
-              className="camera-controls-inline"
-              style={{ display: "flex", gap: 10, flexWrap: "wrap" }}
-            >
-              <button
-                onClick={() => setCameraMode("raw")}
-                disabled={busy || mode === "raw"}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid var(--card-border)",
-                  background:
-                    mode === "raw" ? "var(--accent, #dbeafe)" : "var(--card-bg)",
-                  fontWeight: 900,
-                  cursor: busy || mode === "raw" ? "not-allowed" : "pointer",
-                  opacity: busy || mode === "raw" ? 0.7 : 1,
-                }}
-              >
-                Raw
-              </button>
+            Raw
+          </button>
 
-              <button
-                onClick={() => setCameraMode("detection")}
-                disabled={busy || mode === "detection"}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid var(--card-border)",
-                  background:
-                    mode === "detection"
-                      ? "var(--accent, #dbeafe)"
-                      : "var(--card-bg)",
-                  fontWeight: 900,
-                  cursor:
-                    busy || mode === "detection" ? "not-allowed" : "pointer",
-                  opacity: busy || mode === "detection" ? 0.7 : 1,
-                }}
-              >
-                Detection
-              </button>
+          <button
+            onClick={() => setCameraMode("detection")}
+            disabled={busy || mode === "detection"}
+            className={`cam-btn ${mode === "detection" ? "active" : ""}`}
+          >
+            Detection
+          </button>
 
-              <button
-                onClick={() => setStreamNonce((n) => n + 1)}
-                disabled={busy}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  border: "1px solid var(--card-border)",
-                  background: "var(--card-bg)",
-                  fontWeight: 900,
-                  cursor: busy ? "not-allowed" : "pointer",
-                  opacity: busy ? 0.7 : 1,
-                }}
-              >
-                Refresh
-              </button>
-            </div>
-          </div>
+          <button
+            onClick={() => setStreamNonce((n) => n + 1)}
+            disabled={busy}
+            className="cam-btn"
+          >
+            Refresh
+          </button>
         </div>
       </div>
 
-      <div className="cam-frame" style={{ position: "relative" }}>
-        <div className="camera-feed-body">
+      <div className="cam-frame">
+        {ok || !err ? (
           <img
             key={`${mode}-${streamNonce}`}
+            className="cam-img"
             src={streamSrc}
-            alt="AURA live camera"
-            className="camera-feed-image cam-img"
+            alt="Stream"
             onLoad={() => {
               setOk(true);
               setErr(null);
@@ -233,11 +166,18 @@ export default function CameraFeedSecure() {
               setOk(false);
               setErr("Stream unavailable");
             }}
-          />s
-        </div>
+          />
+        ) : (
+          <div className="cam-placeholder">
+            <div className="cam-placeholder-title">Camera stream unavailable</div>
+            <div className="cam-placeholder-subtitle">
+              Check the Jetson camera service, then press Refresh.
+            </div>
+          </div>
+        )}
       </div>
 
       {err && <div className="cam-error">{err}</div>}
-    </section>
+    </div>
   );
 }
