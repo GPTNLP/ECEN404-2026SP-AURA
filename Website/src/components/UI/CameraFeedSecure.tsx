@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "../../styles/cameraFeed.css";
 import { useAuth } from "../../services/authService";
 
@@ -16,6 +16,8 @@ export default function CameraFeedSecure() {
   const [mode, setMode] = useState<CameraMode>("raw");
   const [busy, setBusy] = useState(false);
   const [frameNonce, setFrameNonce] = useState(0);
+  const [displaySrc, setDisplaySrc] = useState("");
+  const preloadRef = useRef<HTMLImageElement | null>(null);
 
   const base = (API_BASE || "").replace(/\/+$/, "");
 
@@ -23,7 +25,7 @@ export default function CameraFeedSecure() {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   });
 
-  const frameSrc = useMemo(() => {
+  const nextFrameSrc = useMemo(() => {
     if (!base) return "";
     return `${base}/camera/latest?device_id=${encodeURIComponent(
       DEVICE_ID
@@ -57,6 +59,7 @@ export default function CameraFeedSecure() {
       setMode(newMode);
       setOk(false);
       setErr(null);
+      setDisplaySrc("");
       setFrameNonce((n) => n + 1);
     } catch (e: any) {
       setErr(e?.message || "Failed to activate camera");
@@ -90,7 +93,6 @@ export default function CameraFeedSecure() {
       // ignore
     } finally {
       setOk(false);
-      setFrameNonce((n) => n + 1);
     }
   };
 
@@ -104,11 +106,39 @@ export default function CameraFeedSecure() {
   }, []);
 
   useEffect(() => {
+    if (!nextFrameSrc) return;
+
+    const img = new Image();
+    preloadRef.current = img;
+
+    img.onload = () => {
+      if (preloadRef.current !== img) return;
+      setDisplaySrc(nextFrameSrc);
+      setOk(true);
+      setErr(null);
+    };
+
+    img.onerror = () => {
+      if (preloadRef.current !== img) return;
+      setOk(false);
+      setErr("Stream unavailable");
+    };
+
+    img.src = nextFrameSrc;
+
+    return () => {
+      if (preloadRef.current === img) {
+        preloadRef.current = null;
+      }
+    };
+  }, [nextFrameSrc]);
+
+  useEffect(() => {
     if (!base) return;
 
     const id = window.setInterval(() => {
       setFrameNonce((n) => n + 1);
-    }, 250);
+    }, 350);
 
     return () => {
       window.clearInterval(id);
@@ -164,20 +194,16 @@ export default function CameraFeedSecure() {
       </div>
 
       <div className="cam-frame">
-        <img
-          key={`${mode}-${frameNonce}`}
-          className="cam-img"
-          src={frameSrc}
-          alt="Stream"
-          onLoad={() => {
-            setOk(true);
-            setErr(null);
-          }}
-          onError={() => {
-            setOk(false);
-            setErr("Stream unavailable");
-          }}
-        />
+        {displaySrc ? (
+          <img
+            className="cam-img"
+            src={displaySrc}
+            alt="Camera feed"
+            draggable={false}
+          />
+        ) : (
+          <div className="cam-placeholder">Waiting for camera frame...</div>
+        )}
       </div>
 
       {err && <div className="cam-error">{err}</div>}
