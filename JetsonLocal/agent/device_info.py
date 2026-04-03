@@ -1,6 +1,7 @@
 import socket
 import time
 import shutil
+from pathlib import Path
 from typing import Dict, Any
 
 try:
@@ -37,13 +38,23 @@ def get_uptime_seconds() -> int:
 
 
 def get_temperature_c() -> float | None:
-    thermal_path = "/sys/class/thermal/thermal_zone0/temp"
-    try:
-        with open(thermal_path, "r", encoding="utf-8") as f:
-            raw = f.read().strip()
-        return round(int(raw) / 1000.0, 1)
-    except Exception:
-        return None
+    thermal_paths = [
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/devices/virtual/thermal/thermal_zone0/temp",
+    ]
+
+    for thermal_path in thermal_paths:
+        try:
+            with open(thermal_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            value = float(raw)
+            if value > 1000:
+                value /= 1000.0
+            return round(value, 1)
+        except Exception:
+            pass
+
+    return None
 
 
 def get_cpu_percent() -> float | None:
@@ -55,7 +66,7 @@ def get_cpu_percent() -> float | None:
     return None
 
 
-def get_gpu_percent() -> float | None:
+def _read_gpu_from_jtop() -> float | None:
     if jtop is None:
         return None
 
@@ -68,11 +79,53 @@ def get_gpu_percent() -> float | None:
             for key in ("GPU", "GPU1", "GR3D_FREQ"):
                 if key in stats:
                     try:
-                        return float(stats[key])
+                        value = float(stats[key])
+                        if value > 100:
+                            value = value / 10.0
+                        return round(value, 1)
                     except Exception:
                         pass
     except Exception:
         return None
+
+    return None
+
+
+def _read_gpu_from_sysfs() -> float | None:
+    candidates = [
+        "/sys/class/devfreq/17000000.ga10b/load",
+        "/sys/class/devfreq/gpu/load",
+        "/sys/devices/gpu.0/load",
+    ]
+
+    for path_str in candidates:
+        try:
+            path = Path(path_str)
+            if not path.exists():
+                continue
+
+            raw = path.read_text(encoding="utf-8").strip()
+            value = float(raw)
+
+            # Jetson often reports 0..1000
+            if value > 100:
+                value = value / 10.0
+
+            return round(value, 1)
+        except Exception:
+            pass
+
+    return None
+
+
+def get_gpu_percent() -> float | None:
+    value = _read_gpu_from_jtop()
+    if value is not None:
+        return value
+
+    value = _read_gpu_from_sysfs()
+    if value is not None:
+        return value
 
     return None
 
