@@ -49,6 +49,8 @@ from core.offline_queue import queue_log, queue_status, flush_logs, flush_status
 from hardware.serial_link import serial_link
 from hardware.camera import camera_service, get_camera_status
 
+from stt_faster import STTService
+
 # -------------------------------------------------------------------
 # APP
 # -------------------------------------------------------------------
@@ -65,6 +67,10 @@ MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
+
+stt_service: Optional[STTService] = None
+stt_task: Optional[asyncio.Task] = None
+voice_enabled = True
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -90,6 +96,97 @@ def send_or_queue_log(level: str, event: str, message: str, meta=None):
         api.log(payload)
     except Exception:
         queue_log(payload)
+
+
+# -------------------------------------------------------------------
+# VOICE HELPERS
+# -------------------------------------------------------------------
+async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
+    if intent == "movement" and movement in MOVEMENT_COMMANDS:
+        try:
+            serial_link.send_command(movement, "")
+            send_or_queue_log(
+                "info",
+                "voice_movement_command",
+                f"Voice movement command executed: {movement}",
+                {"text": text, "movement": movement},
+            )
+            quiet_print("voice_action", f"[VOICE] movement -> {movement}")
+        except Exception as e:
+            send_or_queue_log(
+                "warning",
+                "voice_movement_failed",
+                f"Voice movement command failed: {e}",
+                {"text": text, "movement": movement},
+            )
+            quiet_print("voice_action", f"[VOICE] movement failed -> {movement}: {e}")
+        return
+
+    if intent == "llm":
+        send_or_queue_log(
+            "info",
+            "voice_llm_query",
+            "Voice query captured",
+            {"text": text},
+        )
+        quiet_print("voice_action", f"[VOICE] llm -> {text}")
+        return
+
+    send_or_queue_log(
+        "info",
+        "voice_unclassified",
+        "Voice input captured but not classified",
+        {"text": text, "intent": intent, "movement": movement},
+    )
+    quiet_print("voice_action", f"[VOICE] unclassified -> {text}")
+
+
+def build_stt_service() -> STTService:
+    return STTService(
+        callback=handle_voice_text,
+        model_size="tiny.en",
+        input_device=None,
+        device_sample_rate=None,
+        target_sample_rate=16000,
+        channels=None,
+        device="cpu",
+        compute_type="int8",
+        language="en",
+        task="transcribe",
+        log_path="~/SDP/AURA/JetsonLocal/storage/transcriptions.log",
+    )
+
+
+async def start_voice_loop() -> None:
+    global stt_service, stt_task
+
+    if stt_task and not stt_task.done():
+        return
+
+    stt_service = build_stt_service()
+    stt_task = asyncio.create_task(stt_service.continuous_stt_loop())
+    quiet_print("voice", "[VOICE] started")
+
+
+async def stop_voice_loop() -> None:
+    global stt_service, stt_task
+
+    if stt_service is not None:
+        stt_service.stop()
+
+    if stt_task is not None:
+        try:
+            await asyncio.wait_for(stt_task, timeout=2.0)
+        except Exception:
+            stt_task.cancel()
+            try:
+                await stt_task
+            except Exception:
+                pass
+
+    stt_service = None
+    stt_task = None
+    quiet_print("voice", "[VOICE] stopped")
 
 
 # -------------------------------------------------------------------
@@ -439,8 +536,20 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(camera_upload_loop())
 
+    if voice_enabled:
+        try:
+            await start_voice_loop()
+        except Exception as e:
+            send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
+            quiet_print("voice", f"[VOICE] failed to start: {e}")
+
     quiet_print("startup", "[STARTUP] telemetry agent running")
     yield
+
+    try:
+        await stop_voice_loop()
+    except Exception:
+        pass
 
     try:
         camera_service.deactivate()
@@ -464,12 +573,52 @@ async def health():
         "device_type": DEVICE_TYPE,
         "db_name": LOCAL_DB_NAME,
         "camera": camera_service.get_status(),
+        "voice": {
+            "enabled": voice_enabled,
+            "running": bool(stt_task and not stt_task.done()),
+            "device_index": stt_service.input_device if stt_service else None,
+            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
+            "channels": stt_service.channels if stt_service else None,
+            "noise_floor": stt_service.noise_floor if stt_service else None,
+        },
     }
 
 
 @app.get("/status")
 async def status():
     return build_status_payload()
+
+
+@app.get("/voice/status")
+async def voice_status():
+    return {
+        "ok": True,
+        "enabled": voice_enabled,
+        "running": bool(stt_task and not stt_task.done()),
+        "device_index": stt_service.input_device if stt_service else None,
+        "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
+        "channels": stt_service.channels if stt_service else None,
+        "noise_floor": stt_service.noise_floor if stt_service else None,
+        "model_size": stt_service.model_size if stt_service else None,
+    }
+
+
+@app.post("/voice/start")
+async def voice_start():
+    await start_voice_loop()
+    return {
+        "ok": True,
+        "running": bool(stt_task and not stt_task.done()),
+    }
+
+
+@app.post("/voice/stop")
+async def voice_stop():
+    await stop_voice_loop()
+    return {
+        "ok": True,
+        "running": False,
+    }
 
 
 @app.get("/camera/status")
