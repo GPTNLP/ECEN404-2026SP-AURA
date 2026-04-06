@@ -28,76 +28,71 @@ class TTSService:
         self.model_id = (model_id or os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")).strip()
         self.device = (device or os.getenv("AURA_TTS_DEVICE", "plughw:0,0")).strip()
 
-        if not self.api_key:
-            raise RuntimeError(f"ELEVENLABS_API_KEY is missing from environment. Looked for .env at: {ENV_PATH}")
-        if not self.voice_id:
-            raise RuntimeError(f"ELEVENLABS_VOICE_ID is missing from environment. Looked for .env at: {ENV_PATH}")
+    # ---------------------------
+    # ONLINE (ElevenLabs)
+    # ---------------------------
+    def _speak_elevenlabs(self, text: str) -> bool:
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
 
-    def _play_file(self, audio_path: str) -> None:
-        attempts = [
-            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path],
-            ["mpg123", "-q", audio_path],
-            ["mpv", "--no-video", "--really-quiet", audio_path],
-        ]
+        headers = {
+            "xi-api-key": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "audio/mpeg",
+        }
 
-        for cmd in attempts:
-            try:
-                subprocess.run(cmd, check=True)
-                return
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
-                print(f"[TTS] playback attempt failed: {' '.join(cmd)} -> {exc}")
+        payload = {
+            "text": text,
+            "model_id": self.model_id,
+            "voice_settings": {
+                "stability": 0.75,
+                "similarity_boost": 0.85,
+            },
+        }
 
-        raise RuntimeError(
-            "No working MP3 playback command found. Install ffmpeg (ffplay), mpg123, or mpv."
-        )
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
 
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+            tmp_path = f.name
+            f.write(response.content)
+
+        try:
+            subprocess.run(
+                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
+                check=True,
+            )
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+
+        print(f"[TTS] ElevenLabs: {text}")
+        return True
+
+    # ---------------------------
+    # OFFLINE (espeak)
+    # ---------------------------
+    def _speak_offline(self, text: str) -> bool:
+        try:
+            subprocess.run(["espeak-ng", text], check=True)
+            print(f"[TTS] Offline fallback: {text}")
+            return True
+        except Exception as e:
+            print(f"[TTS ERROR] offline failed: {e}")
+            return False
+
+    # ---------------------------
+    # MAIN ENTRY
+    # ---------------------------
     def speak(self, text: str) -> bool:
         text = (text or "").strip()
         if not text:
-            print("[TTS] empty text, skipping")
             return False
 
-        tmp_path = None
+        # Try ElevenLabs first
+        if self.api_key and self.voice_id:
+            try:
+                return self._speak_elevenlabs(text)
+            except Exception as e:
+                print(f"[TTS] ElevenLabs failed → fallback: {e}")
 
-        try:
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
-
-            headers = {
-                "xi-api-key": self.api_key,
-                "Content-Type": "application/json",
-                "Accept": "audio/mpeg",
-            }
-
-            payload = {
-                "text": text,
-                "model_id": self.model_id,
-                "voice_settings": {
-                    "stability": 0.75,
-                    "similarity_boost": 0.85,
-                },
-            }
-
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-                tmp_path = f.name
-                f.write(response.content)
-
-            self._play_file(tmp_path)
-
-            print(f"[TTS] spoke with ElevenLabs: {text}")
-            return True
-
-        except Exception as exc:
-            print(f"[TTS ERROR] {exc}")
-            return False
-
-        finally:
-            if tmp_path and Path(tmp_path).exists():
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
+        # Fallback to offline
+        return self._speak_offline(text)
