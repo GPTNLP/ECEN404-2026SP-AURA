@@ -5,6 +5,15 @@ from pathlib import Path
 from typing import Optional
 
 import requests
+from dotenv import load_dotenv
+
+
+BASE_DIR = Path(__file__).resolve().parent
+JETSONLOCAL_DIR = BASE_DIR.parent
+ENV_PATH = JETSONLOCAL_DIR / ".env"
+
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH)
 
 
 class TTSService:
@@ -20,9 +29,9 @@ class TTSService:
         self.device = (device or os.getenv("AURA_TTS_DEVICE", "plughw:0,0")).strip()
 
         if not self.api_key:
-            raise RuntimeError("ELEVENLABS_API_KEY is missing from environment.")
+            raise RuntimeError(f"ELEVENLABS_API_KEY is missing from environment. Looked for .env at: {ENV_PATH}")
         if not self.voice_id:
-            raise RuntimeError("ELEVENLABS_VOICE_ID is missing from environment.")
+            raise RuntimeError(f"ELEVENLABS_VOICE_ID is missing from environment. Looked for .env at: {ENV_PATH}")
 
     def _play_file(self, audio_path: str) -> None:
         attempts = [
