@@ -777,8 +777,7 @@ async def camera_frame():
     status = camera_service.get_status()
 
     if not status.get("enabled"):
-        camera_service.activate("raw")
-        time.sleep(0.4)
+        raise HTTPException(status_code=409, detail="Camera is off")
 
     frame = camera_service.get_jpeg()
     if frame is None:
@@ -815,10 +814,9 @@ async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
     status = camera_service.get_status()
 
     if not status.get("enabled"):
-        camera_service.activate(mode)
-    else:
-        camera_service.set_mode(mode)
+        raise HTTPException(status_code=409, detail="Camera is off")
 
+    camera_service.set_mode(mode)
     return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
 
 
@@ -828,9 +826,9 @@ async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
         status = camera_service.get_status()
 
         if not status.get("enabled"):
-            camera_service.activate(mode)
-            time.sleep(0.4)
-        elif camera_service.get_mode() != mode:
+            raise HTTPException(status_code=409, detail="Camera is off")
+
+        if camera_service.get_mode() != mode:
             camera_service.set_mode(mode)
             time.sleep(0.2)
 
@@ -844,6 +842,8 @@ async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
                 "Connection": "keep-alive",
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start camera stream: {e}")
 
