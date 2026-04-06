@@ -25,6 +25,47 @@ class TTSService:
                 return path
         raise FileNotFoundError("Neither 'espeak-ng' nor 'espeak' was found in PATH.")
 
+    def _play_wav(self, wav_path: str) -> None:
+        play_attempts = [
+            ["aplay", "-D", self.device, wav_path],
+            ["aplay", wav_path],
+        ]
+
+        for cmd in play_attempts:
+            try:
+                subprocess.run(cmd, check=True)
+                return
+            except Exception as exc:
+                print(f"[TTS] playback attempt failed: {' '.join(cmd)} -> {exc}")
+
+        ffplay_path = shutil.which("ffplay")
+        if ffplay_path:
+            try:
+                subprocess.run(
+                    [
+                        ffplay_path,
+                        "-nodisp",
+                        "-autoexit",
+                        "-loglevel",
+                        "quiet",
+                        wav_path,
+                    ],
+                    check=True,
+                )
+                return
+            except Exception as exc:
+                print(f"[TTS] ffplay fallback failed: {exc}")
+
+        paplay_path = shutil.which("paplay")
+        if paplay_path:
+            try:
+                subprocess.run([paplay_path, wav_path], check=True)
+                return
+            except Exception as exc:
+                print(f"[TTS] paplay fallback failed: {exc}")
+
+        raise RuntimeError("All playback methods failed")
+
     def speak(self, text: str) -> bool:
         text = (text or "").strip()
         if not text:
@@ -54,15 +95,7 @@ class TTSService:
                     check=True,
                 )
 
-                subprocess.run(
-                    [
-                        "aplay",
-                        "-D",
-                        self.device,
-                        wav_path,
-                    ],
-                    check=True,
-                )
+                self._play_wav(wav_path)
 
                 print(f"[TTS] spoke: {text}")
                 return True
