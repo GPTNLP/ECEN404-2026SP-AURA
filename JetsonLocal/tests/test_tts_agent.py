@@ -1,4 +1,4 @@
-from tts import speak
+from agent.tts import speak
 
 if __name__ == "__main__":
     print("=== TTS TEST ===")
