@@ -2,13 +2,21 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Optional
 
 
 class TTSService:
-    def __init__(self, voice: str = "en-us", device: Optional[str] = "default"):
-        self.voice = voice
-        self.device = device or "default"
+    def __init__(
+        self,
+        voice: Optional[str] = None,
+        device: Optional[str] = None,
+        rate: Optional[int] = None,
+    ):
+        self.voice = (voice or os.getenv("AURA_TTS_VOICE", "en-us")).strip()
+        self.device = (device or os.getenv("AURA_TTS_DEVICE", "default")).strip()
+        self.rate = int(os.getenv("AURA_TTS_RATE", str(rate if rate is not None else 165)))
+        self._lock = threading.Lock()
 
     def _find_tts_binary(self) -> str:
         for candidate in ("espeak-ng", "espeak"):
@@ -18,49 +26,54 @@ class TTSService:
         raise FileNotFoundError("Neither 'espeak-ng' nor 'espeak' was found in PATH.")
 
     def speak(self, text: str) -> bool:
-        if not text or not text.strip():
+        text = (text or "").strip()
+        if not text:
             print("[TTS] empty text, skipping")
             return False
 
         wav_path = None
 
-        try:
-            tts_bin = self._find_tts_binary()
+        with self._lock:
+            try:
+                tts_bin = self._find_tts_binary()
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                wav_path = f.name
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                    wav_path = f.name
 
-            subprocess.run(
-                [
-                    tts_bin,
-                    "-v",
-                    self.voice,
-                    "-w",
-                    wav_path,
-                    text,
-                ],
-                check=True,
-            )
+                subprocess.run(
+                    [
+                        tts_bin,
+                        "-v",
+                        self.voice,
+                        "-s",
+                        str(self.rate),
+                        "-w",
+                        wav_path,
+                        text,
+                    ],
+                    check=True,
+                )
 
-            subprocess.run(
-                [
-                    "aplay",
-                    "-D",
-                    self.device,
-                    wav_path,
-                ],
-                check=True,
-            )
+                subprocess.run(
+                    [
+                        "aplay",
+                        "-D",
+                        self.device,
+                        wav_path,
+                    ],
+                    check=True,
+                )
 
-            return True
+                print(f"[TTS] spoke: {text}")
+                return True
 
-        except Exception as exc:
-            print(f"[TTS ERROR] {exc}")
-            return False
+            except Exception as exc:
+                print(f"[TTS ERROR] {exc}")
+                return False
 
-        finally:
-            if wav_path and os.path.exists(wav_path):
-                try:
-                    os.remove(wav_path)
-                except OSError:
-                    pass
+            finally:
+                if wav_path and os.path.exists(wav_path):
+                    try:
+                        os.remove(wav_path)
+                    except OSError:
+                        pass

@@ -50,6 +50,7 @@ from hardware.serial_link import serial_link
 from hardware.camera import camera_service, get_camera_status
 
 from stt_faster import STTService
+from tts import TTSService
 
 # -------------------------------------------------------------------
 # APP
@@ -70,6 +71,7 @@ _last_messages = {}
 stt_service: Optional[STTService] = None
 stt_task: Optional[asyncio.Task] = None
 voice_enabled = True
+tts_service = TTSService()
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -100,7 +102,65 @@ def send_or_queue_log(level: str, event: str, message: str, meta=None):
 # -------------------------------------------------------------------
 # VOICE HELPERS
 # -------------------------------------------------------------------
+def extract_speak_payload(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    lowered = raw.lower()
+    idx = lowered.find("speak")
+    if idx == -1:
+        return ""
+
+    payload = raw[idx + len("speak"):].strip(" ,.:;!-")
+    fillers = (
+        "this",
+        "that",
+        "the following",
+        "out loud",
+        "please",
+    )
+
+    changed = True
+    while changed and payload:
+        changed = False
+        lowered_payload = payload.lower()
+        for filler in fillers:
+            prefix = filler + " "
+            if lowered_payload.startswith(prefix):
+                payload = payload[len(prefix):].strip(" ,.:;!-")
+                changed = True
+                break
+
+    return payload
+
+
 async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
+    lowered = (text or "").lower()
+
+    if "speak" in lowered:
+        speak_payload = extract_speak_payload(text)
+
+        if speak_payload:
+            send_or_queue_log(
+                "info",
+                "voice_tts_command",
+                "Voice TTS command executed",
+                {"text": text, "spoken_text": speak_payload},
+            )
+            quiet_print("voice_action", f"[VOICE] tts -> {speak_payload}")
+            tts_service.speak(speak_payload)
+        else:
+            send_or_queue_log(
+                "warning",
+                "voice_tts_missing_payload",
+                "Voice TTS command requested but no payload found",
+                {"text": text},
+            )
+            quiet_print("voice_action", "[VOICE] tts requested but no payload found")
+            tts_service.speak("Please tell me what you want me to say.")
+        return
+
     if intent == "movement" and movement in MOVEMENT_COMMANDS:
         try:
             serial_link.send_command(movement, "")
@@ -572,6 +632,7 @@ async def lifespan(app_instance: FastAPI):
         quiet_print("serial", f"[SERIAL] unavailable: {e}")
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
+    quiet_print("tts", f"[TTS] ready voice={tts_service.voice} device={tts_service.device}")
 
     try:
         await register_device()
