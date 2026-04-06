@@ -11,7 +11,7 @@ from agent.tts import TTSService
 if __name__ == "__main__":
     tts = TTSService(
         voice="en-us",
-        device="hw:3,0",
+        device="default",
     )
     print(f"[TEST] using device: {tts.device}")
     ok = tts.speak("Hello. Aura text to speech is now integrated.")

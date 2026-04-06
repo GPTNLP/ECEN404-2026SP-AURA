@@ -6,9 +6,9 @@ from typing import Optional
 
 
 class TTSService:
-    def __init__(self, voice: str = "en-us", device: Optional[str] = "hw:3,0"):
+    def __init__(self, voice: str = "en-us", device: Optional[str] = "default"):
         self.voice = voice
-        self.device = device or "hw:3,0"
+        self.device = device or "default"
 
     def _find_tts_binary(self) -> str:
         for candidate in ("espeak-ng", "espeak"):
