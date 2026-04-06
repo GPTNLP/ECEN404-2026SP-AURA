@@ -1,38 +1,66 @@
+import os
+import shutil
 import subprocess
 import tempfile
-import os
+from typing import Optional
+
 
 class TTSService:
-    def __init__(self, voice="gmw/en-us", device="hw:1,0"):
+    def __init__(self, voice: str = "en-us", device: Optional[str] = "hw:3,0"):
         self.voice = voice
-        self.device = device
+        self.device = device or "hw:3,0"
 
-    def speak(self, text: str):
+    def _find_tts_binary(self) -> str:
+        for candidate in ("espeak-ng", "espeak"):
+            path = shutil.which(candidate)
+            if path:
+                return path
+        raise FileNotFoundError("Neither 'espeak-ng' nor 'espeak' was found in PATH.")
+
+    def speak(self, text: str) -> bool:
+        if not text or not text.strip():
+            print("[TTS] empty text, skipping")
+            return False
+
+        wav_path = None
+
         try:
-            # Create temp wav file
+            tts_bin = self._find_tts_binary()
+
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
                 wav_path = f.name
 
-            # Generate speech using espeak-ng
-            cmd_tts = [
-                "espeak-ng",
-                "-v", self.voice,
-                "-w", wav_path,
-                text
-            ]
-            subprocess.run(cmd_tts, check=True)
+            subprocess.run(
+                [
+                    tts_bin,
+                    "-v",
+                    self.voice,
+                    "-w",
+                    wav_path,
+                    text,
+                ],
+                check=True,
+            )
 
-            # Play audio using aplay
-            cmd_play = [
-                "aplay",
-                "-D", self.device,
-                wav_path
-            ]
-            subprocess.run(cmd_play, check=True)
+            subprocess.run(
+                [
+                    "aplay",
+                    "-D",
+                    self.device,
+                    wav_path,
+                ],
+                check=True,
+            )
 
-        except Exception as e:
-            print(f"[TTS ERROR] {e}")
+            return True
+
+        except Exception as exc:
+            print(f"[TTS ERROR] {exc}")
+            return False
 
         finally:
-            if os.path.exists(wav_path):
-                os.remove(wav_path)
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.remove(wav_path)
+                except OSError:
+                    pass
