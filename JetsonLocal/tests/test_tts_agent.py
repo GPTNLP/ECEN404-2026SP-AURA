@@ -17,6 +17,8 @@ if __name__ == "__main__":
 
     tts = TTSService()
     print(f"[TEST] using device: {tts.device}")
+    print(f"[TEST] voice_id: {tts.voice_id}")
+    print(f"[TEST] model_id: {tts.model_id}")
     print(f"[TEST] speaking: {text}")
 
     ok = tts.speak(text)

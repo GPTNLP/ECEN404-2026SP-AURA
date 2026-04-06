@@ -1,67 +1,94 @@
 import os
-import requests
 import tempfile
 import subprocess
+from pathlib import Path
+from typing import Optional
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
-
-ELEVENLABS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
-
-# CHANGE THIS IF NEEDED
-AUDIO_DEVICE = os.getenv("AUDIO_DEVICE", "default")  
-# examples:
-# "default"
-# "hw:0,0"
-# "plughw:0,0"
+import requests
 
 
-def speak(text: str):
-    if not ELEVENLABS_API_KEY or not VOICE_ID:
-        print("[TTS ERROR] Missing ElevenLabs config")
-        return
+class TTSService:
+    def __init__(
+        self,
+        voice_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        device: Optional[str] = None,
+    ):
+        self.api_key = (os.getenv("ELEVENLABS_API_KEY", "")).strip()
+        self.voice_id = (voice_id or os.getenv("ELEVENLABS_VOICE_ID", "")).strip()
+        self.model_id = (model_id or os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")).strip()
+        self.device = (device or os.getenv("AURA_TTS_DEVICE", "plughw:0,0")).strip()
 
-    try:
-        print(f"[TTS] generating -> {text}")
+        if not self.api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY is missing from environment.")
+        if not self.voice_id:
+            raise RuntimeError("ELEVENLABS_VOICE_ID is missing from environment.")
 
-        headers = {
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json"
-        }
+    def _play_file(self, audio_path: str) -> None:
+        attempts = [
+            ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path],
+            ["mpg123", "-q", audio_path],
+            ["mpv", "--no-video", "--really-quiet", audio_path],
+        ]
 
-        payload = {
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {
-                "stability": 0.75,
-                "similarity_boost": 0.9
+        for cmd in attempts:
+            try:
+                subprocess.run(cmd, check=True)
+                return
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                print(f"[TTS] playback attempt failed: {' '.join(cmd)} -> {exc}")
+
+        raise RuntimeError(
+            "No working MP3 playback command found. Install ffmpeg (ffplay), mpg123, or mpv."
+        )
+
+    def speak(self, text: str) -> bool:
+        text = (text or "").strip()
+        if not text:
+            print("[TTS] empty text, skipping")
+            return False
+
+        tmp_path = None
+
+        try:
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
+
+            headers = {
+                "xi-api-key": self.api_key,
+                "Content-Type": "application/json",
+                "Accept": "audio/mpeg",
             }
-        }
 
-        response = requests.post(ELEVENLABS_URL, json=payload, headers=headers)
+            payload = {
+                "text": text,
+                "model_id": self.model_id,
+                "voice_settings": {
+                    "stability": 0.75,
+                    "similarity_boost": 0.85,
+                },
+            }
 
-        if response.status_code != 200:
-            print("[TTS ERROR] ElevenLabs failed:", response.text)
-            return
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
 
-        # Save temp audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-            f.write(response.content)
-            temp_path = f.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                tmp_path = f.name
+                f.write(response.content)
 
-        print(f"[TTS] playing on device: {AUDIO_DEVICE}")
+            self._play_file(tmp_path)
 
-        # Play audio
-        subprocess.run([
-            "ffplay",
-            "-nodisp",
-            "-autoexit",
-            "-loglevel", "quiet",
-            "-af", "volume=1.0",
-            temp_path
-        ])
+            print(f"[TTS] spoke with ElevenLabs: {text}")
+            return True
 
-        os.remove(temp_path)
+        except Exception as exc:
+            print(f"[TTS ERROR] {exc}")
+            return False
 
-    except Exception as e:
-        print("[TTS ERROR]", e)
+        finally:
+            if tmp_path and Path(tmp_path).exists():
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
