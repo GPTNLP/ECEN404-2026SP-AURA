@@ -1,13 +1,23 @@
-from agent.tts import speak
+from pathlib import Path
+import sys
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+AGENT_DIR = BASE_DIR / "agent"
+
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+
+from tts import TTSService
+
 
 if __name__ == "__main__":
-    print("=== TTS TEST ===")
+    text = "Hello. This is Aura voice test."
+    if len(sys.argv) > 1:
+        text = " ".join(sys.argv[1:]).strip() or text
 
-    while True:
-        text = input("Enter text (or 'exit'): ").strip()
+    tts = TTSService()
+    print(f"[TEST] using device: {tts.device}")
+    print(f"[TEST] speaking: {text}")
 
-        if text.lower() == "exit":
-            break
-
-        if text:
-            speak(text)
+    ok = tts.speak(text)
+    print(f"[TEST] success={ok}")
