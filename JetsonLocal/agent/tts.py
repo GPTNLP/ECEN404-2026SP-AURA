@@ -1,154 +1,67 @@
 import os
-import shutil
-import subprocess
+import requests
 import tempfile
-import threading
-from typing import Optional
+import subprocess
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
+
+ELEVENLABS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+
+# CHANGE THIS IF NEEDED
+AUDIO_DEVICE = os.getenv("AUDIO_DEVICE", "default")  
+# examples:
+# "default"
+# "hw:0,0"
+# "plughw:0,0"
 
 
-class TTSService:
-    def __init__(
-        self,
-        voice: Optional[str] = None,
-        device: Optional[str] = None,
-        rate: Optional[int] = None,
-    ):
-        self.voice = (voice or os.getenv("AURA_TTS_VOICE", "en-us")).strip()
-        self.device = (device or os.getenv("AURA_TTS_DEVICE", "default")).strip()
-        self.rate = int(os.getenv("AURA_TTS_RATE", str(rate if rate is not None else 140)))
-        self._lock = threading.Lock()
+def speak(text: str):
+    if not ELEVENLABS_API_KEY or not VOICE_ID:
+        print("[TTS ERROR] Missing ElevenLabs config")
+        return
 
-    def _find_tts_binary(self) -> str:
-        for candidate in ("espeak-ng", "espeak"):
-            path = shutil.which(candidate)
-            if path:
-                return path
-        raise FileNotFoundError("Neither 'espeak-ng' nor 'espeak' was found in PATH.")
+    try:
+        print(f"[TTS] generating -> {text}")
 
-    def _play_wav(self, wav_path: str) -> None:
-        play_attempts = [
-            ["aplay", "-D", self.device, wav_path],
-            ["aplay", wav_path],
-        ]
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        }
 
-        for cmd in play_attempts:
-            try:
-                subprocess.run(cmd, check=True)
-                return
-            except Exception as exc:
-                print(f"[TTS] playback attempt failed: {' '.join(cmd)} -> {exc}")
+        payload = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.75,
+                "similarity_boost": 0.9
+            }
+        }
 
-        ffplay_path = shutil.which("ffplay")
-        if ffplay_path:
-            try:
-                subprocess.run(
-                    [
-                        ffplay_path,
-                        "-nodisp",
-                        "-autoexit",
-                        "-loglevel",
-                        "quiet",
-                        wav_path,
-                    ],
-                    check=True,
-                )
-                return
-            except Exception as exc:
-                print(f"[TTS] ffplay fallback failed: {exc}")
+        response = requests.post(ELEVENLABS_URL, json=payload, headers=headers)
 
-        paplay_path = shutil.which("paplay")
-        if paplay_path:
-            try:
-                subprocess.run([paplay_path, wav_path], check=True)
-                return
-            except Exception as exc:
-                print(f"[TTS] paplay fallback failed: {exc}")
+        if response.status_code != 200:
+            print("[TTS ERROR] ElevenLabs failed:", response.text)
+            return
 
-        raise RuntimeError("All playback methods failed")
+        # Save temp audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+            f.write(response.content)
+            temp_path = f.name
 
-    def _apply_tars_effect(self, input_wav: str) -> str:
-        sox_path = shutil.which("sox")
-        if not sox_path:
-            print("[TTS] sox not found, skipping TARS effect")
-            return input_wav
+        print(f"[TTS] playing on device: {AUDIO_DEVICE}")
 
-        output_wav = input_wav.replace(".wav", "_tars.wav")
+        # Play audio
+        subprocess.run([
+            "ffplay",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel", "quiet",
+            "-af", "volume=1.0",
+            temp_path
+        ])
 
-        try:
-            subprocess.run(
-                [
-                    sox_path,
-                    input_wav,
-                    output_wav,
-                    "pitch",
-                    "-180",
-                    "treble",
-                    "-8",
-                    "bass",
-                    "+2",
-                    "echo",
-                    "0.8",
-                    "0.88",
-                    "20",
-                    "0.25",
-                    "25",
-                    "0.15",
-                ],
-                check=True,
-            )
-            return output_wav
-        except Exception as exc:
-            print(f"[TTS] sox effect failed, using original wav: {exc}")
-            return input_wav
+        os.remove(temp_path)
 
-    def speak(self, text: str) -> bool:
-        text = (text or "").strip()
-        if not text:
-            print("[TTS] empty text, skipping")
-            return False
-
-        wav_path = None
-        final_wav_path = None
-
-        with self._lock:
-            try:
-                tts_bin = self._find_tts_binary()
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                    wav_path = f.name
-
-                subprocess.run(
-                    [
-                        tts_bin,
-                        "-v",
-                        self.voice,
-                        "-s",
-                        str(self.rate),
-                        "-p",
-                        "25",
-                        "-g",
-                        "6",
-                        "-w",
-                        wav_path,
-                        text,
-                    ],
-                    check=True,
-                )
-
-                final_wav_path = self._apply_tars_effect(wav_path)
-                self._play_wav(final_wav_path)
-
-                print(f"[TTS] spoke: {text}")
-                return True
-
-            except Exception as exc:
-                print(f"[TTS ERROR] {exc}")
-                return False
-
-            finally:
-                for path in (wav_path, final_wav_path):
-                    if path and os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except OSError:
-                            pass
+    except Exception as e:
+        print("[TTS ERROR]", e)
