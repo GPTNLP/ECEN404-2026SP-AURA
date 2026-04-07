@@ -514,7 +514,7 @@ def database_stats(db_name: str, request: Request):
 
 
 @router.post("/api/databases/build")
-async def build_database(req: BuildDBRequest, request: Request):
+def build_database(req: BuildDBRequest, request: Request):
     require_admin(request)
 
     cfg = _load_db_config(req.name)
