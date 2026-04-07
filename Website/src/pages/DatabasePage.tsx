@@ -7,6 +7,10 @@ const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
   "http://127.0.0.1:9000";
 
+const JETSON_BASE =
+  (import.meta.env.VITE_JETSON_API_BASE as string | undefined) ||
+  "http://127.0.0.1:8000";
+
 type TreeNode = {
   name: string;
   type: "dir" | "file";
@@ -111,6 +115,10 @@ export default function DatabasePage() {
   // Folder selection for DB build
   const [folderChecks, setFolderChecks] = useState<Record<string, boolean>>({});
   const [dbStats, setDbStats] = useState<any>(null);
+
+  // Push to Jetson
+  const [jetsonPushStatus, setJetsonPushStatus] = useState("");
+  const [jetsonPushBusy, setJetsonPushBusy] = useState(false);
 
   // Search
   const [treeSearch, setTreeSearch] = useState("");
@@ -634,6 +642,30 @@ export default function DatabasePage() {
     }
   };
 
+  const pushDbToJetson = async () => {
+    if (!activeDb) {
+      setJetsonPushStatus("Select a database first.");
+      return;
+    }
+    setJetsonPushBusy(true);
+    setJetsonPushStatus("Sending to Jetson…");
+    try {
+      const res = await fetch(`${JETSON_BASE}/rag/load_db`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db_name: activeDb }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || "Push failed");
+      const chunks = data?.stats?.chunk_count ?? "?";
+      setJetsonPushStatus(`Loaded "${activeDb}" on Jetson (${chunks} chunks)`);
+    } catch (e: any) {
+      setJetsonPushStatus(`Failed: ${e?.message || String(e)}`);
+    } finally {
+      setJetsonPushBusy(false);
+    }
+  };
+
   // ---------- Upload dropzone ----------
   const onDropFiles = (fileList: FileList) => {
     const dt = new DataTransfer();
@@ -1071,6 +1103,7 @@ export default function DatabasePage() {
               <div className="db-box">
                 <div className="db-box-title">Stats</div>
                 <div className="db-stat">chunks: <b>{humanCount(dbStats?.stats?.chunk_count ?? 0)}</b></div>
+                <div className="db-stat">entities: <b>{humanCount(dbStats?.stats?.entity_count ?? 0)}</b></div>
                 <div className="db-stat">
                   file: <span className="db-mono db-wrap">{dbStats?.stats?.vdb_path || "-"}</span>
                 </div>
@@ -1079,6 +1112,35 @@ export default function DatabasePage() {
                 </div>
               </div>
             )}
+
+            <div className="db-box">
+              <div className="db-box-title">Push to Jetson</div>
+              <div className="db-mini" style={{ marginBottom: 8 }}>
+                Sends the selected vector DB from this repository directly to the Jetson.
+                The Jetson activates it immediately — no PDF re-processing required.
+              </div>
+              <button
+                className="btn btn-primary"
+                style={{ width: "100%" }}
+                disabled={jetsonPushBusy || !activeDb}
+                onClick={pushDbToJetson}
+              >
+                {jetsonPushBusy ? "Sending…" : `Push "${activeDb || "DB"}" to Jetson`}
+              </button>
+              {jetsonPushStatus && (
+                <div
+                  className="db-mini"
+                  style={{
+                    marginTop: 6,
+                    color: jetsonPushStatus.startsWith("Failed") || jetsonPushStatus.startsWith("Select")
+                      ? "var(--status-bad)"
+                      : "var(--status-good)",
+                  }}
+                >
+                  {jetsonPushStatus}
+                </div>
+              )}
+            </div>
 
             <div className="status-box mono" style={{ fontSize: 13, opacity: 0.95, marginTop: 14 }}>
               {status ? `> ${status}` : "> Idle"}

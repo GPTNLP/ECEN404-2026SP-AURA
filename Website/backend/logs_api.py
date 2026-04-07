@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Header, Request, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -19,9 +19,12 @@ STORAGE_DIR = Path(
     or str(Path(__file__).resolve().parent / "storage")
 )
 LOG_FILE = STORAGE_DIR / "chat_logs.jsonl"
+SESSIONS_DIR = STORAGE_DIR / "sessions"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_INGEST_SECRET = os.getenv("LOG_INGEST_SECRET", "")
+DEVICE_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
 
 print(f"[LOGS] STORAGE_DIR = {STORAGE_DIR}")
 print(f"[LOGS] LOG_FILE = {LOG_FILE}")
@@ -215,3 +218,107 @@ def list_logs(
         "offset": offset,
         "items": page,
     }
+
+
+# ===========================================================================
+# Session endpoints — full conversation JSON, device-to-website sync
+# ===========================================================================
+
+def _require_device_secret(x_device_secret: Optional[str]):
+    if not DEVICE_SECRET:
+        raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET not configured on server")
+    if (x_device_secret or "").strip() != DEVICE_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid device secret")
+
+
+def _session_path(session_id: str) -> Path:
+    # Sanitize: only allow alphanumeric, dash, underscore, dot
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_.")
+    if not safe:
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+    return SESSIONS_DIR / f"{safe}.json"
+
+
+class SessionIngest(BaseModel):
+    session_id: str
+    device_id: Optional[str] = None
+    history: List[Dict[str, Any]] = []
+    updated_ts: Optional[int] = None
+
+
+@router.post("/sessions/ingest")
+def ingest_session(
+    data: SessionIngest,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    """
+    Jetson pushes its full conversation session JSON here.
+    Authenticated by DEVICE_SHARED_SECRET header.
+    The session file is created or overwritten on every push.
+    """
+    _require_device_secret(x_device_secret)
+
+    path = _session_path(data.session_id)
+    payload = {
+        "session_id": data.session_id,
+        "device_id": data.device_id,
+        "history": data.history,
+        "updated_ts": data.updated_ts or int(time.time()),
+        "message_count": len(data.history),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "session_id": data.session_id, "messages": len(data.history)}
+
+
+@router.get("/sessions/list")
+def list_sessions(
+    request: Request,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    """
+    Returns metadata for all stored sessions.
+    Accessible by admin users OR by the Jetson device (device secret header).
+    """
+    device_authed = DEVICE_SECRET and (x_device_secret or "").strip() == DEVICE_SECRET
+    if not device_authed:
+        payload = require_auth(request)
+        if payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin only")
+
+    sessions = []
+    for p in sorted(SESSIONS_DIR.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            sessions.append({
+                "session_id": data.get("session_id", p.stem),
+                "device_id": data.get("device_id"),
+                "message_count": data.get("message_count", len(data.get("history", []))),
+                "updated_ts": data.get("updated_ts"),
+            })
+        except Exception:
+            continue
+
+    return {"ok": True, "sessions": sessions}
+
+
+@router.get("/sessions/{session_id}")
+def get_session(
+    session_id: str,
+    request: Request,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    """
+    Returns the full conversation history for a session.
+    Accessible by admin users OR by the Jetson device.
+    """
+    device_authed = DEVICE_SECRET and (x_device_secret or "").strip() == DEVICE_SECRET
+    if not device_authed:
+        payload = require_auth(request)
+        if payload.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin only")
+
+    path = _session_path(session_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return json.loads(path.read_text(encoding="utf-8"))
