@@ -489,3 +489,15 @@
   height: 1px;
   background: var(--card-border);
 }
+
+/* Push-to-Jetson text wrapping fix */
+.db-mini-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.db-box .db-mini {
+  max-width: 100%;
+}
