@@ -7,7 +7,7 @@ import math
 import re
 from typing import List, Optional, Dict, Any, Tuple, Iterable
 
-from fastapi import Form, APIRouter, UploadFile, File, HTTPException, Request
+from fastapi import Form, APIRouter, UploadFile, File, HTTPException, Header, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -331,29 +331,63 @@ def download_document(path: str, request: Request):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(full_path)
 
+DEVICE_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
+ALLOWED_VECTOR_FILES = {"faiss.index", "embeddings.npy", "meta.json", "db.json", "entities.json"}
+
+
+def _require_device_secret(x_device_secret: Optional[str]):
+    if not DEVICE_SECRET:
+        raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET not configured on server")
+    if (x_device_secret or "").strip() != DEVICE_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid device secret")
+
+
 @router.post("/api/databases/{db_name}/sync_up")
-async def sync_db_up(db_name: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret"),
-                     files: List[UploadFile] = File(...)):
-    # Verify device secret here
+async def sync_db_up(
+    db_name: str,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+    files: List[UploadFile] = File(...),
+):
+    """Jetson uploads its locally built vector files to the website repository."""
+    _require_device_secret(x_device_secret)
+
     db_dir = _db_dir(db_name)
     os.makedirs(db_dir, exist_ok=True)
-    
+
+    # Ensure a db.json config exists so the DB shows up in the list
+    if not os.path.exists(_db_config_path(db_name)):
+        cfg = {
+            "name": db_name,
+            "folders": [],
+            "engine": "lightrag",
+            "synced_from_device": True,
+        }
+        _save_db_config(db_name, cfg)
+
     saved = []
     for f in files:
-        if f.filename in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
+        if f.filename in ALLOWED_VECTOR_FILES:
             out = os.path.join(db_dir, f.filename)
             with open(out, "wb") as w:
                 w.write(await f.read())
             saved.append(f.filename)
-            
-    return {"ok": True, "saved": saved}
+
+    _invalidate_rag(db_name)
+    return {"ok": True, "db": db_name, "saved": saved}
+
 
 @router.get("/api/databases/{db_name}/sync_down/{filename}")
-def sync_db_down(db_name: str, filename: str, x_device_secret: str = Header(default=None, alias="X-Device-Secret")):
-    # Verify device secret
-    if filename not in ["faiss.index", "embeddings.npy", "meta.json", "db.json"]:
-        raise HTTPException(status_code=400, detail="Invalid vector file")
-        
+def sync_db_down(
+    db_name: str,
+    filename: str,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    """Jetson downloads a vector file from the website repository."""
+    _require_device_secret(x_device_secret)
+
+    if filename not in ALLOWED_VECTOR_FILES:
+        raise HTTPException(status_code=400, detail="Invalid vector file name")
+
     full_path = os.path.join(_db_dir(db_name), filename)
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="Vector file not found")

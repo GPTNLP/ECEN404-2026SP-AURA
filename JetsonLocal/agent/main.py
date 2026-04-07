@@ -3,7 +3,8 @@ import time
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Iterator, Optional
+import os
+from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -48,6 +49,9 @@ from core.offline_queue import queue_log, queue_status, flush_logs, flush_status
 
 from hardware.serial_link import serial_link
 from hardware.camera import camera_service, get_camera_status
+
+from ai.rag_manager import rag_manager
+from ai.chat_manager import chat_manager
 
 # -------------------------------------------------------------------
 # APP
@@ -313,6 +317,110 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
+                elif cmd == "sync_vectors":
+                    # Download a named vector DB from the website and activate it locally.
+                    # payload: {"db_name": "my_db"}
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
+                    try:
+                        ok = await rag_manager.load_remote_db(db_name, api)
+                        status_note = f"Loaded vector DB '{db_name}'" if ok else f"Failed to load '{db_name}'"
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed" if ok else "failed",
+                                "note": status_note,
+                                "result": rag_manager.stats(),
+                            },
+                        )
+                        quiet_print("rag_cmd", f"[COMMAND] sync_vectors: {status_note}")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"sync_vectors failed: {e}",
+                            },
+                        )
+
+                elif cmd == "build_rag":
+                    # Pull documents from website, vectorize, sync back.
+                    # payload: {"db_name": "my_db", "document_paths": ["folder/file.pdf", ...]}
+                    import os, tempfile, shutil
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
+                    doc_paths = payload.get("document_paths", [])
+                    try:
+                        tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
+                        local_pdfs = []
+                        for rel_path in doc_paths:
+                            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
+                            await asyncio.to_thread(api.download_document, rel_path, dest)
+                            local_pdfs.append(dest)
+
+                        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, db_name)
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": f"RAG built and synced: {result}",
+                                "result": {**result, **rag_manager.stats()},
+                            },
+                        )
+                        quiet_print("rag_cmd", f"[COMMAND] build_rag complete: {result}")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"build_rag failed: {e}",
+                            },
+                        )
+                        quiet_print("rag_cmd", f"[COMMAND] build_rag failed: {e}")
+
+                elif cmd == "chat_prompt":
+                    # Run a RAG query and return the answer via ack result.
+                    # payload: {"query": "...", "session_id": "..."}
+                    query = payload.get("query", "")
+                    session_id = payload.get("session_id", chat_manager.active_session_id)
+                    try:
+                        if session_id != chat_manager.active_session_id:
+                            chat_manager.set_session(session_id)
+
+                        chat_manager.add_message("user", query, api)
+                        answer = await rag_manager.query(query)
+                        chat_manager.add_message("assistant", answer, api)
+
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Chat answered",
+                                "result": {"answer": answer, "session_id": session_id},
+                            },
+                        )
+                        quiet_print("rag_cmd", f"[COMMAND] chat_prompt answered")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"chat_prompt failed: {e}",
+                            },
+                        )
+
                 else:
                     await asyncio.to_thread(
                         api.ack_command,
@@ -426,6 +534,12 @@ async def lifespan(app_instance: FastAPI):
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
 
+    # Initialize RAG system (non-blocking — uses existing local DB if present)
+    try:
+        rag_manager.initialize()
+    except Exception as e:
+        quiet_print("rag", f"[RAG] init warning: {e}")
+
     try:
         await register_device()
     except Exception as e:
@@ -463,8 +577,114 @@ async def health():
         "device_name": DEVICE_NAME,
         "device_type": DEVICE_TYPE,
         "db_name": LOCAL_DB_NAME,
+        "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
     }
+
+
+# -------------------------------------------------------------------
+# RAG endpoints
+# -------------------------------------------------------------------
+from pydantic import BaseModel as _BaseModel
+from fastapi import Header as _Header
+
+
+class _ChatRequest(_BaseModel):
+    query: str
+    session_id: Optional[str] = None
+
+
+class _SyncVectorsRequest(_BaseModel):
+    db_name: str
+
+
+class _BuildRagRequest(_BaseModel):
+    db_name: str
+    document_paths: List[str] = []
+
+
+@app.get("/rag/stats")
+async def rag_stats():
+    return rag_manager.stats()
+
+
+@app.post("/rag/load_db")
+async def rag_load_db(req: _SyncVectorsRequest):
+    """Download a pre-built vector DB from the website and activate it locally."""
+    ok = await rag_manager.load_remote_db(req.db_name, api)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Failed to load DB '{req.db_name}'")
+    return {"ok": True, "db_name": req.db_name, "stats": rag_manager.stats()}
+
+
+@app.post("/rag/build")
+async def rag_build(req: _BuildRagRequest):
+    """Download documents from website, vectorize, and sync vectors back."""
+    import tempfile
+    import shutil as _shutil
+
+    tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
+    local_pdfs = []
+    try:
+        for rel_path in req.document_paths:
+            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
+            await asyncio.to_thread(api.download_document, rel_path, dest)
+            local_pdfs.append(dest)
+
+        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, req.db_name)
+        return {"ok": True, **result, "stats": rag_manager.stats()}
+    finally:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@app.post("/rag/chat")
+async def rag_chat(req: _ChatRequest):
+    """Run a RAG query using the local LightRAG system."""
+    session_id = req.session_id or chat_manager.active_session_id
+    if session_id != chat_manager.active_session_id:
+        chat_manager.set_session(session_id)
+
+    chat_manager.add_message("user", req.query, api)
+    answer = await rag_manager.query(req.query)
+    chat_manager.add_message("assistant", answer, api)
+
+    return {
+        "ok": True,
+        "answer": answer,
+        "session_id": session_id,
+    }
+
+
+# -------------------------------------------------------------------
+# Session endpoints
+# -------------------------------------------------------------------
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all locally stored chat session IDs."""
+    return {"sessions": chat_manager.list_local_sessions()}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Get the conversation history for a local session."""
+    prev = chat_manager.active_session_id
+    chat_manager.set_session(session_id)
+    history = chat_manager.get_history()
+    chat_manager.set_session(prev)
+    return {"session_id": session_id, "history": history}
+
+
+@app.post("/sessions/load/{session_id}")
+async def load_session_from_cloud(session_id: str):
+    """Pull a session from the website and make it the active session."""
+    try:
+        data = await asyncio.to_thread(api.get_chat_session, session_id)
+        history = data.get("history", [])
+        chat_manager.set_session(session_id, remote_history=history)
+        return {"ok": True, "session_id": session_id, "messages": len(history)}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not pull session: {e}")
 
 
 @app.get("/status")
