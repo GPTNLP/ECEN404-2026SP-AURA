@@ -37,7 +37,7 @@ export default function SimulatorPage() {
   const chunksRef = useRef<BlobPart[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // ✅ prefs (loaded from localStorage)
+  // prefs (loaded from localStorage)
   const [prefs, setPrefs] = useState(() => loadPrefs());
 
   const voiceInputEnabled = prefs.voiceInputEnabled;
@@ -130,17 +130,14 @@ export default function SimulatorPage() {
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [history, loading]);
 
-  // ✅ refresh prefs when Settings changes them
+  // refresh prefs when Settings changes them
   useEffect(() => {
     const refresh = () => setPrefs(loadPrefs());
 
-    // fires when localStorage changes from another tab/window
     const onStorage = () => {
       refresh();
     };
 
-    // if Settings and Simulator are same tab, storage event doesn't always fire,
-    // so we also support a custom event. Dispatch it after saving prefs.
     const onCustom = () => refresh();
 
     window.addEventListener("storage", onStorage);
@@ -245,10 +242,15 @@ export default function SimulatorPage() {
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
 
-      const res = await fetch(`${API_URL}/api/databases/chat`, {
+      const res = await fetch(`${API_URL}/api/jetson/chat`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ db: activeDb, query: q }),
+        credentials: "include",
+        body: JSON.stringify({
+          db_name: activeDb,
+          query: q,
+          session_id: `${user?.email || "anon"}::${activeDb}`,
+        }),
         signal: controller.signal,
       });
 
@@ -272,7 +274,6 @@ export default function SimulatorPage() {
       const sources = Array.isArray(data?.sources) ? data.sources : [];
       setHistory((prev) => [...prev, { role: "ai", content: answer, sources }]);
 
-      // 🔊 speak if enabled
       void speakText(answer);
 
       const latency = Math.round(performance.now() - t0);
@@ -282,7 +283,7 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: answer.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb, sources_count: sources.length },
+        meta: { db: activeDb, engine: "jetson", sources_count: sources.length },
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -297,7 +298,7 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: msg.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb },
+        meta: { db: activeDb, engine: "jetson" },
       });
     } finally {
       setLoading(false);
@@ -375,7 +376,6 @@ export default function SimulatorPage() {
           boxShadow: "var(--shadow)",
         }}
       >
-        {/* Header */}
         <div
           style={{
             padding: 18,
@@ -433,7 +433,6 @@ export default function SimulatorPage() {
           </span>
         </div>
 
-        {/* DB picker */}
         <div
           style={{
             padding: 14,
@@ -494,7 +493,6 @@ export default function SimulatorPage() {
           )}
         </div>
 
-        {/* Chat history */}
         <div
           ref={scrollRef}
           style={{
@@ -598,7 +596,6 @@ export default function SimulatorPage() {
           )}
         </div>
 
-        {/* Input bar */}
         <div
           style={{
             padding: 14,
