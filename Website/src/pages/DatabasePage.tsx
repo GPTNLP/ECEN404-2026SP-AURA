@@ -8,18 +8,8 @@ const API_BASE =
   "http://127.0.0.1:9000";
 
 const JETSON_BASE =
-  (import.meta.env.VITE_JETSON_API_BASE as string | undefined)?.trim() ||
-  "";
-
-function isLocalOnlyBase(url: string) {
-  const value = (url || "").trim().toLowerCase();
-  return (
-    !value ||
-    value.includes("127.0.0.1") ||
-    value.includes("localhost") ||
-    value.includes("0.0.0.0")
-  );
-}
+  (import.meta.env.VITE_JETSON_API_BASE as string | undefined) ||
+  "http://127.0.0.1:8000";
 
 type TreeNode = {
   name: string;
@@ -1125,9 +1115,9 @@ export default function DatabasePage() {
 
             <div className="db-box">
               <div className="db-box-title">Push to Jetson</div>
-              <div className="db-mini db-mini-wrap" style={{ marginBottom: 8 }}>
+              <div className="db-mini" style={{ marginBottom: 8 }}>
                 Sends the selected vector DB from this repository directly to the Jetson.
-                This only works when <span className="db-mono">VITE_JETSON_API_BASE</span> points to a browser-reachable Jetson endpoint that serves <span className="db-mono">/rag/load_db</span>.
+                The Jetson activates it immediately — no PDF re-processing required.
               </div>
               <button
                 className="btn btn-primary"
@@ -1137,7 +1127,6 @@ export default function DatabasePage() {
               >
                 {jetsonPushBusy ? "Sending…" : `Push "${activeDb || "DB"}" to Jetson`}
               </button>
-              <div className="db-mini db-mini-wrap" style={{ marginTop: 8 }}>Current Jetson base: <span className="db-mono db-wrap">{JETSON_BASE || "(not set)"}</span></div>
               {jetsonPushStatus && (
                 <div
                   className="db-mini"
