@@ -11,16 +11,6 @@ const JETSON_BASE =
   (import.meta.env.VITE_JETSON_API_BASE as string | undefined)?.trim() ||
   "";
 
-function isLocalOnlyBase(url: string) {
-  const value = (url || "").trim().toLowerCase();
-  return (
-    !value ||
-    value.includes("127.0.0.1") ||
-    value.includes("localhost") ||
-    value.includes("0.0.0.0")
-  );
-}
-
 type TreeNode = {
   name: string;
   type: "dir" | "file";
