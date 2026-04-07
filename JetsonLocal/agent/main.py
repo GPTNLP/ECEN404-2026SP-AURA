@@ -4,6 +4,10 @@ import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 import os
+import re
+import shutil
+import subprocess
+import threading
 from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -70,6 +74,117 @@ MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
 
+# -------------------------------------------------------------------
+# PUBLIC TUNNEL
+# -------------------------------------------------------------------
+_PUBLIC_URL: Optional[str] = None
+_TUNNEL_PROC: Optional[subprocess.Popen] = None
+
+_CF_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
+_NGROK_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.ngrok(?:-free)?\.(?:app|io)")
+
+AURA_ENABLE_PUBLIC_TUNNEL = os.getenv("AURA_ENABLE_PUBLIC_TUNNEL", "0").strip() == "1"
+AURA_PUBLIC_TUNNEL_PROVIDER = os.getenv("AURA_PUBLIC_TUNNEL_PROVIDER", "cloudflared").strip().lower()
+AURA_PUBLIC_TUNNEL_PORT = int(os.getenv("AURA_PUBLIC_TUNNEL_PORT", "8000"))
+
+
+def get_public_url() -> str:
+    return _PUBLIC_URL or ""
+
+
+def _set_public_url(url: str) -> None:
+    global _PUBLIC_URL
+    url = (url or "").strip()
+    if not url:
+        return
+    if _PUBLIC_URL != url:
+        _PUBLIC_URL = url
+        quiet_print("public_url", f"[TUNNEL] public url: {_PUBLIC_URL}")
+
+
+def _consume_tunnel_stdout(proc: subprocess.Popen, provider: str) -> None:
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+
+            quiet_print(f"tunnel_line_{provider}", f"[TUNNEL:{provider}] {line}")
+
+            if provider == "cloudflared":
+                m = _CF_URL_RE.search(line)
+                if m:
+                    _set_public_url(m.group(0))
+            elif provider == "ngrok":
+                m = _NGROK_URL_RE.search(line)
+                if m:
+                    _set_public_url(m.group(0))
+    except Exception as e:
+        quiet_print("tunnel_reader_err", f"[TUNNEL] stdout reader failed: {e}")
+
+
+def start_public_tunnel(local_port: int = 8000) -> str:
+    global _TUNNEL_PROC
+
+    if not AURA_ENABLE_PUBLIC_TUNNEL:
+        quiet_print("tunnel_disabled", "[TUNNEL] disabled")
+        return ""
+
+    if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
+        quiet_print("tunnel_running", "[TUNNEL] already running")
+        return get_public_url()
+
+    provider = AURA_PUBLIC_TUNNEL_PROVIDER
+    target = f"http://127.0.0.1:{int(local_port)}"
+
+    if provider == "cloudflared":
+        exe = shutil.which("cloudflared")
+        if not exe:
+            quiet_print("tunnel_missing", "[TUNNEL] cloudflared not found in PATH")
+            return ""
+        cmd = [exe, "tunnel", "--url", target, "--no-autoupdate"]
+
+    elif provider == "ngrok":
+        exe = shutil.which("ngrok")
+        if not exe:
+            quiet_print("tunnel_missing", "[TUNNEL] ngrok not found in PATH")
+            return ""
+        cmd = [exe, "http", str(int(local_port)), "--log", "stdout"]
+
+    else:
+        quiet_print("tunnel_bad_provider", f"[TUNNEL] unsupported provider: {provider}")
+        return ""
+
+    try:
+        _TUNNEL_PROC = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        t = threading.Thread(target=_consume_tunnel_stdout, args=(_TUNNEL_PROC, provider), daemon=True)
+        t.start()
+        quiet_print("tunnel_start", f"[TUNNEL] started {provider} for {target}")
+    except Exception as e:
+        quiet_print("tunnel_start_fail", f"[TUNNEL] failed to start {provider}: {e}")
+        return ""
+
+    return ""
+
+
+def stop_public_tunnel() -> None:
+    global _TUNNEL_PROC
+    try:
+        if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
+            _TUNNEL_PROC.terminate()
+            quiet_print("tunnel_stop", "[TUNNEL] stopped")
+    except Exception as e:
+        quiet_print("tunnel_stop_fail", f"[TUNNEL] stop failed: {e}")
+    finally:
+        _TUNNEL_PROC = None
+
 
 def quiet_print(key: str, message: str) -> None:
     if _last_messages.get(key) != message:
@@ -121,6 +236,7 @@ def build_register_payload():
         "software_version": DEVICE_SOFTWARE_VERSION,
         "hostname": hostname,
         "local_ip": local_ip,
+        "public_url": get_public_url(),
     }
 
 
@@ -152,6 +268,7 @@ async def heartbeat_loop():
     while True:
         try:
             payload = build_heartbeat_payload()
+            payload["public_url"] = get_public_url()
             await asyncio.to_thread(api.heartbeat, payload)
         except Exception as e:
             send_or_queue_log("warning", "heartbeat_failed", f"Heartbeat failed: {e}")
@@ -163,6 +280,7 @@ async def heartbeat_loop():
 async def status_loop():
     while True:
         payload = build_status_payload()
+        payload["public_url"] = get_public_url()
 
         try:
             await asyncio.to_thread(api.status, payload)
@@ -318,8 +436,6 @@ async def command_loop():
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
                 elif cmd == "sync_vectors":
-                    # Download a named vector DB from the website and activate it locally.
-                    # payload: {"db_name": "my_db"}
                     db_name = payload.get("db_name", LOCAL_DB_NAME)
                     try:
                         ok = await rag_manager.load_remote_db(db_name, api)
@@ -347,9 +463,9 @@ async def command_loop():
                         )
 
                 elif cmd == "build_rag":
-                    # Pull documents from website, vectorize, sync back.
-                    # payload: {"db_name": "my_db", "document_paths": ["folder/file.pdf", ...]}
-                    import os, tempfile, shutil
+                    import tempfile
+                    import shutil as _shutil
+
                     db_name = payload.get("db_name", LOCAL_DB_NAME)
                     doc_paths = payload.get("document_paths", [])
                     try:
@@ -361,7 +477,7 @@ async def command_loop():
                             local_pdfs.append(dest)
 
                         result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, db_name)
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
                         await asyncio.to_thread(
                             api.ack_command,
@@ -387,8 +503,6 @@ async def command_loop():
                         quiet_print("rag_cmd", f"[COMMAND] build_rag failed: {e}")
 
                 elif cmd == "chat_prompt":
-                    # Run a RAG query and return the answer via ack result.
-                    # payload: {"query": "...", "session_id": "..."}
                     query = payload.get("query", "")
                     session_id = payload.get("session_id", chat_manager.active_session_id)
                     try:
@@ -534,11 +648,18 @@ async def lifespan(app_instance: FastAPI):
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
 
-    # Initialize RAG system (non-blocking — uses existing local DB if present)
     try:
         rag_manager.initialize()
     except Exception as e:
         quiet_print("rag", f"[RAG] init warning: {e}")
+
+    start_public_tunnel(local_port=AURA_PUBLIC_TUNNEL_PORT)
+
+    # give the tunnel a moment to print a URL, but don't block long
+    for _ in range(20):
+        if get_public_url():
+            break
+        await asyncio.sleep(0.25)
 
     try:
         await register_device()
@@ -562,6 +683,8 @@ async def lifespan(app_instance: FastAPI):
     except Exception:
         pass
 
+    stop_public_tunnel()
+
 
 app.router.lifespan_context = lifespan
 
@@ -577,8 +700,19 @@ async def health():
         "device_name": DEVICE_NAME,
         "device_type": DEVICE_TYPE,
         "db_name": LOCAL_DB_NAME,
+        "public_url": get_public_url(),
         "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
+    }
+
+
+@app.get("/public_url")
+async def public_url():
+    return {
+        "ok": True,
+        "public_url": get_public_url(),
+        "provider": AURA_PUBLIC_TUNNEL_PROVIDER if AURA_ENABLE_PUBLIC_TUNNEL else "",
+        "enabled": AURA_ENABLE_PUBLIC_TUNNEL,
     }
 
 
@@ -586,7 +720,6 @@ async def health():
 # RAG endpoints
 # -------------------------------------------------------------------
 from pydantic import BaseModel as _BaseModel
-from fastapi import Header as _Header
 
 
 class _ChatRequest(_BaseModel):
@@ -610,7 +743,6 @@ async def rag_stats():
 
 @app.post("/rag/load_db")
 async def rag_load_db(req: _SyncVectorsRequest):
-    """Download a pre-built vector DB from the website and activate it locally."""
     ok = await rag_manager.load_remote_db(req.db_name, api)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to load DB '{req.db_name}'")
@@ -619,7 +751,6 @@ async def rag_load_db(req: _SyncVectorsRequest):
 
 @app.post("/rag/build")
 async def rag_build(req: _BuildRagRequest):
-    """Download documents from website, vectorize, and sync vectors back."""
     import tempfile
     import shutil as _shutil
 
@@ -639,7 +770,6 @@ async def rag_build(req: _BuildRagRequest):
 
 @app.post("/rag/chat")
 async def rag_chat(req: _ChatRequest):
-    """Run a RAG query using the local LightRAG system."""
     session_id = req.session_id or chat_manager.active_session_id
     if session_id != chat_manager.active_session_id:
         chat_manager.set_session(session_id)
@@ -658,16 +788,13 @@ async def rag_chat(req: _ChatRequest):
 # -------------------------------------------------------------------
 # Session endpoints
 # -------------------------------------------------------------------
-
 @app.get("/sessions")
 async def list_sessions():
-    """List all locally stored chat session IDs."""
     return {"sessions": chat_manager.list_local_sessions()}
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    """Get the conversation history for a local session."""
     prev = chat_manager.active_session_id
     chat_manager.set_session(session_id)
     history = chat_manager.get_history()
@@ -677,7 +804,6 @@ async def get_session(session_id: str):
 
 @app.post("/sessions/load/{session_id}")
 async def load_session_from_cloud(session_id: str):
-    """Pull a session from the website and make it the active session."""
     try:
         data = await asyncio.to_thread(api.get_chat_session, session_id)
         history = data.get("history", [])
@@ -689,7 +815,9 @@ async def load_session_from_cloud(session_id: str):
 
 @app.get("/status")
 async def status():
-    return build_status_payload()
+    payload = build_status_payload()
+    payload["public_url"] = get_public_url()
+    return payload
 
 
 @app.get("/camera/status")
