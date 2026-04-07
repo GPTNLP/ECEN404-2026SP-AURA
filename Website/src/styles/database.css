@@ -64,7 +64,14 @@
   font-size: 12px;
   color: var(--muted-text);
   font-weight: 800;
-  white-space: nowrap;
+
+  /* FIX: allow wrapping instead of forcing one line */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+
+  /* prevents flex overflow issues */
+  min-width: 0;
 }
 
 .db-mono {
