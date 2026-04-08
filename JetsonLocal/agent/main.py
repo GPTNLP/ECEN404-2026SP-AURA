@@ -24,7 +24,7 @@ if str(JETSONLOCAL_DIR) not in sys.path:
     sys.path.insert(0, str(JETSONLOCAL_DIR))
 
 # -------------------------------------------------------------------
-# IMPORTS - MATCHED TO CURRENT REORG
+# IMPORTS
 # -------------------------------------------------------------------
 from core.config import (
     DEVICE_ID,
@@ -344,46 +344,6 @@ async def command_loop():
                             },
                         )
 
-                elif cmd == "build_rag":
-                    import tempfile
-                    import shutil as _shutil
-
-                    db_name = payload.get("db_name", LOCAL_DB_NAME)
-                    doc_paths = payload.get("document_paths", [])
-                    try:
-                        tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
-                        local_pdfs = []
-                        for rel_path in doc_paths:
-                            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
-                            await asyncio.to_thread(api.download_document, rel_path, dest)
-                            local_pdfs.append(dest)
-
-                        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, db_name)
-                        _shutil.rmtree(tmp_dir, ignore_errors=True)
-
-                        await asyncio.to_thread(
-                            api.ack_command,
-                            {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "completed",
-                                "note": f"RAG built and synced: {result}",
-                                "result": {**result, **rag_manager.stats()},
-                            },
-                        )
-                        quiet_print("rag_cmd", f"[COMMAND] build_rag complete: {result}")
-                    except Exception as e:
-                        await asyncio.to_thread(
-                            api.ack_command,
-                            {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "failed",
-                                "note": f"build_rag failed: {e}",
-                            },
-                        )
-                        quiet_print("rag_cmd", f"[COMMAND] build_rag failed: {e}")
-
                 elif cmd == "chat_prompt":
                     query = payload.get("query", "")
                     session_id = payload.get("session_id", chat_manager.active_session_id)
@@ -433,6 +393,85 @@ async def command_loop():
             quiet_print("command_poll", f"[COMMAND] poll failed: {e}")
 
         await asyncio.sleep(runtime_config["poll_seconds"])
+
+
+async def rag_build_loop():
+    while True:
+        try:
+            result = await asyncio.to_thread(api.get_next_rag_build_job, DEVICE_ID)
+            job = (result or {}).get("job")
+
+            if not job:
+                await asyncio.sleep(2.0)
+                continue
+
+            job_id = str(job.get("job_id") or "").strip()
+            db_name = str(job.get("db_name") or "").strip()
+            document_paths = list(job.get("document_paths") or [])
+
+            if not job_id or not db_name:
+                await asyncio.sleep(2.0)
+                continue
+
+            quiet_print(
+                "rag_job_claimed",
+                f"[RAG JOB] claimed '{db_name}' with {len(document_paths)} PDF(s)",
+            )
+
+            await asyncio.to_thread(
+                api.ack_rag_build_job,
+                job_id,
+                DEVICE_ID,
+                "running",
+                f"Jetson started vectorizing '{db_name}'",
+                {
+                    "db_name": db_name,
+                    "file_count": len(document_paths),
+                },
+            )
+
+            try:
+                build_result = await rag_manager.build_database_from_document_paths(
+                    db_name=db_name,
+                    document_paths=document_paths,
+                    api_client=api,
+                )
+
+                await asyncio.to_thread(
+                    api.ack_rag_build_job,
+                    job_id,
+                    DEVICE_ID,
+                    "completed",
+                    f"Jetson finished vectorizing '{db_name}' and synced it back to website",
+                    build_result,
+                )
+
+                quiet_print(
+                    "rag_job_completed",
+                    f"[RAG JOB] completed '{db_name}'",
+                )
+
+            except Exception as build_error:
+                await asyncio.to_thread(
+                    api.ack_rag_build_job,
+                    job_id,
+                    DEVICE_ID,
+                    "failed",
+                    f"Jetson build failed for '{db_name}': {build_error}",
+                    {
+                        "db_name": db_name,
+                        "error": str(build_error),
+                    },
+                )
+
+                quiet_print(
+                    "rag_job_failed",
+                    f"[RAG JOB] failed '{db_name}': {build_error}",
+                )
+
+        except Exception as poll_error:
+            quiet_print("rag_job_poll_error", f"[RAG JOB] poll failed: {poll_error}")
+            await asyncio.sleep(int(OFFLINE_RETRY_SECONDS))
 
 
 # -------------------------------------------------------------------
@@ -530,9 +569,9 @@ async def lifespan(app_instance: FastAPI):
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
 
-    # Initialize RAG system (non-blocking — uses existing local DB if present)
     try:
         rag_manager.initialize()
+        quiet_print("rag_ready", "[STARTUP] RAG build worker ready")
     except Exception as e:
         quiet_print("rag", f"[RAG] init warning: {e}")
 
@@ -547,6 +586,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(status_loop())
     asyncio.create_task(flush_loop())
     asyncio.create_task(command_loop())
+    asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
 
     quiet_print("startup", "[STARTUP] telemetry agent running")
@@ -582,7 +622,6 @@ async def health():
 # RAG endpoints
 # -------------------------------------------------------------------
 from pydantic import BaseModel as _BaseModel
-from fastapi import Header as _Header
 
 
 class _ChatRequest(_BaseModel):
@@ -606,7 +645,6 @@ async def rag_stats():
 
 @app.post("/rag/load_db")
 async def rag_load_db(req: _SyncVectorsRequest):
-    """Download a pre-built vector DB from the website and activate it locally."""
     ok = await rag_manager.load_remote_db(req.db_name, api)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to load DB '{req.db_name}'")
@@ -615,27 +653,16 @@ async def rag_load_db(req: _SyncVectorsRequest):
 
 @app.post("/rag/build")
 async def rag_build(req: _BuildRagRequest):
-    """Download documents from website, vectorize, and sync vectors back."""
-    import tempfile
-    import shutil as _shutil
-
-    tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
-    local_pdfs = []
-    try:
-        for rel_path in req.document_paths:
-            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
-            await asyncio.to_thread(api.download_document, rel_path, dest)
-            local_pdfs.append(dest)
-
-        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, req.db_name)
-        return {"ok": True, **result, "stats": rag_manager.stats()}
-    finally:
-        _shutil.rmtree(tmp_dir, ignore_errors=True)
+    result = await rag_manager.build_database_from_document_paths(
+        db_name=req.db_name,
+        document_paths=req.document_paths,
+        api_client=api,
+    )
+    return {"ok": True, **result, "stats": rag_manager.stats()}
 
 
 @app.post("/rag/chat")
 async def rag_chat(req: _ChatRequest):
-    """Run a RAG query using the local LightRAG system."""
     session_id = req.session_id or chat_manager.active_session_id
     if session_id != chat_manager.active_session_id:
         chat_manager.set_session(session_id)
@@ -656,13 +683,11 @@ async def rag_chat(req: _ChatRequest):
 # -------------------------------------------------------------------
 @app.get("/sessions")
 async def list_sessions():
-    """List all locally stored chat session IDs."""
     return {"sessions": chat_manager.list_local_sessions()}
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    """Get the conversation history for a local session."""
     prev = chat_manager.active_session_id
     chat_manager.set_session(session_id)
     history = chat_manager.get_history()
@@ -672,7 +697,6 @@ async def get_session(session_id: str):
 
 @app.post("/sessions/load/{session_id}")
 async def load_session_from_cloud(session_id: str):
-    """Load a session history from website backend into local session storage."""
     try:
         data = await asyncio.to_thread(api.get_chat_session, session_id)
         history = data.get("history", [])

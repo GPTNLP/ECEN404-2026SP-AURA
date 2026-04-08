@@ -1,85 +1,245 @@
-import os
 import asyncio
+import json
+import os
+import re
 import shutil
-import requests
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
 from pypdf import PdfReader
-from core.config import STORAGE_DIR, LOCAL_DB_NAME, DEFAULT_MODEL, EMBEDDING_MODEL
+
 from ai.lightrag_local import LightRAG
+from core.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR, LOCAL_DB_NAME
+
+
+def _safe_name(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", (value or "").strip())
+    return cleaned.strip("._") or "default_db"
+
 
 class RagManager:
     def __init__(self):
+        self.root_dir = Path(STORAGE_DIR) / "jetsonlocaldb"
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+
+        self.rag_system: Optional[LightRAG] = None
+        self.active_db_name: Optional[str] = None
+        self.active_db_path: Optional[Path] = None
+
+    def get_db_dir(self, db_name: str) -> Path:
+        return self.root_dir / _safe_name(db_name)
+
+    def get_temp_pdf_dir(self, db_name: str) -> Path:
+        return self.get_db_dir(db_name) / "_temp_pdfs"
+
+    def get_manifest_path(self, db_name: str) -> Path:
+        return self.get_db_dir(db_name) / "build_manifest.json"
+
+    def initialize(self) -> bool:
+        default_name = LOCAL_DB_NAME or "default_db"
+        default_dir = self.get_db_dir(default_name)
+
+        if default_dir.exists():
+            try:
+                return self.initialize_db(default_name, reset=False)
+            except Exception:
+                return False
+
+        self.active_db_name = None
+        self.active_db_path = None
         self.rag_system = None
-        self.db_path = os.path.join(str(STORAGE_DIR), LOCAL_DB_NAME)
-        self.zip_path = os.path.join(str(STORAGE_DIR), f"{LOCAL_DB_NAME}.zip")
-        
-    def initialize(self):
-        os.makedirs(self.db_path, exist_ok=True)
+        return True
+
+    def initialize_db(self, db_name: str, reset: bool = False) -> bool:
+        db_dir = self.get_db_dir(db_name)
+
+        if reset and db_dir.exists():
+            shutil.rmtree(db_dir, ignore_errors=True)
+
+        db_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            # Initializes the Graph and Vector indices
             self.rag_system = LightRAG(
-                working_dir=self.db_path,
+                working_dir=str(db_dir),
                 llm_model_name=DEFAULT_MODEL,
                 embed_model_name=EMBEDDING_MODEL,
             )
-            print(f"[RAG] Offline LightRAG initialized at {self.db_path}")
+            self.active_db_name = db_name
+            self.active_db_path = db_dir
+            print(f"[RAG JOB] local LightRAG ready at {db_dir}")
             return True
         except Exception as e:
-            print(f"[RAG] Init failed: {e}")
+            print(f"[RAG JOB] failed to initialize DB '{db_name}': {e}")
+            self.rag_system = None
+            self.active_db_name = None
+            self.active_db_path = None
             return False
 
-    def extract_text(self, path: str) -> str:
+    def stats(self) -> Dict[str, Any]:
+        existing_files: List[str] = []
+        if self.active_db_path and self.active_db_path.exists():
+            for name in ["faiss.index", "embeddings.npy", "meta.json", "db.json", "entities.json", "build_manifest.json"]:
+                if (self.active_db_path / name).exists():
+                    existing_files.append(name)
+
+        return {
+            "active_db_name": self.active_db_name,
+            "active_db_path": str(self.active_db_path) if self.active_db_path else None,
+            "ready": self.rag_system is not None,
+            "files_present": existing_files,
+        }
+
+    def extract_text(self, pdf_path: str) -> str:
         try:
-            reader = PdfReader(path)
+            reader = PdfReader(pdf_path)
             parts = [page.extract_text() or "" for page in reader.pages]
-            return "\n\n".join(p for p in parts if p.strip())
+            return "\n\n".join(part for part in parts if part.strip())
         except Exception:
             return ""
 
-    async def ingest_document_and_pack(self, pdf_url: str, api_client, device_id: str, db_name: str) -> bool:
-        """Downloads PDF, Vectorizes via LightRAG, and sends raw files to cloud."""
-        if not self.rag_system: return False
-        
-        local_pdf = os.path.join(self.db_path, "temp.pdf")
-        response = requests.get(pdf_url, stream=True)
-        with open(local_pdf, 'wb') as f: shutil.copyfileobj(response.raw, f)
-            
-        text = self.extract_text(local_pdf)
-        if text:
-            # 1. Insert into local graph/vector DB
-            await asyncio.to_thread(self.rag_system.insert, text)
-            
-            # 2. Upload raw files to Website Repository
-            try:
-                await asyncio.to_thread(api_client.upload_vector_db, db_name, self.db_path)
-                print("[RAG] DB Synced to Cloud Repository.")
-            except Exception as e:
-                print(f"[RAG] Built locally, but cloud sync failed (offline?): {e}")
-            return True
-        return False
+    def write_manifest(
+        self,
+        db_name: str,
+        source_paths: List[str],
+        processed_files: List[str],
+        skipped_files: List[str],
+    ) -> Dict[str, Any]:
+        manifest = {
+            "db_name": db_name,
+            "source_count": len(source_paths),
+            "processed_count": len(processed_files),
+            "skipped_count": len(skipped_files),
+            "processed_files": processed_files,
+            "skipped_files": skipped_files,
+            "built_at_epoch": time.time(),
+            "built_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "storage_path": str(self.get_db_dir(db_name)),
+        }
 
-    async def load_remote_db(self, zip_url: str, api_client) -> bool:
-        """Downloads a pre-built Vector DB from the website and extracts it locally."""
+        manifest_path = self.get_manifest_path(db_name)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        return manifest
+
+    async def build_database_from_document_paths(
+        self,
+        db_name: str,
+        document_paths: List[str],
+        api_client,
+    ) -> Dict[str, Any]:
+        if not document_paths:
+            raise RuntimeError("No PDFs were supplied for this build job.")
+
+        db_dir = self.get_db_dir(db_name)
+        temp_pdf_dir = self.get_temp_pdf_dir(db_name)
+
+        print(f"[RAG JOB] received {len(document_paths)} PDF(s) for '{db_name}'")
+        print(f"[RAG JOB] preparing local DB folder: {db_dir}")
+
+        if not self.initialize_db(db_name, reset=True):
+            raise RuntimeError(f"Failed to initialize local DB for '{db_name}'")
+
+        shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+        temp_pdf_dir.mkdir(parents=True, exist_ok=True)
+
+        processed_files: List[str] = []
+        skipped_files: List[str] = []
+
         try:
-            # 1. Download ZIP
-            await asyncio.to_thread(api_client.download_vector_db, zip_url, self.zip_path)
-            
-            # 2. Clear existing DB and extract new one
-            shutil.rmtree(self.db_path, ignore_errors=True)
-            shutil.unpack_archive(self.zip_path, self.db_path)
-            
-            # 3. Reinitialize LightRAG with new data
-            return self.initialize()
+            for rel_path in document_paths:
+                filename = os.path.basename(rel_path) or "document.pdf"
+                local_pdf_path = temp_pdf_dir / filename
+
+                print(f"[RAG JOB] received PDF: {filename}")
+                await asyncio.to_thread(
+                    api_client.download_document,
+                    rel_path,
+                    str(local_pdf_path),
+                )
+
+                print(f'[RAG JOB] vectorizing "{filename}"')
+                text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
+
+                if not text.strip():
+                    print(f'[RAG JOB] skipped "{filename}" (no extractable text)')
+                    skipped_files.append(filename)
+                    continue
+
+                await asyncio.to_thread(self.rag_system.insert, text)
+                processed_files.append(filename)
+
+            if not processed_files:
+                raise RuntimeError("No PDFs produced extractable text, so no DB was built.")
+
+            manifest = self.write_manifest(
+                db_name=db_name,
+                source_paths=document_paths,
+                processed_files=processed_files,
+                skipped_files=skipped_files,
+            )
+
+            print("[RAG JOB] deleting temporary PDFs from Jetson")
+            shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+
+            print(f"[RAG JOB] local vector DB saved in: {db_dir}")
+            print(f"[RAG JOB] sending vector DB copy back to website for '{db_name}'")
+
+            upload_result = await asyncio.to_thread(
+                api_client.upload_vector_db,
+                db_name,
+                str(db_dir),
+            )
+
+            print(f"[RAG JOB] vector DB sync complete for '{db_name}'")
+
+            return {
+                "ok": True,
+                "db_name": db_name,
+                "db_dir": str(db_dir),
+                "processed_count": len(processed_files),
+                "skipped_count": len(skipped_files),
+                "processed_files": processed_files,
+                "skipped_files": skipped_files,
+                "manifest": manifest,
+                "upload_result": upload_result,
+            }
+
+        finally:
+            if temp_pdf_dir.exists():
+                try:
+                    print("[RAG JOB] cleaning any remaining temporary PDFs")
+                    shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+    async def load_remote_db(self, db_name: str, api_client) -> bool:
+        db_dir = self.get_db_dir(db_name)
+        print(f"[RAG JOB] downloading remote vector DB for '{db_name}' into {db_dir}")
+
+        if db_dir.exists():
+            shutil.rmtree(db_dir, ignore_errors=True)
+        db_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            await asyncio.to_thread(api_client.download_vector_db, db_name, str(db_dir))
+            return self.initialize_db(db_name, reset=False)
         except Exception as e:
-            print(f"[RAG] Failed to load remote DB: {e}")
+            print(f"[RAG JOB] failed to load remote DB '{db_name}': {e}")
             return False
 
     async def query(self, prompt: str) -> str:
-        if not self.rag_system: return "RAG system is offline."
+        if not self.rag_system:
+            return "RAG system is offline."
+
         try:
-            # Utilizes LightRAG's dual-level (local/global) search
-            res = await self.rag_system.aquery(prompt)
-            return res.get("answer", "No context found in local database.")
+            result = await self.rag_system.aquery(prompt)
+            if isinstance(result, dict):
+                return result.get("answer", "No context found in local database.")
+            return str(result)
         except Exception as e:
             return f"Query failed: {e}"
+
 
 rag_manager = RagManager()
