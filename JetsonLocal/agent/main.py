@@ -345,28 +345,52 @@ async def command_loop():
                         )
 
                 elif cmd == "chat_prompt":
+                    print(f"[CHAT] received command: {payload}")
+
                     query = payload.get("query", "")
                     session_id = payload.get("session_id", chat_manager.active_session_id)
+
                     try:
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
                         chat_manager.add_message("user", query, api)
+
+                        print(f"[CHAT] running RAG query: {query}")
+
                         answer = await rag_manager.query(query)
+
+                        print(f"[CHAT] raw answer: {answer}")
+
+                        # ✅ SAFETY FIX — prevent empty responses
+                        if not answer or not str(answer).strip():
+                            answer = "No response generated from model."
+
                         chat_manager.add_message("assistant", answer, api)
+
+                        ack_payload = {
+                            "command_id": command_id,
+                            "device_id": DEVICE_ID,
+                            "status": "completed",
+                            "note": "Chat answered",
+                            "result": {
+                                "answer": answer,
+                                "session_id": session_id,
+                            },
+                        }
+
+                        print(f"[CHAT] sending ack: {ack_payload}")
 
                         await asyncio.to_thread(
                             api.ack_command,
-                            {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "completed",
-                                "note": "Chat answered",
-                                "result": {"answer": answer, "session_id": session_id},
-                            },
+                            ack_payload,
                         )
-                        quiet_print("rag_cmd", f"[COMMAND] chat_prompt answered")
+
+                        print(f"[CHAT] ack sent successfully")
+
                     except Exception as e:
+                        print(f"[CHAT ERROR] {e}")
+
                         await asyncio.to_thread(
                             api.ack_command,
                             {
