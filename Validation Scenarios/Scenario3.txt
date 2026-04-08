@@ -1,0 +1,17 @@
+Scenario 3: Offline RAG Ingestion & Recall (The Knowledge Layer)
+
+Objective: Verify that the Jetson can independently ingest a technical PDF, build a LightRAG dual-level graph/vector database locally, and answer questions accurately without an internet connection.
+
+    Pre-conditions: The Azure cloud is temporarily disconnected or bypassed. A technical PDF (e.g., a lab manual) is placed in the local storage queue.
+
+    Test Execution:
+
+        Trigger the ingest_document function locally on the Jetson targeting the PDF.
+
+        Ask the robot a highly specific question that only exists inside that PDF (e.g., "What is the required resistor value for step 3 of the lab?").
+
+    Expected Outcome:
+
+        The terminal should log [RAG] Vectorizing... and output the newly created faiss.index, embeddings.npy, and JSON files into the jetson_local_db directory.
+
+        The local LLM must return the exact resistor value by pulling from the LightRAG context, proving that the local vector search successfully grounded the model's response.

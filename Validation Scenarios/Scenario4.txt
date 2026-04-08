@@ -1,0 +1,21 @@
+Scenario 4: Edge-to-Cloud Orchestration (The Network Layer)
+
+Objective: Verify the stateful syncing mechanism between the Jetson edge device and the Azure Website Backend, ensuring vectors and chat logs survive session restarts.
+
+    Pre-conditions: Both the Jetson edge agent and the Azure Website Backend (http://localhost:5000 for testing) are running and networked.
+
+    Test Execution:
+
+        Through the Website Backend API (or Swagger UI), queue a build_rag command pointing to a cloud-hosted PDF.
+
+        Have a brief conversation with the robot locally.
+
+        Check the Website Backend's storage directories.
+
+    Expected Outcome:
+
+        The Jetson should pull the command from the queue, download the PDF, build the vectors locally, and then automatically upload the raw vector files back to the Website's /api/databases/{db_name}/sync_up endpoint.
+
+        The conversation should trigger the sync_chat_log background task.
+
+        You should see the synced chat_logs.jsonl and the new Vector database files appearing directly in the Website Backend's persistent storage folders, proving full edge-to-cloud synchronization.
