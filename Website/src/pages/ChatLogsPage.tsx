@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../services/authService";
 import "../styles/page-ui.css";
 
-/* ─── Types ─────────────────────────────────────────────────── */
 type LogItem = {
   ts: number;
   event?: string;
@@ -12,38 +11,36 @@ type LogItem = {
   response_preview?: string;
   model?: string;
   latency_ms?: number;
-  meta?: Record<string, any>;
+  meta?: Record<string, unknown>;
 };
 
 type SessionMeta = {
   session_id: string;
+  title?: string;
+  owner_email?: string;
+  owner_role?: string;
   device_id?: string;
+  db_name?: string;
   message_count: number;
+  created_ts?: number;
   updated_ts?: number;
+  source?: string;
 };
 
 type Message = {
-  role: string;
+  role: "user" | "assistant" | "error";
   content: string;
   ts?: number;
 };
 
-type SessionDetail = {
-  session_id: string;
-  device_id?: string;
+type SessionDetail = SessionMeta & {
   history: Message[];
-  updated_ts?: number;
 };
 
-/* ─── Helpers ────────────────────────────────────────────────── */
 const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
   (import.meta.env.VITE_CAMERA_API_BASE as string | undefined) ||
   "http://127.0.0.1:9000";
-
-const JETSON_BASE =
-  (import.meta.env.VITE_JETSON_API_BASE as string | undefined) ||
-  "http://127.0.0.1:8000";
 
 function fmtTime(ts?: number) {
   if (!ts) return "-";
@@ -54,14 +51,27 @@ function fmtTime(ts?: number) {
   }
 }
 
-/* ─── Component ─────────────────────────────────────────────── */
+function normalizeHistory(history: any[]): Message[] {
+  if (!Array.isArray(history)) return [];
+
+  return history.map((msg) => ({
+    role:
+      msg.role === "user"
+        ? "user"
+        : msg.role === "error"
+          ? "error"
+          : "assistant",
+    content: String(msg.content ?? ""),
+    ts: typeof msg.ts === "number" ? msg.ts : undefined,
+  }));
+}
+
 export default function ChatLogsPage() {
   const { token, user } = useAuth();
   const isAdmin = user?.role === "admin";
 
-  const [tab, setTab] = useState<"events" | "sessions">("sessions");
+  const [tab, setTab] = useState<"sessions" | "events">("sessions");
 
-  /* ── Event log state ──────────────────────────────────────── */
   const [evLoading, setEvLoading] = useState(false);
   const [evError, setEvError] = useState<string | null>(null);
   const [items, setItems] = useState<LogItem[]>([]);
@@ -72,17 +82,14 @@ export default function ChatLogsPage() {
   const [limit, setLimit] = useState(200);
   const [offset, setOffset] = useState(0);
 
-  /* ── Session state ────────────────────────────────────────── */
   const [sessLoading, setSessLoading] = useState(false);
   const [sessError, setSessError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [sessDetailLoading, setSessDetailLoading] = useState(false);
-  const [loadToJetsonStatus, setLoadToJetsonStatus] = useState<string>("");
 
   const canFetch = !!token && isAdmin;
 
-  /* ── Event log fetch ────────────────────────────────────────── */
   const queryString = useMemo(() => {
     const p = new URLSearchParams();
     p.set("limit", String(limit));
@@ -95,13 +102,17 @@ export default function ChatLogsPage() {
 
   const fetchLogs = async () => {
     if (!token) return;
+
     setEvLoading(true);
     setEvError(null);
+
     try {
       const res = await fetch(`${API_BASE}/logs/list?${queryString}`, {
         headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error(await res.text());
+
       const data = await res.json();
       setItems((data.items || []) as LogItem[]);
       setMatched(Number(data.total_matched || 0));
@@ -113,16 +124,19 @@ export default function ChatLogsPage() {
     }
   };
 
-  /* ── Session list fetch ─────────────────────────────────────── */
   const fetchSessions = async () => {
     if (!token) return;
+
     setSessLoading(true);
     setSessError(null);
+
     try {
       const res = await fetch(`${API_BASE}/logs/sessions/list`, {
         headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error(await res.text());
+
       const data = await res.json();
       setSessions((data.sessions || []) as SessionMeta[]);
     } catch (e: any) {
@@ -133,19 +147,27 @@ export default function ChatLogsPage() {
     }
   };
 
-  /* ── Session detail fetch ───────────────────────────────────── */
-  const openSession = async (session_id: string) => {
+  const openSession = async (sessionId: string) => {
     if (!token) return;
+
     setSessDetailLoading(true);
     setSelectedSession(null);
-    setLoadToJetsonStatus("");
+    setSessError(null);
+
     try {
-      const res = await fetch(`${API_BASE}/logs/sessions/${encodeURIComponent(session_id)}`, {
+      const res = await fetch(`${API_BASE}/logs/sessions/${encodeURIComponent(sessionId)}`, {
         headers: { Authorization: `Bearer ${token}` },
+        credentials: "include",
       });
       if (!res.ok) throw new Error(await res.text());
+
       const data = await res.json();
-      setSelectedSession(data as SessionDetail);
+      const session = (data.session ?? data) as SessionDetail;
+
+      setSelectedSession({
+        ...session,
+        history: normalizeHistory(session.history),
+      });
     } catch (e: any) {
       setSessError(e?.message || "Failed to load session");
     } finally {
@@ -153,294 +175,411 @@ export default function ChatLogsPage() {
     }
   };
 
-  /* ── Load session → Jetson ──────────────────────────────────── */
-  const loadSessionToJetson = async (session_id: string) => {
-    setLoadToJetsonStatus("Loading...");
-    try {
-      const res = await fetch(
-        `${JETSON_BASE}/sessions/load/${encodeURIComponent(session_id)}`,
-        { method: "POST" }
-      );
-      if (!res.ok) throw new Error(await res.text());
-      setLoadToJetsonStatus("Loaded to Jetson");
-    } catch (e: any) {
-      setLoadToJetsonStatus(`Failed: ${e?.message || String(e)}`);
-    }
+  const openInSimulator = (sessionId: string) => {
+    localStorage.setItem("aura_active_session_id", sessionId);
+    window.location.href = `/simulator?session_id=${encodeURIComponent(sessionId)}`;
   };
 
   useEffect(() => {
     if (!canFetch) return;
-    if (tab === "events") fetchLogs();
-    else fetchSessions();
+
+    if (tab === "events") {
+      void fetchLogs();
+    } else {
+      void fetchSessions();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canFetch, tab, queryString]);
 
   if (!token || !isAdmin) {
     return (
-      <div className="page-wrap">
-        <h2 className="page-title">Chat Logs</h2>
-        <div className="muted">{!token ? "Please login." : "Admin only."}</div>
+      <div className="page-shell">
+        <h1 className="page-title">Chat Logs</h1>
+        <div className="card card-pad">{!token ? "Please login." : "Admin only."}</div>
       </div>
     );
   }
 
   return (
     <div className="page-shell">
-      <div className="page-wrap">
-        <div className="page-header">
-          <h2 className="page-title">Chat Logs</h2>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              className={`btn ${tab === "sessions" ? "btn-primary" : ""}`}
-              onClick={() => setTab("sessions")}
-            >
-              Sessions
-            </button>
-            <button
-              className={`btn ${tab === "events" ? "btn-primary" : ""}`}
-              onClick={() => setTab("events")}
-            >
-              Event Log
-            </button>
-          </div>
-        </div>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
+        <h1 className="page-title" style={{ margin: 0 }}>
+          Chat Logs
+        </h1>
 
-        {/* ── Sessions Tab ─────────────────────────────────────── */}
-        {tab === "sessions" && (
-          <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
-            {/* Session list */}
-            <div className="card card-pad" style={{ flex: "0 0 300px", minWidth: 240 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-                <span style={{ fontWeight: 600 }}>Sessions</span>
-                <button onClick={fetchSessions} disabled={sessLoading} className="btn btn-sm">
-                  {sessLoading ? "..." : "Refresh"}
-                </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            className={tab === "sessions" ? "btn btn-primary" : "btn"}
+            onClick={() => setTab("sessions")}
+          >
+            Sessions
+          </button>
+          <button
+            className={tab === "events" ? "btn btn-primary" : "btn"}
+            onClick={() => setTab("events")}
+          >
+            Event Log
+          </button>
+        </div>
+      </div>
+
+      {tab === "sessions" && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "380px minmax(0, 1fr)",
+            gap: 18,
+            alignItems: "start",
+          }}
+        >
+          <div className="card card-pad">
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                marginBottom: 12,
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 18 }}>Sessions</div>
+                <div style={{ fontSize: 13, opacity: 0.75 }}>
+                  {sessLoading ? "Loading..." : `${sessions.length} saved`}
+                </div>
               </div>
 
-              {sessError && (
-                <div style={{ color: "var(--status-bad)", fontSize: 12, marginBottom: 8 }}>
-                  {sessError}
-                </div>
-              )}
-
-              {sessions.length === 0 && !sessLoading && (
-                <div className="muted" style={{ fontSize: 13 }}>
-                  No sessions found.
-                </div>
-              )}
-
-              {sessions.map((s) => (
-                <div
-                  key={s.session_id}
-                  onClick={() => openSession(s.session_id)}
-                  className={`card card-pad ${selectedSession?.session_id === s.session_id ? "selected" : ""}`}
-                  style={{
-                    marginBottom: 6,
-                    cursor: "pointer",
-                    background:
-                      selectedSession?.session_id === s.session_id
-                        ? "var(--accent-soft, rgba(99,102,241,.12))"
-                        : undefined,
-                  }}
-                >
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{s.session_id}</div>
-                  <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
-                    {s.message_count} messages · {s.device_id || "unknown device"}
-                  </div>
-                  <div className="muted" style={{ fontSize: 11 }}>{fmtTime(s.updated_ts)}</div>
-                </div>
-              ))}
+              <button className="btn" onClick={() => void fetchSessions()}>
+                Refresh
+              </button>
             </div>
 
-            {/* Session detail */}
-            <div className="card card-pad" style={{ flex: 1 }}>
-              {!selectedSession && !sessDetailLoading && (
-                <div className="muted" style={{ padding: 20 }}>
-                  Select a session to view the conversation.
-                </div>
-              )}
+            {sessError && (
+              <div className="card" style={{ padding: 10, marginBottom: 10, color: "#b42318" }}>
+                {sessError}
+              </div>
+            )}
 
-              {sessDetailLoading && (
-                <div className="muted" style={{ padding: 20 }}>Loading...</div>
-              )}
+            {sessions.length === 0 && !sessLoading && <div>No sessions found.</div>}
 
-              {selectedSession && !sessDetailLoading && (
-                <>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-                    <div>
-                      <span style={{ fontWeight: 600 }}>{selectedSession.session_id}</span>
-                      <span className="muted" style={{ fontSize: 12, marginLeft: 10 }}>
-                        {selectedSession.device_id} · {fmtTime(selectedSession.updated_ts)}
-                      </span>
-                    </div>
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() => loadSessionToJetson(selectedSession.session_id)}
-                      title="Load this session into the active Jetson instance"
-                    >
-                      Load to Jetson
-                    </button>
-                  </div>
-
-                  {loadToJetsonStatus && (
-                    <div
-                      style={{
-                        fontSize: 12,
-                        marginBottom: 10,
-                        color: loadToJetsonStatus.startsWith("Failed")
-                          ? "var(--status-bad)"
-                          : "var(--status-good)",
-                      }}
-                    >
-                      {loadToJetsonStatus}
-                    </div>
-                  )}
-
-                  <div
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {sessions.map((s) => {
+                const selected = selectedSession?.session_id === s.session_id;
+                return (
+                  <button
+                    key={s.session_id}
+                    type="button"
+                    onClick={() => void openSession(s.session_id)}
+                    className="card card-pad"
                     style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 10,
-                      maxHeight: 600,
-                      overflowY: "auto",
+                      textAlign: "left",
+                      cursor: "pointer",
+                      border: selected
+                        ? "1px solid var(--accent, #7c3aed)"
+                        : "1px solid var(--card-border, #ddd)",
+                      background: selected
+                        ? "var(--accent-soft, rgba(124,58,237,.10))"
+                        : "var(--card-bg, white)",
                     }}
                   >
-                    {selectedSession.history.map((msg, i) => (
+                    <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                      {s.title || s.session_id}
+                    </div>
+                    <div style={{ fontSize: 13, opacity: 0.78 }}>
+                      {s.owner_email || "unknown owner"}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.72, marginTop: 6 }}>
+                      {s.message_count} messages
+                      {s.db_name ? ` • ${s.db_name}` : ""}
+                      {s.source ? ` • ${s.source}` : ""}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                      {fmtTime(s.updated_ts)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="card card-pad" style={{ minHeight: 560 }}>
+            {!selectedSession && !sessDetailLoading && (
+              <div style={{ opacity: 0.8 }}>Select a session to view the conversation.</div>
+            )}
+
+            {sessDetailLoading && <div>Loading...</div>}
+
+            {selectedSession && !sessDetailLoading && (
+              <>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 12,
+                    alignItems: "flex-start",
+                    marginBottom: 16,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 900 }}>
+                      {selectedSession.title || selectedSession.session_id}
+                    </div>
+                    <div style={{ fontSize: 13, opacity: 0.78, marginTop: 4 }}>
+                      {selectedSession.owner_email || "unknown owner"}
+                      {selectedSession.owner_role ? ` • ${selectedSession.owner_role}` : ""}
+                      {selectedSession.db_name ? ` • ${selectedSession.db_name}` : ""}
+                      {selectedSession.device_id ? ` • ${selectedSession.device_id}` : ""}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.68, marginTop: 4 }}>
+                      Created: {fmtTime(selectedSession.created_ts)} • Updated:{" "}
+                      {fmtTime(selectedSession.updated_ts)}
+                    </div>
+                  </div>
+
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => openInSimulator(selectedSession.session_id)}
+                  >
+                    Open in Simulator
+                  </button>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 12,
+                    maxHeight: 470,
+                    overflowY: "auto",
+                    paddingRight: 4,
+                  }}
+                >
+                  {selectedSession.history.map((msg, i) => {
+                    const isUser = msg.role === "user";
+                    const isError = msg.role === "error";
+
+                    return (
                       <div
-                        key={i}
+                        key={`${msg.role}-${i}-${msg.ts || 0}`}
                         style={{
-                          padding: "10px 14px",
-                          borderRadius: 8,
-                          background:
-                            msg.role === "user"
-                              ? "var(--card-bg, #1e1e2e)"
-                              : "var(--accent-soft, rgba(99,102,241,.10))",
-                          alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-                          maxWidth: "80%",
-                          border: "1px solid var(--card-border)",
+                          display: "flex",
+                          justifyContent: isUser ? "flex-end" : "flex-start",
                         }}
                       >
                         <div
                           style={{
-                            fontSize: 11,
-                            fontWeight: 600,
-                            marginBottom: 4,
-                            textTransform: "uppercase",
-                            color: "var(--muted)",
+                            maxWidth: "78%",
+                            padding: "12px 14px",
+                            borderRadius: 16,
+                            border: "1px solid var(--card-border, #ddd)",
+                            background: isUser
+                              ? "var(--accent, #7c3aed)"
+                              : isError
+                                ? "rgba(220, 38, 38, 0.08)"
+                                : "var(--card-bg, white)",
+                            color: isUser ? "white" : "inherit",
+                            whiteSpace: "pre-wrap",
+                            lineHeight: 1.45,
+                            textAlign: "left",
                           }}
                         >
-                          {msg.role}
-                          {msg.ts && (
-                            <span style={{ marginLeft: 8, fontWeight: 400 }}>
-                              {fmtTime(msg.ts)}
-                            </span>
-                          )}
+                          <div
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 800,
+                              marginBottom: 6,
+                              opacity: 0.8,
+                              textTransform: "capitalize",
+                            }}
+                          >
+                            {msg.role === "assistant" ? "AURA" : msg.role}{" "}
+                            {msg.ts ? `• ${fmtTime(msg.ts)}` : ""}
+                          </div>
+                          <div>{msg.content}</div>
                         </div>
-                        <div style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{msg.content}</div>
                       </div>
-                    ))}
-                  </div>
-                </>
-              )}
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "events" && (
+        <>
+          <div
+            className="card card-pad"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 10,
+              alignItems: "center",
+              marginBottom: 14,
+            }}
+          >
+            <input
+              value={q}
+              onChange={(e) => {
+                setOffset(0);
+                setQ(e.target.value);
+              }}
+              placeholder="Search (email / prompt / meta...)"
+              className="input"
+              style={{ flex: "1 1 320px" }}
+            />
+
+            <select
+              value={role}
+              onChange={(e) => {
+                setOffset(0);
+                setRole(e.target.value);
+              }}
+              className="select"
+            >
+              <option value="">All Roles</option>
+              <option value="admin">Admin</option>
+              <option value="student">Student</option>
+              <option value="ta">TA</option>
+            </select>
+
+            <select
+              value={event}
+              onChange={(e) => {
+                setOffset(0);
+                setEvent(e.target.value);
+              }}
+              className="select"
+            >
+              <option value="">All Events</option>
+              <option value="chat">chat</option>
+              <option value="chat_error">chat_error</option>
+              <option value="bot">bot</option>
+              <option value="upload">upload</option>
+              <option value="login">login</option>
+            </select>
+
+            <select
+              value={String(limit)}
+              onChange={(e) => {
+                setOffset(0);
+                setLimit(parseInt(e.target.value, 10));
+              }}
+              className="select"
+            >
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+            </select>
+
+            <button className="btn btn-primary" onClick={() => void fetchLogs()}>
+              Search
+            </button>
+
+            <button
+              className="btn"
+              onClick={() => {
+                setQ("");
+                setRole("");
+                setEvent("");
+                setOffset(0);
+              }}
+              disabled={evLoading}
+            >
+              Clear
+            </button>
+          </div>
+
+          <div style={{ marginBottom: 10, fontSize: 13, opacity: 0.78 }}>
+            Matched: {matched}
+          </div>
+
+          {evError && (
+            <div className="card card-pad" style={{ color: "#b42318", marginBottom: 10 }}>
+              {evError}
+            </div>
+          )}
+
+          <div className="card card-pad" style={{ overflowX: "auto" }}>
+            {items.length === 0 && !evLoading ? (
+              <div>No logs found.</div>
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>Time</th>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>User</th>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>Role</th>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>Event</th>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>Prompt</th>
+                    <th style={{ textAlign: "left", padding: "10px 8px" }}>Latency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((it, idx) => (
+                    <tr key={`${it.ts}-${idx}`} style={{ borderTop: "1px solid var(--card-border, #eee)" }}>
+                      <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>{fmtTime(it.ts)}</td>
+                      <td style={{ padding: "10px 8px" }}>{it.user_email || "-"}</td>
+                      <td style={{ padding: "10px 8px" }}>{it.user_role || "-"}</td>
+                      <td style={{ padding: "10px 8px" }}>{it.event || "-"}</td>
+                      <td style={{ padding: "10px 8px", maxWidth: 540 }}>
+                        {it.prompt ? it.prompt.slice(0, 500) : "-"}
+                        {it.prompt && it.prompt.length > 500 ? "…" : ""}
+                      </td>
+                      <td style={{ padding: "10px 8px" }}>
+                        {typeof it.latency_ms === "number" ? `${it.latency_ms}ms` : "-"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                marginTop: 14,
+                flexWrap: "wrap",
+              }}
+            >
+              <div style={{ fontSize: 13, opacity: 0.75 }}>
+                Showing {items.length} / {matched} (offset {offset})
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="btn"
+                  onClick={() => setOffset((v) => Math.max(0, v - limit))}
+                  disabled={evLoading || offset === 0}
+                >
+                  ← Prev
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => setOffset((v) => v + limit)}
+                  disabled={evLoading || offset + limit >= matched}
+                >
+                  Next →
+                </button>
+              </div>
             </div>
           </div>
-        )}
-
-        {/* ── Event Log Tab ─────────────────────────────────────── */}
-        {tab === "events" && (
-          <>
-            <div className="card card-pad" style={{ marginBottom: 14 }}>
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <input
-                  value={q}
-                  onChange={(e) => { setOffset(0); setQ(e.target.value); }}
-                  placeholder="Search (email / prompt / meta...)"
-                  className="input"
-                  style={{ flex: "1 1 320px" }}
-                />
-                <select value={role} onChange={(e) => { setOffset(0); setRole(e.target.value); }} className="select">
-                  <option value="">All Roles</option>
-                  <option value="admin">Admin</option>
-                  <option value="student">Student</option>
-                </select>
-                <select value={event} onChange={(e) => { setOffset(0); setEvent(e.target.value); }} className="select">
-                  <option value="">All Events</option>
-                  <option value="chat">chat</option>
-                  <option value="bot">bot</option>
-                  <option value="upload">upload</option>
-                  <option value="login">login</option>
-                </select>
-                <select
-                  value={String(limit)}
-                  onChange={(e) => { setOffset(0); setLimit(parseInt(e.target.value, 10)); }}
-                  className="select"
-                >
-                  <option value="50">50</option>
-                  <option value="100">100</option>
-                  <option value="200">200</option>
-                  <option value="500">500</option>
-                </select>
-                <button onClick={fetchLogs} disabled={evLoading} className="btn btn-primary">Search</button>
-                <button onClick={() => { setQ(""); setRole(""); setEvent(""); setOffset(0); }} disabled={evLoading} className="btn">Clear</button>
-              </div>
-              <div style={{ marginTop: 10, fontSize: 12 }} className="muted">Matched: <b>{matched}</b></div>
-              {evError && (
-                <div style={{ marginTop: 10, color: "var(--status-bad)", fontSize: 13, whiteSpace: "pre-wrap" }}>
-                  {evError}
-                </div>
-              )}
-            </div>
-
-            <div className="card" style={{ overflow: "hidden" }}>
-              <div className="table-wrap">
-                <table className="table">
-                  <thead>
-                    <tr style={{ textAlign: "left" }}>
-                      <th>Time</th>
-                      <th>User</th>
-                      <th>Role</th>
-                      <th>Event</th>
-                      <th style={{ minWidth: 420 }}>Prompt</th>
-                      <th>Latency</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.length === 0 && !evLoading && (
-                      <tr><td colSpan={6} style={{ padding: 14 }} className="muted">No logs found.</td></tr>
-                    )}
-                    {items.map((it, idx) => (
-                      <tr key={idx}>
-                        <td style={{ whiteSpace: "nowrap" }} className="muted">{fmtTime(it.ts)}</td>
-                        <td style={{ whiteSpace: "nowrap" }}>{it.user_email || "-"}</td>
-                        <td style={{ whiteSpace: "nowrap" }}>{it.user_role || "-"}</td>
-                        <td style={{ whiteSpace: "nowrap" }}>{it.event || "-"}</td>
-                        <td style={{ minWidth: 420 }}>
-                          <div style={{ whiteSpace: "pre-wrap" }}>
-                            {it.prompt ? it.prompt.slice(0, 500) : "-"}
-                            {it.prompt && it.prompt.length > 500 ? "…" : ""}
-                          </div>
-                        </td>
-                        <td style={{ whiteSpace: "nowrap" }} className="muted">
-                          {typeof it.latency_ms === "number" ? `${it.latency_ms}ms` : "-"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: 12, borderTop: "1px solid var(--card-border)" }}>
-                <div className="muted" style={{ fontSize: 12 }}>
-                  Showing {items.length} / {matched} (offset {offset})
-                </div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  <button onClick={() => setOffset((v) => Math.max(0, v - limit))} disabled={evLoading || offset === 0} className="btn">← Prev</button>
-                  <button onClick={() => setOffset((v) => v + limit)} disabled={evLoading || offset + limit >= matched} className="btn">Next →</button>
-                </div>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }

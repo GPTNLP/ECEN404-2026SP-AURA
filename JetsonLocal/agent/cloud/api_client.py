@@ -228,24 +228,25 @@ class ApiClient:
         r.raise_for_status()
         return r.json()
 
-    def sync_chat_log(self, device_id: str, log_data: dict) -> None:
+    def sync_chat_log(self, device_id: str, log_data: dict) -> Dict[str, Any]:
         """
-        Best-effort chat sync.
-        Kept non-fatal so chat still works even if the website log endpoint shape changes.
+        Sync full chat session history to the backend session store.
+        This is best-effort, but now targets the correct session endpoint.
         """
-        url = self._url("/logs/ingest")
-        headers = {
-            "X-Device-Secret": self.secret,
-            "Content-Type": "application/json",
-        }
         payload = {
+            "session_id": (log_data or {}).get("session_id"),
             "device_id": device_id,
-            **(log_data or {}),
+            "history": (log_data or {}).get("history", []),
         }
-        try:
-            self.session.post(url, headers=headers, json=payload, timeout=5.0)
-        except Exception:
-            pass
+
+        r = self.session.post(
+            self._url("/logs/sessions/ingest"),
+            json=payload,
+            headers=self._headers(),
+            timeout=5.0,
+        )
+        r.raise_for_status()
+        return r.json()
 
     def upload_camera_frame(self, device_id: str, mode: str, jpeg_bytes: bytes) -> Dict[str, Any]:
         r = self.session.post(
@@ -264,7 +265,7 @@ class ApiClient:
 
     def get_chat_session(self, session_id: str) -> Dict[str, Any]:
         r = self.session.get(
-            self._url(f"/api/chat/session/{session_id}"),
+            self._url(f"/logs/sessions/{session_id}"),
             headers={"X-Device-Secret": self.secret},
             timeout=self.timeout,
         )
