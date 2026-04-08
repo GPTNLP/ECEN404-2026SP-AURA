@@ -4,10 +4,6 @@ import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 import os
-import re
-import shutil
-import subprocess
-import threading
 from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -54,8 +50,8 @@ from core.offline_queue import queue_log, queue_status, flush_logs, flush_status
 from hardware.serial_link import serial_link
 from hardware.camera import camera_service, get_camera_status
 
-from stt_faster import STTService
-from tts import TTSService
+from ai.rag_manager import rag_manager
+from ai.chat_manager import chat_manager
 
 # -------------------------------------------------------------------
 # APP
@@ -72,122 +68,7 @@ runtime_config = {
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 _last_messages = {}
-
-stt_service: Optional[STTService] = None
-stt_task: Optional[asyncio.Task] = None
-voice_enabled = True
-tts_service = TTSService()
-
-# -------------------------------------------------------------------
-# PUBLIC TUNNEL
-# -------------------------------------------------------------------
-_PUBLIC_URL: Optional[str] = None
-_TUNNEL_PROC: Optional[subprocess.Popen] = None
-
-_CF_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
-_NGROK_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.ngrok(?:-free)?\.(?:app|io)")
-
-AURA_ENABLE_PUBLIC_TUNNEL = os.getenv("AURA_ENABLE_PUBLIC_TUNNEL", "0").strip() == "1"
-AURA_PUBLIC_TUNNEL_PROVIDER = os.getenv("AURA_PUBLIC_TUNNEL_PROVIDER", "cloudflared").strip().lower()
-AURA_PUBLIC_TUNNEL_PORT = int(os.getenv("AURA_PUBLIC_TUNNEL_PORT", "8000"))
-
-
-def get_public_url() -> str:
-    return _PUBLIC_URL or ""
-
-
-def _set_public_url(url: str) -> None:
-    global _PUBLIC_URL
-    url = (url or "").strip()
-    if not url:
-        return
-    if _PUBLIC_URL != url:
-        _PUBLIC_URL = url
-        quiet_print("public_url", f"[TUNNEL] public url: {_PUBLIC_URL}")
-
-
-def _consume_tunnel_stdout(proc: subprocess.Popen, provider: str) -> None:
-    try:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            line = raw.strip()
-            if not line:
-                continue
-
-            quiet_print(f"tunnel_line_{provider}", f"[TUNNEL:{provider}] {line}")
-
-            if provider == "cloudflared":
-                m = _CF_URL_RE.search(line)
-                if m:
-                    _set_public_url(m.group(0))
-            elif provider == "ngrok":
-                m = _NGROK_URL_RE.search(line)
-                if m:
-                    _set_public_url(m.group(0))
-    except Exception as e:
-        quiet_print("tunnel_reader_err", f"[TUNNEL] stdout reader failed: {e}")
-
-
-def start_public_tunnel(local_port: int = 8000) -> str:
-    global _TUNNEL_PROC
-
-    if not AURA_ENABLE_PUBLIC_TUNNEL:
-        quiet_print("tunnel_disabled", "[TUNNEL] disabled")
-        return ""
-
-    if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
-        quiet_print("tunnel_running", "[TUNNEL] already running")
-        return get_public_url()
-
-    provider = AURA_PUBLIC_TUNNEL_PROVIDER
-    target = f"http://127.0.0.1:{int(local_port)}"
-
-    if provider == "cloudflared":
-        exe = shutil.which("cloudflared")
-        if not exe:
-            quiet_print("tunnel_missing", "[TUNNEL] cloudflared not found in PATH")
-            return ""
-        cmd = [exe, "tunnel", "--url", target, "--no-autoupdate"]
-
-    elif provider == "ngrok":
-        exe = shutil.which("ngrok")
-        if not exe:
-            quiet_print("tunnel_missing", "[TUNNEL] ngrok not found in PATH")
-            return ""
-        cmd = [exe, "http", str(int(local_port)), "--log", "stdout"]
-
-    else:
-        quiet_print("tunnel_bad_provider", f"[TUNNEL] unsupported provider: {provider}")
-        return ""
-
-    try:
-        _TUNNEL_PROC = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        t = threading.Thread(target=_consume_tunnel_stdout, args=(_TUNNEL_PROC, provider), daemon=True)
-        t.start()
-        quiet_print("tunnel_start", f"[TUNNEL] started {provider} for {target}")
-    except Exception as e:
-        quiet_print("tunnel_start_fail", f"[TUNNEL] failed to start {provider}: {e}")
-        return ""
-
-    return ""
-
-
-def stop_public_tunnel() -> None:
-    global _TUNNEL_PROC
-    try:
-        if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
-            _TUNNEL_PROC.terminate()
-            quiet_print("tunnel_stop", "[TUNNEL] stopped")
-    except Exception as e:
-        quiet_print("tunnel_stop_fail", f"[TUNNEL] stop failed: {e}")
-    finally:
-        _TUNNEL_PROC = None
+_last_uploaded_signature: Optional[str] = None
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -216,157 +97,6 @@ def send_or_queue_log(level: str, event: str, message: str, meta=None):
 
 
 # -------------------------------------------------------------------
-# VOICE HELPERS
-# -------------------------------------------------------------------
-def extract_speak_payload(text: str) -> str:
-    raw = (text or "").strip()
-    if not raw:
-        return ""
-
-    lowered = raw.lower()
-    idx = lowered.find("speak")
-    if idx == -1:
-        return ""
-
-    payload = raw[idx + len("speak"):].strip(" ,.:;!-")
-    fillers = (
-        "this",
-        "that",
-        "the following",
-        "out loud",
-        "please",
-    )
-
-    changed = True
-    while changed and payload:
-        changed = False
-        lowered_payload = payload.lower()
-        for filler in fillers:
-            prefix = filler + " "
-            if lowered_payload.startswith(prefix):
-                payload = payload[len(prefix):].strip(" ,.:;!-")
-                changed = True
-                break
-
-    return payload
-
-
-async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
-    lowered = (text or "").lower()
-
-    if "speak" in lowered:
-        speak_payload = extract_speak_payload(text)
-
-        if speak_payload:
-            send_or_queue_log(
-                "info",
-                "voice_tts_command",
-                "Voice TTS command executed",
-                {"text": text, "spoken_text": speak_payload},
-            )
-            quiet_print("voice_action", f"[VOICE] tts -> {speak_payload}")
-            tts_service.speak(speak_payload)
-        else:
-            send_or_queue_log(
-                "warning",
-                "voice_tts_missing_payload",
-                "Voice TTS command requested but no payload found",
-                {"text": text},
-            )
-            quiet_print("voice_action", "[VOICE] tts requested but no payload found")
-            tts_service.speak("Please tell me what you want me to say.")
-        return
-
-    if intent == "movement" and movement in MOVEMENT_COMMANDS:
-        try:
-            serial_link.send_command(movement, "")
-            send_or_queue_log(
-                "info",
-                "voice_movement_command",
-                f"Voice movement command executed: {movement}",
-                {"text": text, "movement": movement},
-            )
-            quiet_print("voice_action", f"[VOICE] movement -> {movement}")
-        except Exception as e:
-            send_or_queue_log(
-                "warning",
-                "voice_movement_failed",
-                f"Voice movement command failed: {e}",
-                {"text": text, "movement": movement},
-            )
-            quiet_print("voice_action", f"[VOICE] movement failed -> {movement}: {e}")
-        return
-
-    if intent == "llm":
-        send_or_queue_log(
-            "info",
-            "voice_llm_query",
-            "Voice query captured",
-            {"text": text},
-        )
-        quiet_print("voice_action", f"[VOICE] llm -> {text}")
-        return
-
-    send_or_queue_log(
-        "info",
-        "voice_unclassified",
-        "Voice input captured but not classified",
-        {"text": text, "intent": intent, "movement": movement},
-    )
-    quiet_print("voice_action", f"[VOICE] unclassified -> {text}")
-
-
-def build_stt_service() -> STTService:
-    return STTService(
-        callback=handle_voice_text,
-        model_size="tiny.en",
-        input_device=None,
-        device_sample_rate=None,
-        target_sample_rate=16000,
-        channels=None,
-        device="cpu",
-        compute_type="int8",
-        language="en",
-        task="transcribe",
-        log_path="~/SDP/AURA/JetsonLocal/storage/transcriptions.log",
-        unload_after_idle_seconds=60.0,
-        auto_reload_model=True,
-    )
-
-
-async def start_voice_loop() -> None:
-    global stt_service, stt_task
-
-    if stt_task and not stt_task.done():
-        return
-
-    stt_service = build_stt_service()
-    stt_task = asyncio.create_task(stt_service.continuous_stt_loop())
-    quiet_print("voice", "[VOICE] started")
-
-
-async def stop_voice_loop() -> None:
-    global stt_service, stt_task
-
-    if stt_service is not None:
-        stt_service.stop()
-
-    if stt_task is not None:
-        try:
-            await asyncio.wait_for(stt_task, timeout=3.0)
-        except Exception:
-            stt_task.cancel()
-            try:
-                await stt_task
-            except Exception:
-                pass
-
-    stt_service = None
-    stt_task = None
-    quiet_print("voice", "[VOICE] stopped")
-
-
-# -------------------------------------------------------------------
 # DEVICE REGISTRATION / CONFIG
 # -------------------------------------------------------------------
 def build_register_payload():
@@ -391,7 +121,6 @@ def build_register_payload():
         "software_version": DEVICE_SOFTWARE_VERSION,
         "hostname": hostname,
         "local_ip": local_ip,
-        "public_url": get_public_url(),
     }
 
 
@@ -408,15 +137,9 @@ async def refresh_config():
 
     try:
         result = await asyncio.to_thread(api.get_config, DEVICE_ID)
-        runtime_config["poll_seconds"] = float(
-            result.get("poll_seconds", runtime_config["poll_seconds"])
-        )
-        runtime_config["heartbeat_seconds"] = int(
-            result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"])
-        )
-        runtime_config["status_seconds"] = int(
-            result.get("status_seconds", runtime_config["status_seconds"])
-        )
+        runtime_config["poll_seconds"] = float(result.get("poll_seconds", runtime_config["poll_seconds"]))
+        runtime_config["heartbeat_seconds"] = int(result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"]))
+        runtime_config["status_seconds"] = 1
     except Exception as e:
         send_or_queue_log("warning", "config_refresh_failed", f"Failed to refresh config: {e}")
         quiet_print("config", f"[CONFIG] using local defaults ({e})")
@@ -429,7 +152,6 @@ async def heartbeat_loop():
     while True:
         try:
             payload = build_heartbeat_payload()
-            payload["public_url"] = get_public_url()
             await asyncio.to_thread(api.heartbeat, payload)
         except Exception as e:
             send_or_queue_log("warning", "heartbeat_failed", f"Heartbeat failed: {e}")
@@ -441,7 +163,6 @@ async def heartbeat_loop():
 async def status_loop():
     while True:
         payload = build_status_payload()
-        payload["public_url"] = get_public_url()
 
         try:
             await asyncio.to_thread(api.status, payload)
@@ -521,6 +242,7 @@ async def command_loop():
                 elif cmd == "camera_activate_raw":
                     try:
                         camera_service.activate("raw")
+                        _reset_uploaded_signature()
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -546,6 +268,7 @@ async def command_loop():
                 elif cmd == "camera_activate_detection":
                     try:
                         camera_service.activate("detection")
+                        _reset_uploaded_signature()
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -571,6 +294,7 @@ async def command_loop():
                 elif cmd == "camera_deactivate":
                     try:
                         camera_service.deactivate()
+                        _reset_uploaded_signature()
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -643,10 +367,11 @@ async def command_loop():
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "completed",
-                                "note": "Voice loop started",
+                                "note": f"RAG built and synced: {result}",
+                                "result": {**result, **rag_manager.stats()},
                             },
                         )
-                        quiet_print("voice_cmd", "[COMMAND] voice start")
+                        quiet_print("rag_cmd", f"[COMMAND] build_rag complete: {result}")
                     except Exception as e:
                         await asyncio.to_thread(
                             api.ack_command,
@@ -654,10 +379,10 @@ async def command_loop():
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "failed",
-                                "note": f"Voice start failed: {e}",
+                                "note": f"build_rag failed: {e}",
                             },
                         )
-                        quiet_print("voice_cmd", f"[COMMAND] voice start failed: {e}")
+                        quiet_print("rag_cmd", f"[COMMAND] build_rag failed: {e}")
 
                 elif cmd == "chat_prompt":
                     query = payload.get("query", "")
@@ -676,10 +401,11 @@ async def command_loop():
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "completed",
-                                "note": "Voice loop stopped",
+                                "note": "Chat answered",
+                                "result": {"answer": answer, "session_id": session_id},
                             },
                         )
-                        quiet_print("voice_cmd", "[COMMAND] voice stop")
+                        quiet_print("rag_cmd", f"[COMMAND] chat_prompt answered")
                     except Exception as e:
                         await asyncio.to_thread(
                             api.ack_command,
@@ -687,10 +413,9 @@ async def command_loop():
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "failed",
-                                "note": f"Voice stop failed: {e}",
+                                "note": f"chat_prompt failed: {e}",
                             },
                         )
-                        quiet_print("voice_cmd", f"[COMMAND] voice stop failed: {e}")
 
                 else:
                     await asyncio.to_thread(
@@ -713,7 +438,14 @@ async def command_loop():
 # -------------------------------------------------------------------
 # CAMERA UPLOAD BRIDGE
 # -------------------------------------------------------------------
+def _reset_uploaded_signature():
+    global _last_uploaded_signature
+    _last_uploaded_signature = None
+
+
 def upload_latest_frame_once():
+    global _last_uploaded_signature
+
     if not API_BASE_URL:
         return
 
@@ -726,6 +458,10 @@ def upload_latest_frame_once():
         return
 
     mode = camera_service.get_mode()
+    signature = f"{mode}:{len(frame)}:{frame[:32]!r}"
+
+    if signature == _last_uploaded_signature:
+        return
 
     url = f"{API_BASE_URL.rstrip('/')}/device/camera/frame"
     headers = {
@@ -737,16 +473,9 @@ def upload_latest_frame_once():
         "mode": mode,
     }
 
-    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=5)
-
-    if not resp.ok:
-        try:
-            detail = resp.text
-        except Exception:
-            detail = "<no body>"
-        raise RuntimeError(f"{resp.status_code} upload failed: {detail}")
-
-    quiet_print("camera_upload_ok", f"[CAMERA_UPLOAD] ok mode={mode} bytes={len(frame)}")
+    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=3)
+    resp.raise_for_status()
+    _last_uploaded_signature = signature
 
 
 async def camera_upload_loop():
@@ -756,7 +485,7 @@ async def camera_upload_loop():
         except Exception as e:
             quiet_print("camera_upload", f"[CAMERA_UPLOAD] failed: {e}")
 
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.10)
 
 
 # -------------------------------------------------------------------
@@ -801,18 +530,11 @@ async def lifespan(app_instance: FastAPI):
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
 
+    # Initialize RAG system (non-blocking — uses existing local DB if present)
     try:
         rag_manager.initialize()
     except Exception as e:
         quiet_print("rag", f"[RAG] init warning: {e}")
-
-    start_public_tunnel(local_port=AURA_PUBLIC_TUNNEL_PORT)
-
-    # give the tunnel a moment to print a URL, but don't block long
-    for _ in range(20):
-        if get_public_url():
-            break
-        await asyncio.sleep(0.25)
 
     try:
         await register_device()
@@ -827,27 +549,14 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(camera_upload_loop())
 
-    if voice_enabled:
-        try:
-            await start_voice_loop()
-        except Exception as e:
-            send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
-            quiet_print("voice", f"[VOICE] failed to start: {e}")
-
     quiet_print("startup", "[STARTUP] telemetry agent running")
     yield
 
     try:
-        await stop_voice_loop()
-    except Exception:
-        pass
-
-    try:
         camera_service.deactivate()
+        _reset_uploaded_signature()
     except Exception:
         pass
-
-    stop_public_tunnel()
 
 
 app.router.lifespan_context = lifespan
@@ -858,35 +567,14 @@ app.router.lifespan_context = lifespan
 # -------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    voice_running = bool(stt_task and not stt_task.done())
-    voice_loaded = bool(getattr(stt_service, "model", None)) if stt_service else False
-    voice_idle_seconds = None
-
-    if stt_service and hasattr(stt_service, "last_audio_activity_ts"):
-        try:
-            voice_idle_seconds = max(0.0, time.time() - float(stt_service.last_audio_activity_ts))
-        except Exception:
-            voice_idle_seconds = None
-
     return {
         "ok": True,
         "device_id": DEVICE_ID,
         "device_name": DEVICE_NAME,
         "device_type": DEVICE_TYPE,
         "db_name": LOCAL_DB_NAME,
-        "public_url": get_public_url(),
         "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
-    }
-
-
-@app.get("/public_url")
-async def public_url():
-    return {
-        "ok": True,
-        "public_url": get_public_url(),
-        "provider": AURA_PUBLIC_TUNNEL_PROVIDER if AURA_ENABLE_PUBLIC_TUNNEL else "",
-        "enabled": AURA_ENABLE_PUBLIC_TUNNEL,
     }
 
 
@@ -894,6 +582,7 @@ async def public_url():
 # RAG endpoints
 # -------------------------------------------------------------------
 from pydantic import BaseModel as _BaseModel
+from fastapi import Header as _Header
 
 
 class _ChatRequest(_BaseModel):
@@ -917,6 +606,7 @@ async def rag_stats():
 
 @app.post("/rag/load_db")
 async def rag_load_db(req: _SyncVectorsRequest):
+    """Download a pre-built vector DB from the website and activate it locally."""
     ok = await rag_manager.load_remote_db(req.db_name, api)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Failed to load DB '{req.db_name}'")
@@ -925,6 +615,7 @@ async def rag_load_db(req: _SyncVectorsRequest):
 
 @app.post("/rag/build")
 async def rag_build(req: _BuildRagRequest):
+    """Download documents from website, vectorize, and sync vectors back."""
     import tempfile
     import shutil as _shutil
 
@@ -944,6 +635,7 @@ async def rag_build(req: _BuildRagRequest):
 
 @app.post("/rag/chat")
 async def rag_chat(req: _ChatRequest):
+    """Run a RAG query using the local LightRAG system."""
     session_id = req.session_id or chat_manager.active_session_id
     if session_id != chat_manager.active_session_id:
         chat_manager.set_session(session_id)
@@ -964,11 +656,13 @@ async def rag_chat(req: _ChatRequest):
 # -------------------------------------------------------------------
 @app.get("/sessions")
 async def list_sessions():
+    """List all locally stored chat session IDs."""
     return {"sessions": chat_manager.list_local_sessions()}
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
+    """Get the conversation history for a local session."""
     prev = chat_manager.active_session_id
     chat_manager.set_session(session_id)
     history = chat_manager.get_history()
@@ -978,6 +672,7 @@ async def get_session(session_id: str):
 
 @app.post("/sessions/load/{session_id}")
 async def load_session_from_cloud(session_id: str):
+    """Load a session history from website backend into local session storage."""
     try:
         data = await asyncio.to_thread(api.get_chat_session, session_id)
         history = data.get("history", [])
@@ -989,56 +684,7 @@ async def load_session_from_cloud(session_id: str):
 
 @app.get("/status")
 async def status():
-    payload = build_status_payload()
-    payload["public_url"] = get_public_url()
-    return payload
-
-
-@app.get("/voice/status")
-async def voice_status():
-    voice_running = bool(stt_task and not stt_task.done())
-    voice_loaded = bool(getattr(stt_service, "model", None)) if stt_service else False
-    voice_idle_seconds = None
-
-    if stt_service and hasattr(stt_service, "last_audio_activity_ts"):
-        try:
-            voice_idle_seconds = max(0.0, time.time() - float(stt_service.last_audio_activity_ts))
-        except Exception:
-            voice_idle_seconds = None
-
-    return {
-        "ok": True,
-        "enabled": voice_enabled,
-        "running": voice_running,
-        "model_loaded": voice_loaded,
-        "device_index": stt_service.input_device if stt_service else None,
-        "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
-        "channels": stt_service.channels if stt_service else None,
-        "noise_floor": stt_service.noise_floor if stt_service else None,
-        "model_size": stt_service.model_size if stt_service else None,
-        "idle_seconds": voice_idle_seconds,
-        "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
-    }
-
-
-@app.post("/voice/start")
-async def voice_start():
-    await start_voice_loop()
-    return {
-        "ok": True,
-        "running": bool(stt_task and not stt_task.done()),
-        "model_loaded": bool(getattr(stt_service, "model", None)) if stt_service else False,
-    }
-
-
-@app.post("/voice/stop")
-async def voice_stop():
-    await stop_voice_loop()
-    return {
-        "ok": True,
-        "running": False,
-        "model_loaded": False,
-    }
+    return build_status_payload()
 
 
 @app.get("/camera/status")
@@ -1059,7 +705,9 @@ async def camera_frame():
     status = camera_service.get_status()
 
     if not status.get("enabled"):
-        raise HTTPException(status_code=409, detail="Camera is off")
+        camera_service.activate("raw")
+        _reset_uploaded_signature()
+        time.sleep(0.4)
 
     frame = camera_service.get_jpeg()
     if frame is None:
@@ -1080,6 +728,7 @@ async def camera_frame():
 async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
     try:
         camera_service.activate(mode)
+        _reset_uploaded_signature()
         return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to activate camera: {e}")
@@ -1088,6 +737,7 @@ async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$"))
 @app.post("/camera/deactivate")
 async def deactivate_camera():
     camera_service.deactivate()
+    _reset_uploaded_signature()
     return {"ok": True, "enabled": False}
 
 
@@ -1096,9 +746,11 @@ async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
     status = camera_service.get_status()
 
     if not status.get("enabled"):
-        raise HTTPException(status_code=409, detail="Camera is off")
+        camera_service.activate(mode)
+    else:
+        camera_service.set_mode(mode)
 
-    camera_service.set_mode(mode)
+    _reset_uploaded_signature()
     return {"ok": True, "enabled": True, "mode": camera_service.get_mode()}
 
 
@@ -1108,10 +760,12 @@ async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
         status = camera_service.get_status()
 
         if not status.get("enabled"):
-            raise HTTPException(status_code=409, detail="Camera is off")
-
-        if camera_service.get_mode() != mode:
+            camera_service.activate(mode)
+            _reset_uploaded_signature()
+            time.sleep(0.4)
+        elif camera_service.get_mode() != mode:
             camera_service.set_mode(mode)
+            _reset_uploaded_signature()
             time.sleep(0.2)
 
         return StreamingResponse(
@@ -1124,8 +778,6 @@ async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
                 "Connection": "keep-alive",
             },
         )
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start camera stream: {e}")
 
