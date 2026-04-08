@@ -195,7 +195,7 @@ class RagManager:
                         raise RuntimeError("LightRAG is not initialized")
 
                     print(f"[RAG JOB] inserting '{filename}' into LightRAG")
-                    await asyncio.to_thread(self.rag_system.insert, text)
+                    await self.rag_system.ainsert(text)
                     print(f"[RAG JOB] inserted '{filename}' successfully")
 
                     processed_files.append(filename)
