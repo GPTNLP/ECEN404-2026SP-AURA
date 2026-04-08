@@ -182,3 +182,55 @@ def ack_device_command(
         "ok": True,
         "command": updated,
     }
+
+import time
+
+@router.post("/device/admin/chat")
+def chat_via_jetson(payload: DeviceCommandIn, request: Request):
+    _require_admin(request)
+
+    if payload.command != "chat_prompt":
+        raise HTTPException(status_code=400, detail="Only chat_prompt supported here")
+
+    commands = _load_commands()
+    now_ms = int(time.time() * 1000)
+    now_s = int(time.time())
+
+    command_id = f"{payload.device_id}-{now_ms}"
+
+    entry = {
+        "id": command_id,
+        "device_id": payload.device_id,
+        "command": "chat_prompt",
+        "payload": payload.payload or {},
+        "created_at": now_s,
+        "status": "pending",
+    }
+
+    commands.append(entry)
+    _save_commands(commands)
+
+    print(f"[CHAT] queued chat_prompt -> {command_id}")
+
+    # wait for response (poll for ack)
+    timeout = 20  # seconds
+    start = time.time()
+
+    while time.time() - start < timeout:
+        commands = _load_commands()
+
+        for item in commands:
+            if item.get("id") == command_id:
+                if item.get("status") in ("completed", "failed"):
+                    result = item.get("result") or {}
+                    answer = result.get("answer", "")
+
+                    return {
+                        "ok": True,
+                        "answer": answer,
+                        "status": item.get("status"),
+                    }
+
+        time.sleep(0.3)
+
+    raise HTTPException(status_code=504, detail="Jetson did not respond in time")
