@@ -459,6 +459,19 @@ def create_database(req: CreateDBRequest, request: Request):
     return {"ok": True, "db": req.name, "config": cfg}
 
 
+@router.delete("/api/databases/{db_name}")
+def delete_database(db_name: str, request: Request):
+    require_admin(request)
+    _raise_if_build_in_progress("delete")
+
+    db_dir = _db_dir(db_name)
+    if not os.path.exists(db_dir):
+        raise HTTPException(status_code=404, detail="Database not found")
+
+    shutil.rmtree(db_dir, ignore_errors=True)
+    return {"ok": True, "deleted": db_name}
+
+
 @router.get("/api/databases/{db_name}/config")
 def get_database_config(db_name: str, request: Request):
     require_any_user(request)

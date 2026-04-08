@@ -22,6 +22,7 @@ ALLOWED_COMMANDS = {
     "build_rag",
     "chat_prompt",
     "sync_vectors",
+    "delete_vectors",
     "pitch",
     "yaw",
     "camera_activate_raw",
@@ -183,7 +184,6 @@ def ack_device_command(
         "command": updated,
     }
 
-import time
 
 @router.post("/device/admin/chat")
 def chat_via_jetson(payload: DeviceCommandIn, request: Request):
@@ -212,8 +212,7 @@ def chat_via_jetson(payload: DeviceCommandIn, request: Request):
 
     print(f"[CHAT] queued chat_prompt -> {command_id}")
 
-    # wait for response (poll for ack)
-    timeout = 60  # seconds
+    timeout = 60
     start = time.time()
 
     while time.time() - start < timeout:
@@ -229,6 +228,8 @@ def chat_via_jetson(payload: DeviceCommandIn, request: Request):
                         "ok": True,
                         "answer": answer,
                         "status": item.get("status"),
+                        "note": item.get("note"),
+                        "result": result,
                     }
 
         time.sleep(0.3)

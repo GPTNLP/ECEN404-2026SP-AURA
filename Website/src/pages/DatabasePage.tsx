@@ -7,9 +7,9 @@ const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
   "http://127.0.0.1:9000";
 
-const JETSON_BASE =
-  (import.meta.env.VITE_JETSON_API_BASE as string | undefined)?.trim() ||
-  "";
+const DEVICE_ID =
+  (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() ||
+  "jetson-001";
 
 type TreeNode = {
   name: string;
@@ -60,11 +60,6 @@ function basename(path: string) {
   const p = (path || "").replaceAll("\\", "/").replace(/\/+$/, "");
   const i = p.lastIndexOf("/");
   return i >= 0 ? p.slice(i + 1) : p;
-}
-
-function humanCount(n: number) {
-  if (!Number.isFinite(n)) return "-";
-  return `${n}`;
 }
 
 function splitPath(path: string) {
@@ -121,7 +116,8 @@ export default function DatabasePage() {
     | "delete"
     | "db-create"
     | "db-build"
-    | "db-stats"
+    | "db-delete"
+    | "db-load"
   >("");
 
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -143,10 +139,8 @@ export default function DatabasePage() {
   const [newDbName, setNewDbName] = useState<string>("");
 
   const [folderChecks, setFolderChecks] = useState<Record<string, boolean>>({});
-  const [dbStats, setDbStats] = useState<any>(null);
-
-  const [jetsonPushStatus, setJetsonPushStatus] = useState("");
-  const [jetsonPushBusy, setJetsonPushBusy] = useState(false);
+  const [buildMonitorActive, setBuildMonitorActive] = useState(false);
+  const [buildStatus, setBuildStatus] = useState<BuildStatus>("idle");
 
   const [treeSearch, setTreeSearch] = useState("");
   const [contentsSearch, setContentsSearch] = useState("");
@@ -157,8 +151,6 @@ export default function DatabasePage() {
     y: 0,
     target: null,
   });
-
-  const [buildMonitorActive, setBuildMonitorActive] = useState(false);
 
   const renameRef = useRef<HTMLInputElement | null>(null);
   const moveRef = useRef<HTMLSelectElement | null>(null);
@@ -217,9 +209,45 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
       setDbList(list);
-      if (!activeDb && list.length) setActiveDb(list[0]);
+      setActiveDb((prev) => {
+        if (prev && list.includes(prev)) return prev;
+        return list[0] || "";
+      });
     } catch {
       // ignore
+    }
+  };
+
+  const pollBuildStatus = async (name: string) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/databases/${encodeURIComponent(name)}/stats`,
+        { headers: authHeaders }
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || "Failed to poll build status");
+
+      const build = data?.build || {};
+      const nextStatus = String(build?.status || "") as BuildStatus;
+      const msg = String(build?.message || "");
+
+      setBuildStatus(nextStatus || "idle");
+
+      if (nextStatus === "failed") {
+        setStatus(`❌ ${msg || "Jetson build failed."}`);
+        return true;
+      }
+
+      if (nextStatus === "synced") {
+        setStatus(`✅ Jetson synced "${name}" back to website.`);
+        return true;
+      }
+
+      setStatus(`⏳ ${prettyBuildStatus(nextStatus)}${msg ? ` — ${msg}` : ""}`);
+      return isTerminalBuildStatus(nextStatus);
+    } catch (e: any) {
+      setStatus(`❌ ${e?.message || String(e)}`);
+      return false;
     }
   };
 
@@ -251,6 +279,32 @@ export default function DatabasePage() {
       window.removeEventListener("keydown", onKey);
     };
   }, [ctx.open]);
+
+  useEffect(() => {
+    if (!buildMonitorActive || !activeDb) return;
+
+    let stopped = false;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      const done = await pollBuildStatus(activeDb);
+      if (stopped) return;
+
+      if (done) {
+        setBuildMonitorActive(false);
+        return;
+      }
+
+      timer = window.setTimeout(poll, 2000);
+    };
+
+    poll();
+
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [buildMonitorActive, activeDb, authHeaders]);
 
   const getDirNode = (dirPath: string) => {
     if (!tree || tree.type !== "dir") return null;
@@ -559,98 +613,6 @@ export default function DatabasePage() {
     }
   };
 
-  const loadDbStats = async (name: string) => {
-    if (!name) return;
-    setBusy("db-stats");
-    try {
-      const res = await fetch(
-        `${API_BASE}/api/databases/${encodeURIComponent(name)}/stats`,
-        { headers: authHeaders }
-      );
-      const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.detail || "Stats failed");
-      setDbStats(data);
-    } catch {
-      setDbStats(null);
-    } finally {
-      setBusy("");
-    }
-  };
-
-  useEffect(() => {
-    if (activeDb) loadDbStats(activeDb);
-  }, [activeDb]);
-
-  useEffect(() => {
-    if (!buildMonitorActive || !activeDb) return;
-
-    let stopped = false;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      try {
-        const res = await fetch(
-          `${API_BASE}/api/databases/${encodeURIComponent(activeDb)}/stats`,
-          { headers: authHeaders }
-        );
-        const data = await res.json().catch(() => null);
-        if (!res.ok) throw new Error(data?.detail || "Failed to poll build status");
-
-        if (stopped) return;
-
-        setDbStats(data);
-
-        const build = data?.build || {};
-        const buildStatus = String(build?.status || "") as BuildStatus;
-        const msg = String(build?.message || "");
-        const processedCount = build?.extra?.processed_count;
-        const skippedCount = build?.extra?.skipped_count;
-        const failedCount = build?.extra?.failed_count;
-        const savedFiles = Array.isArray(build?.saved_files) ? build.saved_files : [];
-
-        if (buildStatus === "failed") {
-          setStatus(`❌ ${msg || "Jetson build failed."}`);
-          setBuildMonitorActive(false);
-          return;
-        }
-
-        if (buildStatus === "synced") {
-          setStatus(
-            `✅ Synced "${activeDb}" back from Jetson. Saved files: ${savedFiles.length ? savedFiles.join(", ") : "none"}`
-          );
-          setBuildMonitorActive(false);
-          return;
-        }
-
-        if (buildStatus === "completed") {
-          setStatus(
-            `✅ Jetson finished "${activeDb}". Processed: ${processedCount ?? "?"}, skipped: ${skippedCount ?? "?"}, failed: ${failedCount ?? "?"}. Waiting for sync…`
-          );
-        } else {
-          setStatus(`⏳ ${prettyBuildStatus(buildStatus)}${msg ? ` — ${msg}` : ""}`);
-        }
-
-        if (isTerminalBuildStatus(buildStatus)) {
-          setBuildMonitorActive(false);
-          return;
-        }
-
-        timer = window.setTimeout(poll, 2000);
-      } catch (e: any) {
-        if (stopped) return;
-        setStatus(`❌ ${e?.message || String(e)}`);
-        timer = window.setTimeout(poll, 3000);
-      }
-    };
-
-    poll();
-
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [buildMonitorActive, activeDb, authHeaders]);
-
   const doCreateDb = async () => {
     const name = newDbName.trim();
     if (!name) {
@@ -680,7 +642,6 @@ export default function DatabasePage() {
       setActiveDb(name);
       setNewDbName("");
       await refreshDatabases();
-      await loadDbStats(name);
     } catch (e: any) {
       setStatus(`❌ ${e?.message || String(e)}`);
     } finally {
@@ -717,8 +678,8 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Build request failed");
 
+      setBuildStatus("pending");
       setStatus(`⏳ Queued "${activeDb}" on Jetson…`);
-      await loadDbStats(activeDb);
       setBuildMonitorActive(true);
     } catch (e: any) {
       setStatus(`❌ ${e?.message || String(e)}`);
@@ -727,26 +688,104 @@ export default function DatabasePage() {
     }
   };
 
-  const pushDbToJetson = async () => {
+  const doLoadDbOnJetson = async () => {
     if (!activeDb) {
-      setJetsonPushStatus("Select a database first.");
+      setStatus("❌ Choose a database first.");
       return;
     }
-    setJetsonPushBusy(true);
-    setJetsonPushStatus("Sending to Jetson…");
+
+    setBusy("db-load");
+    setStatus(`Loading "${activeDb}" on Jetson…`);
     try {
-      const res = await fetch(`${JETSON_BASE}/rag/load_db`, {
+      const headers = new Headers(authHeaders);
+      headers.set("Content-Type", "application/json");
+
+      const res = await fetch(`${API_BASE}/device/admin/command`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ db_name: activeDb }),
+        headers,
+        body: JSON.stringify({
+          device_id: DEVICE_ID,
+          command: "sync_vectors",
+          payload: {
+            db_name: activeDb,
+          },
+        }),
       });
+
       const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.detail || "Push failed");
-      setJetsonPushStatus(`Loaded "${activeDb}" on Jetson`);
+      if (!res.ok) throw new Error(data?.detail || "Failed to queue Jetson load");
+
+      localStorage.setItem("aura_loaded_db", activeDb);
+      window.dispatchEvent(new Event("aura:loaded-db"));
+
+      setStatus(`✅ Queued "${activeDb}" to load on Jetson.`);
     } catch (e: any) {
-      setJetsonPushStatus(`Failed: ${e?.message || String(e)}`);
+      setStatus(`❌ ${e?.message || String(e)}`);
     } finally {
-      setJetsonPushBusy(false);
+      setBusy("");
+    }
+  };
+
+  const doDeleteDb = async () => {
+    if (!activeDb) {
+      setStatus("❌ Choose a database first.");
+      return;
+    }
+
+    const ok = window.confirm(
+      `Delete "${activeDb}" from the website and queue deletion on the Jetson too?`
+    );
+    if (!ok) return;
+
+    setBusy("db-delete");
+    setStatus(`Deleting "${activeDb}"…`);
+
+    try {
+      const deleteRes = await fetch(
+        `${API_BASE}/api/databases/${encodeURIComponent(activeDb)}`,
+        {
+          method: "DELETE",
+          headers: authHeaders,
+        }
+      );
+      const deleteData = await deleteRes.json().catch(() => null);
+      if (!deleteRes.ok) {
+        throw new Error(deleteData?.detail || "Website DB delete failed");
+      }
+
+      const headers = new Headers(authHeaders);
+      headers.set("Content-Type", "application/json");
+
+      const cmdRes = await fetch(`${API_BASE}/device/admin/command`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          device_id: DEVICE_ID,
+          command: "delete_vectors",
+          payload: {
+            db_name: activeDb,
+          },
+        }),
+      });
+
+      const cmdData = await cmdRes.json().catch(() => null);
+      if (!cmdRes.ok) {
+        throw new Error(cmdData?.detail || "Jetson delete queue failed");
+      }
+
+      const loadedDb = localStorage.getItem("aura_loaded_db") || "";
+      if (loadedDb === activeDb) {
+        localStorage.removeItem("aura_loaded_db");
+        window.dispatchEvent(new Event("aura:loaded-db"));
+      }
+
+      const deletedName = activeDb;
+      await refreshDatabases();
+      setStatus(`✅ Deleted "${deletedName}" from website and queued Jetson deletion.`);
+    } catch (e: any) {
+      setStatus(`❌ ${e?.message || String(e)}`);
+    } finally {
+      setBusy("");
     }
   };
 
@@ -806,12 +845,6 @@ export default function DatabasePage() {
     toggleInclude(ctxTarget.path);
     setCtx({ open: false, x: 0, y: 0, target: null });
   };
-
-  const build = dbStats?.build || {};
-  const buildStatus = String(build?.status || "") as BuildStatus;
-  const vectorFiles = Array.isArray(dbStats?.stats?.vector_files_present)
-    ? dbStats.stats.vector_files_present
-    : [];
 
   return (
     <div className="page-shell">
@@ -1121,12 +1154,8 @@ export default function DatabasePage() {
             <div className="db-panel-head">
               <div>
                 <div className="db-panel-title">Databases</div>
-                <div className="db-panel-sub">Create/build from included folders</div>
+                <div className="db-panel-sub">Create, build, load, and delete vector DBs</div>
               </div>
-
-              <button className="btn" disabled={busy !== ""} onClick={refreshDatabases}>
-                Refresh
-              </button>
             </div>
 
             <div className="db-box">
@@ -1153,6 +1182,9 @@ export default function DatabasePage() {
               <div className="db-mini">
                 Included folders: <b>{includeCount}</b>
               </div>
+              <div className="db-mini">
+                Build status: <b>{prettyBuildStatus(buildStatus)}</b>
+              </div>
             </div>
 
             <div className="db-box">
@@ -1172,76 +1204,40 @@ export default function DatabasePage() {
 
             <div className="db-box">
               <div className="db-box-title">Build / Rebuild</div>
-              <button className="btn btn-primary" disabled={busy !== "" || !activeDb || buildMonitorActive} onClick={doBuildDb} style={{ width: "100%" }}>
+              <button
+                className="btn btn-primary"
+                disabled={busy !== "" || !activeDb || buildMonitorActive}
+                onClick={doBuildDb}
+                style={{ width: "100%" }}
+              >
                 {busy === "db-build"
                   ? "Queueing…"
                   : buildMonitorActive
                   ? "Build Running…"
                   : `Build "${activeDb || "DB"}"`}
               </button>
-              <div className="db-mini">Builds on the Jetson from included folders.</div>
-              <div className="db-mini">This waits for Jetson status updates now.</div>
             </div>
 
-            {dbStats && (
-              <div className="db-box">
-                <div className="db-box-title">Stats</div>
-                <div className="db-stat">engine: <b>{dbStats?.stats?.engine || "-"}</b></div>
-                <div className="db-stat">build status: <b>{prettyBuildStatus(buildStatus)}</b></div>
-                <div className="db-stat">
-                  vector files: <b>{humanCount(dbStats?.stats?.vector_file_count ?? 0)}</b>
-                </div>
-                <div className="db-stat">
-                  file: <span className="db-mono db-wrap">{dbStats?.stats?.vdb_path || "-"}</span>
-                </div>
-                <div className="db-stat">
-                  model: <b>{dbStats?.config?.llm_model || "-"}</b> · embed: <b>{dbStats?.config?.embed_model || "-"}</b>
-                </div>
-
-                {vectorFiles.length > 0 && (
-                  <div className="db-stat">
-                    present: <span className="db-mono db-wrap">{vectorFiles.join(", ")}</span>
-                  </div>
-                )}
-
-                {build?.message ? (
-                  <div className="db-stat">
-                    message: <span className="db-mono db-wrap">{build.message}</span>
-                  </div>
-                ) : null}
-              </div>
-            )}
-
             <div className="db-box">
-              <div className="db-box-title">Push to Jetson</div>
-              <div className="db-mini db-mini-wrap" style={{ marginBottom: 8 }}>
-                Sends the selected vector DB from this repository directly to the Jetson.
-                This only works when <span className="db-mono">VITE_JETSON_API_BASE</span> points to a browser-reachable Jetson endpoint that serves <span className="db-mono">/rag/load_db</span>.
-              </div>
               <button
                 className="btn btn-primary"
                 style={{ width: "100%" }}
-                disabled={jetsonPushBusy || !activeDb}
-                onClick={pushDbToJetson}
+                disabled={busy !== "" || !activeDb}
+                onClick={doLoadDbOnJetson}
               >
-                {jetsonPushBusy ? "Sending…" : `Push "${activeDb || "DB"}" to Jetson`}
+                {busy === "db-load" ? "Loading…" : `Push "${activeDb || "DB"}" to Jetson`}
               </button>
-              <div className="db-mini db-mini-wrap" style={{ marginTop: 8 }}>
-                Current Jetson base: <span className="db-mono db-wrap">{JETSON_BASE || "(not set)"}</span>
-              </div>
-              {jetsonPushStatus && (
-                <div
-                  className="db-mini"
-                  style={{
-                    marginTop: 6,
-                    color: jetsonPushStatus.startsWith("Failed") || jetsonPushStatus.startsWith("Select")
-                      ? "var(--status-bad)"
-                      : "var(--status-good)",
-                  }}
-                >
-                  {jetsonPushStatus}
-                </div>
-              )}
+            </div>
+
+            <div className="db-box">
+              <button
+                className="btn"
+                style={{ width: "100%" }}
+                disabled={busy !== "" || !activeDb}
+                onClick={doDeleteDb}
+              >
+                {busy === "db-delete" ? "Deleting…" : `Delete "${activeDb || "DB"}"`}
+              </button>
             </div>
 
             <div className="status-box mono" style={{ fontSize: 13, opacity: 0.95, marginTop: 14 }}>

@@ -317,6 +317,92 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
+                elif cmd == "sync_vectors":
+                    db_name = (payload.get("db_name") or LOCAL_DB_NAME or "").strip()
+                    try:
+                        print(f"[JETSON DB] loading database '{db_name}' from website")
+                        ok = await rag_manager.load_remote_db(db_name, api)
+                        status_note = f"Loaded vector DB '{db_name}'" if ok else f"Failed to load '{db_name}'"
+
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed" if ok else "failed",
+                                "note": status_note,
+                                "result": {
+                                    **rag_manager.stats(),
+                                    "db_name": db_name,
+                                },
+                            },
+                        )
+
+                        if ok:
+                            print(f"[JETSON DB] loaded database '{db_name}' successfully")
+                        else:
+                            print(f"[JETSON DB] failed loading database '{db_name}'")
+                    except Exception as e:
+                        print(f"[JETSON DB] sync_vectors failed for '{db_name}': {e}")
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"sync_vectors failed: {e}",
+                            },
+                        )
+
+                elif cmd == "delete_vectors":
+                    db_name = (payload.get("db_name") or "").strip()
+
+                    try:
+                        if not db_name:
+                            raise RuntimeError("delete_vectors missing db_name")
+
+                        db_dir = rag_manager.get_db_dir(db_name)
+
+                        print(f"[JETSON DB] deleting database '{db_name}' from Jetson")
+
+                        if db_dir.exists():
+                            import shutil
+                            shutil.rmtree(db_dir, ignore_errors=True)
+
+                        if rag_manager.active_db_name == db_name:
+                            rag_manager.rag_system = None
+                            rag_manager.active_db_name = None
+                            rag_manager.active_db_path = None
+                            print(f"[JETSON DB] active database '{db_name}' cleared from memory")
+
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": f"Deleted DB '{db_name}' from Jetson",
+                                "result": {
+                                    "db_name": db_name,
+                                    "deleted": True,
+                                },
+                            },
+                        )
+
+                        print(f"[JETSON DB] deleted database '{db_name}' from Jetson")
+
+                    except Exception as e:
+                        print(f"[JETSON DB] delete_vectors failed for '{db_name}': {e}")
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"delete_vectors failed: {e}",
+                            },
+                        )
+
                 elif cmd == "chat_prompt":
                     print(f"[CHAT] received command: {payload}")
 
@@ -328,7 +414,6 @@ async def command_loop():
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
-                        # only load DB if needed
                         if db_name:
                             if rag_manager.active_db_name != db_name or rag_manager.rag_system is None:
                                 print(f"[CHAT] loading DB: {db_name}")
@@ -384,6 +469,7 @@ async def command_loop():
                                 "note": f"chat_prompt failed: {e}",
                             },
                         )
+
                 else:
                     await asyncio.to_thread(
                         api.ack_command,
@@ -674,9 +760,9 @@ async def rag_chat(req: _ChatRequest):
     if session_id != chat_manager.active_session_id:
         chat_manager.set_session(session_id)
 
-    chat_manager.add_message("user", req.query, api)
+    chat_manager.add_message("user", req.query, api, DEVICE_ID)
     answer = await rag_manager.query(req.query)
-    chat_manager.add_message("assistant", answer, api)
+    chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
     return {
         "ok": True,

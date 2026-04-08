@@ -4,7 +4,6 @@ import { useAuth } from "../services/authService";
 type ChatMsg = {
   role: "user" | "ai" | "error";
   content: string;
-  sources?: string[];
 };
 
 type ChatResponse = {
@@ -25,8 +24,7 @@ export default function SimulatorPage() {
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [statusText, setStatusText] = useState<string>("");
 
-  const [databases, setDatabases] = useState<string[]>([]);
-  const [activeDb, setActiveDb] = useState<string>("");
+  const [loadedDb, setLoadedDb] = useState<string>(() => localStorage.getItem("aura_loaded_db") || "");
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -91,6 +89,20 @@ export default function SimulatorPage() {
   }, [history, loading]);
 
   useEffect(() => {
+    const refreshLoadedDb = () => {
+      setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
+    };
+
+    window.addEventListener("storage", refreshLoadedDb);
+    window.addEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
+
+    return () => {
+      window.removeEventListener("storage", refreshLoadedDb);
+      window.removeEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
     let timer: number | null = null;
     let cancelled = false;
 
@@ -130,45 +142,12 @@ export default function SimulatorPage() {
     };
   }, [API_URL]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/databases`, { headers: authHeaders });
-        const data = await res.json().catch(() => null);
-        const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
-
-        if (cancelled) return;
-
-        setDatabases(list);
-        setActiveDb((prev) => {
-          if (prev && list.includes(prev)) return prev;
-          return list[0] || "";
-        });
-      } catch {
-        if (!cancelled) {
-          setDatabases([]);
-          setActiveDb("");
-        }
-      }
-    };
-
-    void load();
-    const t = window.setInterval(load, 20000);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [API_URL, authHeaders]);
-
   const handleSearch = async () => {
     const q = query.trim();
     if (!q || loading) return;
 
-    if (!activeDb) {
-      setStatusText("No database selected. Create or build one on the Database page first.");
+    if (!loadedDb) {
+      setStatusText("No database is loaded on Jetson. Go to Database page and push one first.");
       return;
     }
 
@@ -195,9 +174,9 @@ export default function SimulatorPage() {
           device_id: DEVICE_ID,
           command: "chat_prompt",
           payload: {
-            db_name: activeDb,
+            db_name: loadedDb,
             query: q,
-            session_id: `${user?.email || "anon"}::${activeDb}`,
+            session_id: `${user?.email || "anon"}::${loadedDb}`,
           },
         }),
         signal: controller.signal,
@@ -229,7 +208,7 @@ export default function SimulatorPage() {
         response_preview: answer.slice(0, 600),
         latency_ms: latency,
         meta: {
-          db: activeDb,
+          db: loadedDb,
           device_id: DEVICE_ID,
           command_status: data?.status || "unknown",
         },
@@ -246,7 +225,7 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: msg.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb, device_id: DEVICE_ID },
+        meta: { db: loadedDb, device_id: DEVICE_ID },
       });
     } finally {
       setLoading(false);
@@ -313,10 +292,24 @@ export default function SimulatorPage() {
               >
                 Device: {DEVICE_ID}
               </span>
+
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "4px 10px",
+                  borderRadius: 999,
+                  border: "1px solid var(--card-border)",
+                  background: "color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft))",
+                  color: "var(--muted-text)",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                }}
+              >
+                Loaded DB: {loadedDb || "(none)"}
+              </span>
             </div>
 
             <p style={{ margin: "6px 0 0", color: "var(--muted-text)", fontSize: 13 }}>
-              Pick a database and ask questions.
+              Ask questions using the database currently loaded from the Database page.
             </p>
           </div>
 
@@ -340,65 +333,18 @@ export default function SimulatorPage() {
           </span>
         </div>
 
-        <div
-          style={{
-            padding: 14,
-            borderBottom: "1px solid var(--card-border)",
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <div style={{ fontSize: 12, color: "var(--muted-text)", fontWeight: 900 }}>Database</div>
-
-            <select
-              value={activeDb}
-              onChange={(e) => setActiveDb(e.target.value)}
-              style={{
-                minWidth: 260,
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--card-border)",
-                background: "var(--card-bg)",
-                color: "var(--text)",
-                fontWeight: 800,
-              }}
-              disabled={databases.length === 0}
-            >
-              {databases.length === 0 ? (
-                <option value="">No databases found</option>
-              ) : (
-                databases.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))
-              )}
-            </select>
-
-            <span style={{ fontSize: 12, color: "var(--muted-text)" }}>
-              {databases.length ? `${databases.length} available` : "Create one in Database page"}
-            </span>
+        {statusText && (
+          <div
+            style={{
+              padding: 14,
+              borderBottom: "1px solid var(--card-border)",
+              color: "var(--muted-text)",
+              fontSize: 13,
+            }}
+          >
+            {statusText}
           </div>
-
-          {statusText && (
-            <div
-              style={{
-                marginLeft: "auto",
-                padding: "10px 12px",
-                borderRadius: 12,
-                border: "1px solid var(--card-border)",
-                background: "color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft))",
-                color: "var(--muted-text)",
-                fontSize: 13,
-              }}
-            >
-              {statusText}
-            </div>
-          )}
-        </div>
+        )}
 
         <div
           ref={scrollRef}
@@ -413,8 +359,12 @@ export default function SimulatorPage() {
             <div style={{ textAlign: "center", color: "var(--muted-text)", padding: "70px 16px" }}>
               <div style={{ fontSize: 14, fontWeight: 900, marginBottom: 8 }}>Ready.</div>
               <div style={{ fontSize: 13, maxWidth: 680, margin: "0 auto" }}>
-                Choose a database above, then ask something like:
-                <span style={{ fontFamily: "monospace" }}> “Explain Ohm’s law with units.”</span>
+                {loadedDb
+                  ? `Using ${loadedDb}. Ask something like:`
+                  : "Go to Database page and push a DB to Jetson first."}
+                {loadedDb ? (
+                  <span style={{ fontFamily: "monospace" }}> “Explain Ohm’s law with units.”</span>
+                ) : null}
               </div>
             </div>
           )}
@@ -499,8 +449,8 @@ export default function SimulatorPage() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={activeDb ? `Ask ${activeDb}…` : "Create a database first…"}
-            disabled={loading}
+            placeholder={loadedDb ? `Ask ${loadedDb}…` : "Push a database from Database page first…"}
+            disabled={loading || !loadedDb}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -520,7 +470,7 @@ export default function SimulatorPage() {
 
           <button
             onClick={() => void handleSearch()}
-            disabled={loading || !query.trim() || !activeDb}
+            disabled={loading || !query.trim() || !loadedDb}
             style={{
               padding: "12px 16px",
               borderRadius: 12,
@@ -528,8 +478,8 @@ export default function SimulatorPage() {
               background: "var(--accent)",
               color: "white",
               fontWeight: 900,
-              cursor: loading || !query.trim() || !activeDb ? "not-allowed" : "pointer",
-              opacity: loading || !query.trim() || !activeDb ? 0.6 : 1,
+              cursor: loading || !query.trim() || !loadedDb ? "not-allowed" : "pointer",
+              opacity: loading || !query.trim() || !loadedDb ? 0.6 : 1,
               boxShadow: "var(--shadow)",
             }}
           >
