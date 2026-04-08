@@ -347,6 +347,7 @@ async def command_loop():
                 elif cmd == "chat_prompt":
                     print(f"[CHAT] received command: {payload}")
 
+                    db_name = (payload.get("db_name") or LOCAL_DB_NAME or "").strip()
                     query = payload.get("query", "")
                     session_id = payload.get("session_id", chat_manager.active_session_id)
 
@@ -354,9 +355,16 @@ async def command_loop():
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
+                        # Make sure the requested DB is actually active before querying.
+                        if db_name and rag_manager.active_db_name != db_name:
+                            print(f"[CHAT] loading DB: {db_name}")
+                            ok = await rag_manager.load_remote_db(db_name, api)
+                            if not ok:
+                                raise RuntimeError(f"Failed to load DB '{db_name}'")
+
                         chat_manager.add_message("user", query, api, DEVICE_ID)
 
-                        print(f"[CHAT] running RAG query: {query}")
+                        print(f"[CHAT] running RAG query on db='{rag_manager.active_db_name}': {query}")
 
                         answer = await rag_manager.query(query)
 
@@ -378,6 +386,7 @@ async def command_loop():
                             "result": {
                                 "answer": answer,
                                 "session_id": session_id,
+                                "db_name": rag_manager.active_db_name,
                             },
                         }
 

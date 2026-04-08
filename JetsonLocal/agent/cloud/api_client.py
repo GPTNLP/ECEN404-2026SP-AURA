@@ -228,14 +228,22 @@ class ApiClient:
         r.raise_for_status()
         return r.json()
 
-    def sync_chat_log(self, log_secret: str, log_data: dict) -> None:
+    def sync_chat_log(self, device_id: str, log_data: dict) -> None:
+        """
+        Best-effort chat sync.
+        Kept non-fatal so chat still works even if the website log endpoint shape changes.
+        """
         url = self._url("/logs/ingest")
         headers = {
-            "X-LOG-SECRET": log_secret,
+            "X-Device-Secret": self.secret,
             "Content-Type": "application/json",
         }
+        payload = {
+            "device_id": device_id,
+            **(log_data or {}),
+        }
         try:
-            self.session.post(url, headers=headers, json=log_data, timeout=5.0)
+            self.session.post(url, headers=headers, json=payload, timeout=5.0)
         except Exception:
             pass
 
