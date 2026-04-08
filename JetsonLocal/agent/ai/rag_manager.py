@@ -195,7 +195,13 @@ class RagManager:
                         raise RuntimeError("LightRAG is not initialized")
 
                     print(f"[RAG JOB] inserting '{filename}' into LightRAG")
-                    await self.rag_system.ainsert(text)
+                    await self.rag_system.ainsert(
+                        text,
+                        meta={
+                            "source": rel_path,
+                            "filename": filename,
+                        },
+                    )
                     print(f"[RAG JOB] inserted '{filename}' successfully")
 
                     processed_files.append(filename)
@@ -223,6 +229,12 @@ class RagManager:
                 skipped_files=skipped_files,
                 failed_files=failed_files,
             )
+
+            if self.rag_system is None:
+                raise RuntimeError("LightRAG became unavailable before flush")
+
+            print("[RAG JOB] flushing vector DB files to disk")
+            await asyncio.to_thread(self.rag_system.flush)
 
             print("[RAG JOB] deleting temporary PDFs from Jetson")
             shutil.rmtree(temp_pdf_dir, ignore_errors=True)

@@ -1,4 +1,3 @@
-# backend/lightrag_local.py
 from __future__ import annotations
 
 import os
@@ -17,25 +16,25 @@ from rank_bm25 import BM25Okapi
 # ---------------------------
 # Tunables (env override)
 # ---------------------------
-AURA_OLLAMA_TIMEOUT_S = float(os.getenv("AURA_OLLAMA_TIMEOUT_S", "180"))  # backend->ollama
-AURA_NUM_PREDICT = int(os.getenv("AURA_NUM_PREDICT", "160"))             # fewer tokens = faster
-AURA_NUM_CTX = int(os.getenv("AURA_NUM_CTX", "2048"))                    # smaller ctx = faster
+AURA_OLLAMA_TIMEOUT_S = float(os.getenv("AURA_OLLAMA_TIMEOUT_S", "180"))
+AURA_NUM_PREDICT = int(os.getenv("AURA_NUM_PREDICT", "160"))
+AURA_NUM_CTX = int(os.getenv("AURA_NUM_CTX", "2048"))
 AURA_TEMPERATURE = float(os.getenv("AURA_TEMPERATURE", "0.2"))
-AURA_NUM_THREAD = int(os.getenv("AURA_NUM_THREAD", "0"))                 # 0 = let ollama decide
-AURA_KEEP_ALIVE = os.getenv("AURA_KEEP_ALIVE", "10m")                    # keep model warm
+AURA_NUM_THREAD = int(os.getenv("AURA_NUM_THREAD", "0"))
+AURA_KEEP_ALIVE = os.getenv("AURA_KEEP_ALIVE", "10m")
 
-# RAG context size (this matters a LOT for speed)
 MAX_CTX_CHARS = int(os.getenv("AURA_MAX_CTX_CHARS", "6000"))
-# Retrieval
 DEFAULT_TOP_K = int(os.getenv("AURA_TOP_K", "4"))
-
-# BM25 rebuild cadence (speeds up indexing/build)
 BM25_REBUILD_EVERY = int(os.getenv("AURA_BM25_REBUILD_EVERY", "50"))
+
+# Important for avoiding Ollama embed 500s on large PDFs
+AURA_INSERT_CHUNK_SIZE = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "2200"))
+AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "250"))
 
 
 @dataclass
 class QueryParam:
-    mode: str = "hybrid"   # "vector" | "bm25" | "hybrid"
+    mode: str = "hybrid"
     top_k: int = DEFAULT_TOP_K
 
 
@@ -85,6 +84,27 @@ def _tokenize(s: str) -> List[str]:
     return out
 
 
+def _chunk_text(text: str, max_chars: int = AURA_INSERT_CHUNK_SIZE, overlap: int = AURA_INSERT_CHUNK_OVERLAP) -> List[str]:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+
+    chunks: List[str] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        j = min(n, i + max_chars)
+        chunk = text[i:j].strip()
+        if chunk:
+            chunks.append(chunk)
+        if j >= n:
+            break
+        i = max(0, j - overlap)
+
+    return chunks
+
+
 class OllamaClient:
     def __init__(self, base_url: str, embed_model: str, llm_model: str):
         self.base_url = (base_url or "http://127.0.0.1:11434").rstrip("/")
@@ -104,7 +124,7 @@ class OllamaClient:
             raw = resp.read().decode("utf-8", errors="ignore")
             return json.loads(raw) if raw else {}
 
-    async def embed(self, text: str, timeout_s: float = 30.0) -> np.ndarray:
+    async def embed(self, text: str, timeout_s: float = 60.0) -> np.ndarray:
         payload = {"model": self.embed_model, "prompt": text}
         try:
             out = await asyncio.to_thread(self._post_json, "/api/embeddings", payload, timeout_s)
@@ -148,9 +168,11 @@ class OllamaClient:
 class LightRAG:
     """
     Persistent store in working_dir:
-      - meta.json         (rows: id/text/meta)
-      - embeddings.npy    (float32 normalized)
-      - faiss.index       (IndexFlatIP over normalized vectors)
+      - meta.json
+      - db.json
+      - entities.json
+      - embeddings.npy
+      - faiss.index
     """
 
     def __init__(
@@ -164,6 +186,8 @@ class LightRAG:
         _safe_mkdir(self.working_dir)
 
         self.meta_path = os.path.join(self.working_dir, "meta.json")
+        self.db_json_path = os.path.join(self.working_dir, "db.json")
+        self.entities_path = os.path.join(self.working_dir, "entities.json")
         self.emb_path = os.path.join(self.working_dir, "embeddings.npy")
         self.index_path = os.path.join(self.working_dir, "faiss.index")
 
@@ -203,13 +227,34 @@ class LightRAG:
         self._inserts_since_bm25 = 0
 
     def flush(self):
-        # Ensure BM25 is rebuilt before saving (so queries after restart are consistent)
         if self._bm25_tokens:
             self._bm25 = BM25Okapi(self._bm25_tokens)
 
         _save_json(self.meta_path, self._rows)
+
+        # Write db.json too since your website sync expects it
+        _save_json(
+            self.db_json_path,
+            {
+                "chunk_count": len(self._rows),
+                "updated_at_epoch": time.time(),
+                "updated_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "rows": self._rows,
+            },
+        )
+
+        # Placeholder entities file so sync_up can send it if wanted
+        _save_json(
+            self.entities_path,
+            {
+                "count": 0,
+                "entities": [],
+            },
+        )
+
         if self._emb is not None:
             np.save(self.emb_path, self._emb.astype(np.float32))
+
         if self._index is not None:
             faiss.write_index(self._index, self.index_path)
 
@@ -220,7 +265,7 @@ class LightRAG:
         self._bm25 = None
         self._bm25_tokens = []
         self._inserts_since_bm25 = 0
-        for p in [self.meta_path, self.emb_path, self.index_path]:
+        for p in [self.meta_path, self.db_json_path, self.entities_path, self.emb_path, self.index_path]:
             try:
                 if os.path.exists(p):
                     os.remove(p)
@@ -233,7 +278,7 @@ class LightRAG:
             "vdb_path": self.working_dir,
         }
 
-    async def ainsert(self, text: str, meta: Optional[Dict[str, Any]] = None):
+    async def _insert_one_chunk(self, text: str, meta: Optional[Dict[str, Any]] = None):
         meta = meta or {}
         emb = await self.client.embed(text)
         emb = _normalize(emb)
@@ -251,14 +296,28 @@ class LightRAG:
             assert self._index is not None
             self._index.add(emb.reshape(1, -1))
 
-        # Incremental BM25 tokens (fast)
         self._bm25_tokens.append(_tokenize(text))
         self._inserts_since_bm25 += 1
 
-        # Rebuild BM25 occasionally (not every insert)
         if self._inserts_since_bm25 >= BM25_REBUILD_EVERY:
             self._bm25 = BM25Okapi(self._bm25_tokens) if self._bm25_tokens else None
             self._inserts_since_bm25 = 0
+
+    async def ainsert(self, text: str, meta: Optional[Dict[str, Any]] = None):
+        meta = meta or {}
+        chunks = _chunk_text(text)
+
+        if not chunks:
+            return
+
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks):
+            chunk_meta = {
+                **meta,
+                "chunk_index": idx,
+                "chunk_count": total,
+            }
+            await self._insert_one_chunk(chunk, chunk_meta)
 
     def _search_vector(self, q_emb: np.ndarray, top_k: int) -> List[Tuple[int, float]]:
         if self._index is None or self._emb is None or len(self._rows) == 0:
@@ -269,7 +328,7 @@ class LightRAG:
         for i, s in zip(idxs[0], scores[0]):
             if i < 0:
                 continue
-            out.append((int(i), float(s)))  # cosine sim
+            out.append((int(i), float(s)))
         return out
 
     def _search_bm25(self, query: str, top_k: int) -> List[Tuple[int, float]]:
