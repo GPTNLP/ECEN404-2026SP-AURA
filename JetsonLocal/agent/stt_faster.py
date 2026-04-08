@@ -112,6 +112,22 @@ WAKE_AURA_ALIASES = [
     "arua",
 ]
 
+WAKE_ONLY_PHRASES = {
+    "aura",
+    "hey aura",
+    "hi aura",
+    "ok aura",
+    "okay aura",
+    "yo aura",
+    "ora",
+    "hey ora",
+    "hi ora",
+    "or a",
+    "hey or a",
+    "oura",
+    "arua",
+}
+
 
 # ============================================================
 # TEXT HELPERS
@@ -250,6 +266,38 @@ def classify_intent(text: str) -> str:
         return "movement"
 
     return "llm"
+
+
+def looks_like_weak_transcript(text: str) -> bool:
+    norm = normalize_text(text)
+    if not norm:
+        return True
+
+    if norm in WAKE_ONLY_PHRASES:
+        return True
+
+    words = norm.split()
+
+    if len(words) == 1 and norm not in {"forward", "backward", "back", "left", "right", "stop"}:
+        return True
+
+    weak_two_word_phrases = {
+        "speed food",
+        "speak food",
+        "feed food",
+        "big food",
+        "good food",
+    }
+
+    if norm in weak_two_word_phrases:
+        return True
+
+    if len(words) <= 2:
+        movement = detect_last_movement_command(norm)
+        if movement is None and "speak" not in words:
+            return True
+
+    return False
 
 
 # ============================================================
@@ -583,6 +631,7 @@ class STTService:
         self.calibrate_noise_floor()
 
         print("[STT] Voice loop active. Say 'Hey AURA' to activate.")
+        print("[AURA] Waiting for wake word...")
 
         self.is_running = True
 
@@ -613,8 +662,17 @@ class STTService:
                     final_text = await asyncio.to_thread(self.listen_until_done)
 
                 final_text = normalize_text(final_text)
+
                 if not final_text:
                     print("[AURA] No speech heard. Returning to wake mode.")
+                    print("[AURA] Waiting for wake word...")
+                    print("-" * 60)
+                    await asyncio.sleep(0.05)
+                    continue
+
+                if looks_like_weak_transcript(final_text):
+                    print(f"[AURA] Ignoring weak transcript: {final_text}")
+                    print("[AURA] Waiting for wake word...")
                     print("-" * 60)
                     await asyncio.sleep(0.05)
                     continue
@@ -638,6 +696,7 @@ class STTService:
                 await self.callback(final_text, intent, movement)
 
                 print("[AURA] Returning to wake mode.")
+                print("[AURA] Waiting for wake word...")
                 print("-" * 60)
                 await asyncio.sleep(0.05)
 
