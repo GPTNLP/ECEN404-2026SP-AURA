@@ -354,19 +354,21 @@ async def command_loop():
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
-                        chat_manager.add_message("user", query, api)
+                        chat_manager.add_message("user", query, api, DEVICE_ID)
 
                         print(f"[CHAT] running RAG query: {query}")
 
                         answer = await rag_manager.query(query)
 
+                        if isinstance(answer, dict):
+                            answer = answer.get("answer") or answer.get("response") or str(answer)
+
                         print(f"[CHAT] raw answer: {answer}")
 
-                        # ✅ SAFETY FIX — prevent empty responses
                         if not answer or not str(answer).strip():
                             answer = "No response generated from model."
 
-                        chat_manager.add_message("assistant", answer, api)
+                        chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
                         ack_payload = {
                             "command_id": command_id,
@@ -386,7 +388,7 @@ async def command_loop():
                             ack_payload,
                         )
 
-                        print(f"[CHAT] ack sent successfully")
+                        print("[CHAT] ack sent successfully")
 
                     except Exception as e:
                         print(f"[CHAT ERROR] {e}")
