@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useAuth } from "../services/authService";
-import { loadPrefs } from "../services/prefs";
 
 type ChatMsg = {
   role: "user" | "ai" | "error";
@@ -31,18 +30,6 @@ export default function SimulatorPage() {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Voice state (mic capture)
-  const [recording, setRecording] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
-
-  // prefs (loaded from localStorage)
-  const [prefs, setPrefs] = useState(() => loadPrefs());
-
-  const voiceInputEnabled = prefs.voiceInputEnabled;
-  const speakAiEnabled = prefs.speakAiEnabled;
-
   const API_URL = useMemo(() => {
     return (
       (import.meta.env.VITE_AUTH_API_BASE as string | undefined)?.trim() ||
@@ -57,20 +44,6 @@ export default function SimulatorPage() {
     return h;
   }, [token]);
 
-  async function readError(res: Response, fallback: string) {
-    try {
-      const j = await res.json();
-      return j?.detail || j?.message || fallback;
-    } catch {
-      try {
-        const t = await res.text();
-        return t || fallback;
-      } catch {
-        return fallback;
-      }
-    }
-  }
-
   const writeLog = async (payload: {
     event: string;
     prompt?: string;
@@ -79,6 +52,7 @@ export default function SimulatorPage() {
     meta?: Record<string, any>;
   }) => {
     if (!token) return;
+
     try {
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
@@ -102,56 +76,17 @@ export default function SimulatorPage() {
     }
   };
 
-  const speakText = async (text: string) => {
-    if (!speakAiEnabled || !token) return;
-    try {
-      const headers = new Headers(authHeaders);
-      headers.set("Content-Type", "application/json");
-
-      await fetch(`${API_URL}/api/tts/speak`, {
-        method: "POST",
-        headers,
-        credentials: "include",
-        body: JSON.stringify({ text, interrupt: true }),
-      });
-    } catch {
-      // swallow
-    }
-  };
-
-  // cleanup
   useEffect(() => {
     return () => abortRef.current?.abort();
   }, []);
 
-  // auto-scroll
   useEffect(() => {
     if (!scrollRef.current) return;
     scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [history, loading]);
 
-  // refresh prefs when Settings changes them
   useEffect(() => {
-    const refresh = () => setPrefs(loadPrefs());
-
-    const onStorage = () => {
-      refresh();
-    };
-
-    const onCustom = () => refresh();
-
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("aura:prefs", onCustom as any);
-
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("aura:prefs", onCustom as any);
-    };
-  }, []);
-
-  // backend ping
-  useEffect(() => {
-    let timer: any = null;
+    let timer: number | null = null;
     let cancelled = false;
 
     const ping = async () => {
@@ -164,17 +99,24 @@ export default function SimulatorPage() {
     };
 
     const start = () => {
-      if (!timer) timer = setInterval(ping, 15000);
+      if (timer == null) {
+        timer = window.setInterval(ping, 15000);
+      }
     };
 
     const stop = () => {
-      if (timer) clearInterval(timer);
-      timer = null;
+      if (timer != null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
     };
 
-    const onVis = () => (document.hidden ? stop() : start());
+    const onVis = () => {
+      if (document.hidden) stop();
+      else start();
+    };
 
-    ping();
+    void ping();
     start();
     document.addEventListener("visibilitychange", onVis);
 
@@ -185,7 +127,6 @@ export default function SimulatorPage() {
     };
   }, [API_URL]);
 
-  // DB list
   useEffect(() => {
     let cancelled = false;
 
@@ -194,6 +135,7 @@ export default function SimulatorPage() {
         const res = await fetch(`${API_URL}/api/databases`, { headers: authHeaders });
         const data = await res.json().catch(() => null);
         const list = Array.isArray(data?.databases) ? (data.databases as string[]) : [];
+
         if (cancelled) return;
 
         setDatabases(list);
@@ -209,12 +151,12 @@ export default function SimulatorPage() {
       }
     };
 
-    load();
-    const t = setInterval(load, 20000);
+    void load();
+    const t = window.setInterval(load, 20000);
 
     return () => {
       cancelled = true;
-      clearInterval(t);
+      window.clearInterval(t);
     };
   }, [API_URL, authHeaders]);
 
@@ -223,7 +165,7 @@ export default function SimulatorPage() {
     if (!q || loading) return;
 
     if (!activeDb) {
-      setStatusText("❌ No database selected. Create/build one on the Database page first.");
+      setStatusText("No database selected. Create or build one on the Database page first.");
       return;
     }
 
@@ -272,18 +214,16 @@ export default function SimulatorPage() {
           : "(No answer returned)";
 
       const sources = Array.isArray(data?.sources) ? data.sources : [];
+
       setHistory((prev) => [...prev, { role: "ai", content: answer, sources }]);
 
-      void speakText(answer);
-
       const latency = Math.round(performance.now() - t0);
-
       await writeLog({
         event: "chat",
         prompt: q,
         response_preview: answer.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb, engine: "jetson", sources_count: sources.length },
+        meta: { db: activeDb, sources_count: sources.length },
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -292,71 +232,15 @@ export default function SimulatorPage() {
       setHistory((prev) => [...prev, { role: "error", content: msg }]);
 
       const latency = Math.round(performance.now() - t0);
-
       await writeLog({
         event: "chat_error",
         prompt: q,
         response_preview: msg.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb, engine: "jetson" },
+        meta: { db: activeDb },
       });
     } finally {
       setLoading(false);
-    }
-  };
-
-  const toggleRecord = async () => {
-    if (!voiceInputEnabled) return;
-
-    if (recording) {
-      mediaRecorderRef.current?.stop();
-      setRecording(false);
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
-      mediaRecorderRef.current = mr;
-      chunksRef.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      mr.onstop = async () => {
-        try {
-          streamRef.current?.getTracks().forEach((t) => t.stop());
-          streamRef.current = null;
-
-          const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-          chunksRef.current = [];
-
-          const fd = new FormData();
-          fd.append("file", blob, "speech.webm");
-
-          const res = await fetch(`${API_URL}/api/stt/transcribe`, {
-            method: "POST",
-            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-            credentials: "include",
-            body: fd,
-          });
-
-          if (!res.ok) throw new Error(await readError(res, "STT failed"));
-          const data = await res.json().catch(() => null);
-          const text = (data?.text || "").trim();
-          if (text) setQuery((prev) => (prev ? `${prev} ${text}` : text));
-        } catch (e: any) {
-          setStatusText(`🎤 STT error: ${e?.message || "Failed"}`);
-        }
-      };
-
-      mr.start();
-      setRecording(true);
-    } catch (e: any) {
-      setStatusText(`🎤 Mic error: ${e?.message || "Permission denied"}`);
     }
   };
 
@@ -409,7 +293,7 @@ export default function SimulatorPage() {
             </div>
 
             <p style={{ margin: "6px 0 0", color: "var(--muted-text)", fontSize: 13 }}>
-              Pick a database and ask questions. Voice input + TTS can be enabled in Settings.
+              Pick a database and ask questions.
             </p>
           </div>
 
@@ -606,32 +490,6 @@ export default function SimulatorPage() {
             alignItems: "center",
           }}
         >
-          <button
-            onClick={toggleRecord}
-            disabled={!voiceInputEnabled || loading}
-            title={
-              !voiceInputEnabled
-                ? "Enable Voice Input in Settings"
-                : recording
-                ? "Stop recording"
-                : "Record voice"
-            }
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 12,
-              border: "1px solid var(--card-border)",
-              background: recording
-                ? "color-mix(in srgb, var(--accent) 35%, var(--card-bg))"
-                : "var(--card-bg)",
-              fontWeight: 900,
-              cursor: !voiceInputEnabled || loading ? "not-allowed" : "pointer",
-              opacity: !voiceInputEnabled || loading ? 0.6 : 1,
-            }}
-          >
-            {recording ? "■" : "🎤"}
-          </button>
-
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -640,7 +498,7 @@ export default function SimulatorPage() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                handleSearch();
+                void handleSearch();
               }
             }}
             style={{
@@ -655,7 +513,7 @@ export default function SimulatorPage() {
           />
 
           <button
-            onClick={handleSearch}
+            onClick={() => void handleSearch()}
             disabled={loading || !query.trim() || !activeDb}
             style={{
               padding: "12px 16px",
@@ -671,18 +529,6 @@ export default function SimulatorPage() {
           >
             Ask
           </button>
-        </div>
-
-        <div
-          style={{
-            padding: "10px 14px",
-            borderTop: "1px solid var(--card-border)",
-            fontSize: 12,
-            color: "var(--muted-text)",
-          }}
-        >
-          Voice Input: {voiceInputEnabled ? "On" : "Off"} • Speak AI: {speakAiEnabled ? "On" : "Off"}{" "}
-          (toggle in Settings)
         </div>
       </div>
     </div>
