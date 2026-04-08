@@ -1,6 +1,7 @@
 import sys
 import time
 import asyncio
+import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Iterator, List, Optional
@@ -150,9 +151,15 @@ async def refresh_config():
 
     try:
         result = await asyncio.to_thread(api.get_config, DEVICE_ID)
-        runtime_config["poll_seconds"] = float(result.get("poll_seconds", runtime_config["poll_seconds"]))
-        runtime_config["heartbeat_seconds"] = int(result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"]))
-        runtime_config["status_seconds"] = 1
+        runtime_config["poll_seconds"] = float(
+            result.get("poll_seconds", runtime_config["poll_seconds"])
+        )
+        runtime_config["heartbeat_seconds"] = int(
+            result.get("heartbeat_seconds", runtime_config["heartbeat_seconds"])
+        )
+        runtime_config["status_seconds"] = int(
+            result.get("status_seconds", runtime_config["status_seconds"])
+        )
     except Exception as e:
         send_or_queue_log("warning", "config_refresh_failed", f"Failed to refresh config: {e}")
         quiet_print("config", f"[CONFIG] using local defaults ({e})")
@@ -161,16 +168,73 @@ async def refresh_config():
 # -------------------------------------------------------------------
 # VOICE HELPERS
 # -------------------------------------------------------------------
-async def handle_voice_transcript(final_text: str, intent: str, movement: Optional[str]) -> None:
+def extract_speak_payload(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    lowered = raw.lower()
+    idx = lowered.find("speak")
+    if idx == -1:
+        return ""
+
+    payload = raw[idx + len("speak"):].strip(" ,.:;!-")
+    fillers = (
+        "this",
+        "that",
+        "the following",
+        "out loud",
+        "please",
+    )
+
+    changed = True
+    while changed and payload:
+        changed = False
+        lowered_payload = payload.lower()
+        for filler in fillers:
+            prefix = filler + " "
+            if lowered_payload.startswith(prefix):
+                payload = payload[len(prefix):].strip(" ,.:;!-")
+                changed = True
+                break
+
+    return payload
+
+
+async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
     global voice_idle_seconds
 
-    text = (final_text or "").strip()
+    text = (text or "").strip()
     if not text:
         return
 
     voice_idle_seconds = 0
+    lowered = text.lower()
 
     try:
+        if "speak" in lowered:
+            speak_payload = extract_speak_payload(text)
+
+            if speak_payload:
+                send_or_queue_log(
+                    "info",
+                    "voice_tts_command",
+                    "Voice TTS command executed",
+                    {"text": text, "spoken_text": speak_payload},
+                )
+                quiet_print("voice_action", f"[VOICE] tts -> {speak_payload}")
+                await asyncio.to_thread(tts_service.speak, speak_payload)
+            else:
+                send_or_queue_log(
+                    "warning",
+                    "voice_tts_missing_payload",
+                    "Voice TTS command requested but no payload found",
+                    {"text": text},
+                )
+                quiet_print("voice_action", "[VOICE] tts requested but no payload found")
+                await asyncio.to_thread(tts_service.speak, "Please tell me what you want me to say.")
+            return
+
         if movement and movement in MOVEMENT_COMMANDS:
             serial_link.send_command(movement, "")
             quiet_print("voice_move", f"[VOICE] movement command: {movement}")
@@ -178,7 +242,7 @@ async def handle_voice_transcript(final_text: str, intent: str, movement: Option
                 "info",
                 "voice_movement",
                 f"Voice movement command: {movement}",
-                {"text": text, "intent": intent},
+                {"text": text, "intent": intent, "movement": movement},
             )
             return
 
@@ -214,19 +278,33 @@ async def handle_voice_transcript(final_text: str, intent: str, movement: Option
         )
 
 
+def build_stt_service() -> STTService:
+    return STTService(
+        callback=handle_voice_text,
+        model_size="tiny.en",
+        input_device=None,
+        device_sample_rate=None,
+        target_sample_rate=16000,
+        channels=None,
+        device="cpu",
+        compute_type="int8",
+        language="en",
+        task="transcribe",
+        log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
+        unload_after_idle_seconds=60.0,
+        auto_reload_model=True,
+    )
+
+
 async def start_voice_loop():
     global stt_task, stt_service, voice_running, voice_loaded
 
-    if voice_running:
+    if stt_task and not stt_task.done():
         quiet_print("voice_already_running", "[VOICE] already running")
         return
 
-    if stt_service is None:
-        stt_service = STTService(
-            callback=handle_voice_transcript,
-            unload_after_idle_seconds=60.0,
-        )
-        voice_loaded = True
+    stt_service = build_stt_service()
+    voice_loaded = True
 
     async def _runner():
         global voice_running
@@ -238,6 +316,7 @@ async def start_voice_loop():
             raise
         except Exception as e:
             quiet_print("voice_loop_error", f"[VOICE] loop failed: {e}")
+            raise
         finally:
             voice_running = False
             quiet_print("voice_stop", "[VOICE] stopped")
@@ -246,7 +325,7 @@ async def start_voice_loop():
 
 
 async def stop_voice_loop():
-    global stt_task, voice_running
+    global stt_task, stt_service, voice_running
 
     if stt_service is not None:
         try:
@@ -256,7 +335,7 @@ async def stop_voice_loop():
 
     if stt_task is not None:
         try:
-            await asyncio.wait_for(stt_task, timeout=2.0)
+            await asyncio.wait_for(stt_task, timeout=3.0)
         except asyncio.TimeoutError:
             stt_task.cancel()
             try:
@@ -268,6 +347,7 @@ async def stop_voice_loop():
         finally:
             stt_task = None
 
+    stt_service = None
     voice_running = False
     quiet_print("voice_stop", "[VOICE] stopped")
 
@@ -882,6 +962,13 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
+
+    if voice_enabled:
+        try:
+            await start_voice_loop()
+        except Exception as e:
+            send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
+            quiet_print("voice", f"[VOICE] failed to start: {e}")
 
     quiet_print("startup", "[STARTUP] telemetry agent running")
     yield
