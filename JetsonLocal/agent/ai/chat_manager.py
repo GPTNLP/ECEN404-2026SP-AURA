@@ -3,6 +3,7 @@ import os
 import asyncio
 from core.config import STORAGE_DIR
 
+
 class ChatSessionManager:
     def __init__(self):
         self.session_dir = os.path.join(STORAGE_DIR, "sessions")
@@ -12,7 +13,7 @@ class ChatSessionManager:
         self._load_local()
 
     def set_session(self, session_id: str, remote_history: list = None):
-        """Switch to a different chat session (from UI)."""
+        """Switch to a different chat session."""
         self.active_session_id = session_id
         if remote_history is not None:
             self.history = remote_history
@@ -24,26 +25,42 @@ class ChatSessionManager:
         """Adds a message, saves locally, and attempts background cloud sync."""
         self.history.append({"role": role, "content": text})
         self._save_local()
-        
-        # Fire-and-forget sync (won't block UI if offline)
-        asyncio.create_task(
-            asyncio.to_thread(api_client.sync_chat_log, device_id, self.active_session_id, {"history": self.history})
-        )
+
+        # Fire-and-forget sync. Keep it lightweight and never let it break chat flow.
+        try:
+            asyncio.create_task(
+                asyncio.to_thread(
+                    api_client.sync_chat_log,
+                    device_id,
+                    {
+                        "session_id": self.active_session_id,
+                        "history": self.history,
+                    },
+                )
+            )
+        except Exception:
+            pass
 
     def _get_filepath(self):
         return os.path.join(self.session_dir, f"{self.active_session_id}.json")
 
     def _save_local(self):
-        with open(self._get_filepath(), "w") as f:
-            json.dump({"session_id": self.active_session_id, "history": self.history}, f)
+        with open(self._get_filepath(), "w", encoding="utf-8") as f:
+            json.dump(
+                {"session_id": self.active_session_id, "history": self.history},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
     def _load_local(self):
         path = self._get_filepath()
         if os.path.exists(path):
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.history = data.get("history", [])
         else:
             self.history = []
+
 
 chat_manager = ChatSessionManager()

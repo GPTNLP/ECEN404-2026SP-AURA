@@ -2,14 +2,12 @@ import os
 import json
 import shutil
 import time
-import math
-import re
-from typing import List, Optional, Dict, Any, Iterable
+import uuid
+from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Header, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from pypdf import PdfReader
 
 from security import require_auth, require_ip_allowlist
 from aura_db import init_db, doc_set_owner, doc_get_owner, doc_delete_owner, doc_move_owner
@@ -52,10 +50,14 @@ os.makedirs(RAG_ROOT_DIR, exist_ok=True)
 DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2:3b")
 DEFAULT_EMBED = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
-DEFAULT_TOP_K = int(os.getenv("AURA_TOP_K", "4"))
 
-# Website backend should always be simple-only.
-AURA_ENABLE_RAG = False
+DEVICE_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
+ALLOWED_VECTOR_FILES = {"faiss.index", "embeddings.npy", "meta.json", "db.json", "entities.json"}
+
+BUILD_JOBS_DIR = os.path.join(RAG_ROOT_DIR, "_build_jobs")
+os.makedirs(BUILD_JOBS_DIR, exist_ok=True)
+
+ACTIVE_BUILD_STATUSES = {"pending", "claimed", "running"}
 
 
 # ---------------------------
@@ -109,6 +111,13 @@ def require_owner_or_admin(request: Request, rel_path: str) -> Dict[str, Any]:
     return p
 
 
+def _require_device_secret(x_device_secret: Optional[str]):
+    if not DEVICE_SECRET:
+        raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET not configured on server")
+    if (x_device_secret or "").strip() != DEVICE_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid device secret")
+
+
 # ---------------------------
 # Path helpers
 # ---------------------------
@@ -131,12 +140,12 @@ def _db_config_path(db_name: str) -> str:
     return os.path.join(_db_dir(db_name), "db.json")
 
 
-def _db_chunks_path(db_name: str) -> str:
-    return os.path.join(_db_dir(db_name), "chunks.jsonl")
+def _build_status_path(db_name: str) -> str:
+    return os.path.join(_db_dir(db_name), "build_status.json")
 
 
-def _db_stats_path(db_name: str) -> str:
-    return os.path.join(_db_dir(db_name), "stats.json")
+def _job_path(job_id: str) -> str:
+    return os.path.join(BUILD_JOBS_DIR, f"{job_id}.json")
 
 
 def _load_db_config(db_name: str) -> Dict[str, Any]:
@@ -153,124 +162,103 @@ def _save_db_config(db_name: str, cfg: Dict[str, Any]):
         json.dump(cfg, f, indent=2)
 
 
-# ---------------------------
-# Reading + chunking
-# ---------------------------
-def _read_pdf(path: str) -> str:
-    try:
-        reader = PdfReader(path)
-        parts: List[str] = []
-        for page in reader.pages:
-            txt = page.extract_text() or ""
-            if txt.strip():
-                parts.append(txt)
-        return "\n\n".join(parts)
-    except Exception:
-        return ""
-
-
-def _read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
-
-
-def _chunk_text(text: str, max_chars: int = 2400, overlap: int = 250) -> List[str]:
-    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        return []
-
-    chunks: List[str] = []
-    i = 0
-    n = len(text)
-
-    while i < n:
-        j = min(n, i + max_chars)
-        chunk = text[i:j].strip()
-        if chunk:
-            chunks.append(chunk)
-        if j >= n:
-            break
-        i = max(0, j - overlap)
-
-    return chunks
-
-
-def _walk_tree(root: str) -> Dict[str, Any]:
-    def build(node_path: str) -> Dict[str, Any]:
-        name = os.path.basename(node_path) or "documents"
-        if os.path.isdir(node_path):
-            children = []
-            for item in sorted(os.listdir(node_path)):
-                children.append(build(os.path.join(node_path, item)))
-            return {"name": name, "type": "dir", "children": children}
-        return {"name": name, "type": "file"}
-
-    return build(root)
-
-
-# ---------------------------
-# Simple index helpers
-# ---------------------------
-_TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
-
-
-def _tokenize(s: str) -> List[str]:
-    return [t.lower() for t in _TOKEN_RE.findall(s or "") if t]
-
-
-def _score_overlap(query_tokens: List[str], text_tokens: List[str]) -> float:
-    if not query_tokens or not text_tokens:
-        return 0.0
-    qset = set(query_tokens)
-    tset = set(text_tokens)
-    inter = len(qset & tset)
-    return inter / math.sqrt(max(1.0, float(len(tset))))
-
-
-def _write_chunks(db_name: str, records: Iterable[Dict[str, Any]]) -> int:
-    path = _db_chunks_path(db_name)
+def _save_build_status(db_name: str, payload: Dict[str, Any]) -> None:
     os.makedirs(_db_dir(db_name), exist_ok=True)
-
-    n = 0
-    with open(path, "w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            n += 1
-    return n
+    with open(_build_status_path(db_name), "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
 
 
-def _read_chunks(db_name: str) -> List[Dict[str, Any]]:
-    path = _db_chunks_path(db_name)
+def _load_build_status(db_name: str) -> Dict[str, Any]:
+    path = _build_status_path(db_name)
     if not os.path.exists(path):
-        return []
-
-    out: List[Dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                continue
-    return out
-
-
-def _save_simple_stats(db_name: str, stats: Dict[str, Any]):
-    with open(_db_stats_path(db_name), "w", encoding="utf-8") as f:
-        json.dump(stats, f, indent=2)
-
-
-def _load_simple_stats(db_name: str) -> Dict[str, Any]:
-    p = _db_stats_path(db_name)
-    if not os.path.exists(p):
-        return {"chunk_count": 0, "files_found": 0, "skipped_files": 0, "mode": "simple"}
+        return {}
     try:
-        with open(p, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"chunk_count": 0, "files_found": 0, "skipped_files": 0, "mode": "simple"}
+        return {}
+
+
+def _save_job(job: Dict[str, Any]) -> None:
+    with open(_job_path(job["job_id"]), "w", encoding="utf-8") as f:
+        json.dump(job, f, indent=2)
+
+
+def _load_job(job_id: str) -> Dict[str, Any]:
+    path = _job_path(job_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Build job not found")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load build job: {e}")
+
+
+def _collect_pdf_files(folders: List[str]) -> List[str]:
+    files: List[str] = []
+
+    for folder in folders:
+        base = _safe_join(DOCUMENTS_DIR, folder)
+        if not os.path.exists(base):
+            continue
+
+        if os.path.isfile(base):
+            rel = os.path.relpath(base, DOCUMENTS_DIR).replace("\\", "/")
+            if rel.lower().endswith(".pdf"):
+                files.append(rel)
+            continue
+
+        for root, _, names in os.walk(base):
+            for name in names:
+                if not name.lower().endswith(".pdf"):
+                    continue
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, DOCUMENTS_DIR).replace("\\", "/")
+                files.append(rel)
+
+    return sorted(set(files))
+
+
+def _get_active_build_job() -> Optional[Dict[str, Any]]:
+    jobs: List[Dict[str, Any]] = []
+
+    for name in os.listdir(BUILD_JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+
+        path = os.path.join(BUILD_JOBS_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        status = str(job.get("status") or "").lower()
+        if status in ACTIVE_BUILD_STATUSES:
+            jobs.append(job)
+
+    if not jobs:
+        return None
+
+    jobs.sort(key=lambda j: float(j.get("created_at") or 0.0))
+    return jobs[0]
+
+
+def _raise_if_build_in_progress(action_label: str):
+    active_job = _get_active_build_job()
+    if not active_job:
+        return
+
+    active_db = str(active_job.get("db_name") or "unknown")
+    active_status = str(active_job.get("status") or "running")
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f'Jetson is currently vectorizing "{active_db}" '
+            f'({active_status}). No new database actions can be taken right now.'
+        ),
+    )
 
 
 # ---------------------------
@@ -303,80 +291,50 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
 
 
+class RagBuildJobAckRequest(BaseModel):
+    job_id: str
+    device_id: str
+    status: str
+    note: Optional[str] = None
+    extra: Optional[Dict[str, Any]] = None
+
+
 # ---------------------------
 # Endpoints: Documents
 # ---------------------------
 @router.get("/api/documents/download")
-def download_document(path: str, request: Request):
-    require_any_user(request)
+def download_document(
+    path: str,
+    request: Request,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    if (x_device_secret or "").strip():
+        _require_device_secret(x_device_secret)
+    else:
+        require_any_user(request)
+
     full_path = _safe_join(DOCUMENTS_DIR, path)
     if not os.path.exists(full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(full_path)
 
 
-DEVICE_SECRET = os.getenv("DEVICE_SHARED_SECRET", "").strip()
-ALLOWED_VECTOR_FILES = {"faiss.index", "embeddings.npy", "meta.json", "db.json", "entities.json"}
-
-
-def _require_device_secret(x_device_secret: Optional[str]):
-    if not DEVICE_SECRET:
-        raise HTTPException(status_code=500, detail="DEVICE_SHARED_SECRET not configured on server")
-    if (x_device_secret or "").strip() != DEVICE_SECRET:
-        raise HTTPException(status_code=401, detail="Invalid device secret")
-
-
-@router.post("/api/databases/{db_name}/sync_up")
-async def sync_db_up(
-    db_name: str,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-    files: List[UploadFile] = File(...),
-):
-    _require_device_secret(x_device_secret)
-
-    db_dir = _db_dir(db_name)
-    os.makedirs(db_dir, exist_ok=True)
-
-    if not os.path.exists(_db_config_path(db_name)):
-        cfg = {
-            "name": db_name,
-            "folders": [],
-            "engine": "simple",
-            "synced_from_device": True,
-        }
-        _save_db_config(db_name, cfg)
-
-    saved = []
-    for f in files:
-        if f.filename in ALLOWED_VECTOR_FILES:
-            out = os.path.join(db_dir, f.filename)
-            with open(out, "wb") as w:
-                w.write(await f.read())
-            saved.append(f.filename)
-
-    return {"ok": True, "db": db_name, "saved": saved}
-
-
-@router.get("/api/databases/{db_name}/sync_down/{filename}")
-def sync_db_down(
-    db_name: str,
-    filename: str,
-    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
-):
-    _require_device_secret(x_device_secret)
-
-    if filename not in ALLOWED_VECTOR_FILES:
-        raise HTTPException(status_code=400, detail="Invalid vector file name")
-
-    full_path = os.path.join(_db_dir(db_name), filename)
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="Vector file not found")
-    return FileResponse(full_path)
-
-
 @router.get("/api/documents/tree")
 def documents_tree(request: Request):
     require_any_user(request)
+
+    def _walk_tree(root: str) -> Dict[str, Any]:
+        def build(node_path: str) -> Dict[str, Any]:
+            name = os.path.basename(node_path) or "documents"
+            if os.path.isdir(node_path):
+                children = []
+                for item in sorted(os.listdir(node_path)):
+                    children.append(build(os.path.join(node_path, item)))
+                return {"name": name, "type": "dir", "children": children}
+            return {"name": name, "type": "file"}
+
+        return build(root)
+
     return {"root": "documents", "path": DOCUMENTS_DIR, "tree": _walk_tree(DOCUMENTS_DIR)}
 
 
@@ -471,6 +429,7 @@ def list_databases(request: Request):
 @router.post("/api/databases/create")
 def create_database(req: CreateDBRequest, request: Request):
     require_admin(request)
+    _raise_if_build_in_progress("create")
 
     db_dir = _db_dir(req.name)
     os.makedirs(db_dir, exist_ok=True)
@@ -481,9 +440,21 @@ def create_database(req: CreateDBRequest, request: Request):
         "llm_model": DEFAULT_LLM,
         "embed_model": DEFAULT_EMBED,
         "ollama_url": OLLAMA_URL,
-        "engine": "simple",
+        "engine": "jetson_remote",
+        "build_host": "jetson",
+        "build_trigger": "website_backend",
     }
     _save_db_config(req.name, cfg)
+
+    _save_build_status(
+        req.name,
+        {
+            "db_name": req.name,
+            "status": "idle",
+            "message": "Database created. Waiting for build.",
+            "updated_at": time.time(),
+        },
+    )
 
     return {"ok": True, "db": req.name, "config": cfg}
 
@@ -497,25 +468,34 @@ def get_database_config(db_name: str, request: Request):
 @router.get("/api/databases/{db_name}/stats")
 def database_stats(db_name: str, request: Request):
     require_any_user(request)
+
     cfg = _load_db_config(db_name)
-    simple_stats = _load_simple_stats(db_name)
+    build_status = _load_build_status(db_name)
+
+    existing_files = []
+    db_dir = _db_dir(db_name)
+    for name in sorted(ALLOWED_VECTOR_FILES):
+        full = os.path.join(db_dir, name)
+        if os.path.exists(full):
+            existing_files.append(name)
 
     return {
         "db": db_name,
         "config": cfg,
         "stats": {
-            "chunk_count": int(simple_stats.get("chunk_count") or 0),
-            "vdb_path": _db_dir(db_name),
-            "engine": "simple",
-            "files_found": int(simple_stats.get("files_found") or 0),
-            "skipped_files": int(simple_stats.get("skipped_files") or 0),
+            "engine": "jetson_remote",
+            "vector_files_present": existing_files,
+            "vector_file_count": len(existing_files),
+            "vdb_path": db_dir,
         },
+        "build": build_status,
     }
 
 
 @router.post("/api/databases/build")
-def build_database(req: BuildDBRequest, request: Request):
+async def build_database(req: BuildDBRequest, request: Request):
     require_admin(request)
+    _raise_if_build_in_progress("build")
 
     cfg = _load_db_config(req.name)
     folders = req.folders if req.folders is not None else cfg.get("folders", [])
@@ -523,141 +503,226 @@ def build_database(req: BuildDBRequest, request: Request):
     if not folders:
         raise HTTPException(status_code=400, detail="No folders selected for this database")
 
-    db_dir = _db_dir(req.name)
-    os.makedirs(db_dir, exist_ok=True)
+    document_paths = _collect_pdf_files(folders)
+    if not document_paths:
+        raise HTTPException(status_code=400, detail="No PDF files found in selected folders")
 
-    all_files: List[str] = []
-    for folder in folders:
-        base = _safe_join(DOCUMENTS_DIR, folder)
-        if not os.path.exists(base) or not os.path.isdir(base):
-            raise HTTPException(status_code=400, detail=f"Folder not found: {folder}")
-
-        for root, _, files in os.walk(base):
-            for fn in files:
-                ext = os.path.splitext(fn)[1].lower()
-                if ext in [".pdf", ".txt", ".md"]:
-                    all_files.append(os.path.join(root, fn))
-
-    if not all_files:
-        raise HTTPException(status_code=400, detail="No indexable files (.pdf/.txt/.md) found")
-
-    if req.force:
-        try:
-            if os.path.exists(_db_chunks_path(req.name)):
-                os.remove(_db_chunks_path(req.name))
-        except Exception:
-            pass
-        try:
-            if os.path.exists(_db_stats_path(req.name)):
-                os.remove(_db_stats_path(req.name))
-        except Exception:
-            pass
-
-    inserted_chunks = 0
-    skipped_files = 0
-    records: List[Dict[str, Any]] = []
-
-    for path in sorted(all_files):
-        ext = os.path.splitext(path)[1].lower()
-        text = _read_pdf(path) if ext == ".pdf" else _read_text(path)
-
-        if not (text or "").strip():
-            skipped_files += 1
-            continue
-
-        rel_source = os.path.relpath(path, DOCUMENTS_DIR).replace("\\", "/")
-        header = f"[SOURCE FILE: {rel_source}]\n\n"
-        chunks = _chunk_text(header + text)
-
-        for c in chunks:
-            records.append({"source": rel_source, "text": c})
-            inserted_chunks += 1
-
-    if inserted_chunks == 0:
-        raise HTTPException(status_code=400, detail="No readable text found in indexable files")
-
-    chunk_count = _write_chunks(req.name, records)
-
-    cfg["folders"] = folders
-    cfg["engine"] = "simple"
-    _save_db_config(req.name, cfg)
-
-    simple_stats = {
-        "mode": "simple",
-        "chunk_count": chunk_count,
-        "files_found": len(all_files),
-        "skipped_files": skipped_files,
-        "built_ts": int(time.time()),
+    updated_cfg = {
+        **cfg,
+        "name": req.name,
+        "folders": folders,
+        "engine": "jetson_remote",
+        "build_host": "jetson",
+        "build_trigger": "website_backend",
+        "last_build_requested_at": time.time(),
     }
-    _save_simple_stats(req.name, simple_stats)
+    _save_db_config(req.name, updated_cfg)
+
+    now = time.time()
+    job_id = uuid.uuid4().hex
+
+    job = {
+        "job_id": job_id,
+        "db_name": req.name,
+        "folders": folders,
+        "document_paths": document_paths,
+        "file_count": len(document_paths),
+        "status": "pending",
+        "created_at": now,
+        "created_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+        "force": bool(req.force),
+    }
+    _save_job(job)
+
+    _save_build_status(
+        req.name,
+        {
+            "job_id": job_id,
+            "db_name": req.name,
+            "status": "pending",
+            "file_count": len(document_paths),
+            "folders": folders,
+            "document_paths": document_paths,
+            "created_at": now,
+            "created_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "message": f"Queued {len(document_paths)} PDF(s) for Jetson build",
+        },
+    )
 
     return {
         "ok": True,
-        "status": "Database built (simple)",
+        "queued": True,
         "db": req.name,
-        "folders": folders,
-        "files_found": len(all_files),
-        "skipped_files": skipped_files,
-        "inserted_chunks": chunk_count,
-        "stats": {
-            "chunk_count": chunk_count,
-            "vdb_path": _db_dir(req.name),
-            "engine": "simple",
-        },
-        "engine": "simple",
+        "job_id": job_id,
+        "file_count": len(document_paths),
+        "document_paths": document_paths,
+        "message": f'Queued "{req.name}" for Jetson vectorization',
     }
+
+
+@router.get("/api/databases/build_jobs/next")
+def get_next_build_job(
+    device_id: str,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    _require_device_secret(x_device_secret)
+
+    pending_jobs: List[Dict[str, Any]] = []
+
+    for name in os.listdir(BUILD_JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+
+        path = os.path.join(BUILD_JOBS_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        if str(job.get("status") or "").lower() == "pending":
+            pending_jobs.append(job)
+
+    pending_jobs.sort(key=lambda j: float(j.get("created_at") or 0.0))
+
+    if not pending_jobs:
+        return {"ok": True, "job": None}
+
+    job = pending_jobs[0]
+    now = time.time()
+
+    job["status"] = "claimed"
+    job["claimed_by_device"] = device_id
+    job["claimed_at"] = now
+    job["claimed_at_readable"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    _save_job(job)
+
+    _save_build_status(
+        job["db_name"],
+        {
+            **_load_build_status(job["db_name"]),
+            "job_id": job["job_id"],
+            "db_name": job["db_name"],
+            "status": "claimed",
+            "file_count": int(job.get("file_count") or 0),
+            "folders": job.get("folders") or [],
+            "document_paths": job.get("document_paths") or [],
+            "claimed_by_device": device_id,
+            "claimed_at": now,
+            "claimed_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "message": f'Jetson "{device_id}" claimed the build job',
+        },
+    )
+
+    return {"ok": True, "job": job}
+
+
+@router.post("/api/databases/build_jobs/ack")
+def ack_build_job(
+    req: RagBuildJobAckRequest,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    _require_device_secret(x_device_secret)
+
+    job = _load_job(req.job_id)
+    now = time.time()
+
+    job["status"] = req.status
+    job["acked_by_device"] = req.device_id
+    job["note"] = req.note or ""
+    job["extra"] = req.extra or {}
+    job["updated_at"] = now
+    job["updated_at_readable"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    _save_job(job)
+
+    _save_build_status(
+        job["db_name"],
+        {
+            "job_id": job["job_id"],
+            "db_name": job["db_name"],
+            "status": req.status,
+            "file_count": int(job.get("file_count") or 0),
+            "folders": job.get("folders") or [],
+            "document_paths": job.get("document_paths") or [],
+            "device_id": req.device_id,
+            "updated_at": now,
+            "updated_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "message": req.note or "",
+            "extra": req.extra or {},
+        },
+    )
+
+    return {"ok": True, "job_id": req.job_id, "status": req.status}
+
+
+@router.post("/api/databases/{db_name}/sync_up")
+async def sync_db_up(
+    db_name: str,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+    files: List[UploadFile] = File(...),
+):
+    _require_device_secret(x_device_secret)
+
+    db_dir = _db_dir(db_name)
+    os.makedirs(db_dir, exist_ok=True)
+
+    if not os.path.exists(_db_config_path(db_name)):
+        cfg = {
+            "name": db_name,
+            "folders": [],
+            "engine": "jetson_remote",
+            "build_host": "jetson",
+            "build_trigger": "website_backend",
+            "synced_from_device": True,
+        }
+        _save_db_config(db_name, cfg)
+
+    saved = []
+    for f in files:
+        if f.filename in ALLOWED_VECTOR_FILES:
+            out = os.path.join(db_dir, f.filename)
+            with open(out, "wb") as w:
+                w.write(await f.read())
+            saved.append(f.filename)
+
+    now = time.time()
+    _save_build_status(
+        db_name,
+        {
+            **_load_build_status(db_name),
+            "db_name": db_name,
+            "status": "synced",
+            "saved_files": saved,
+            "updated_at": now,
+            "updated_at_readable": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
+            "message": f"Received synced vector files from Jetson: {', '.join(saved) if saved else 'none'}",
+        },
+    )
+
+    return {"ok": True, "db": db_name, "saved": saved}
+
+
+@router.get("/api/databases/{db_name}/sync_down/{filename}")
+def sync_db_down(
+    db_name: str,
+    filename: str,
+    x_device_secret: Optional[str] = Header(default=None, alias="X-Device-Secret"),
+):
+    _require_device_secret(x_device_secret)
+
+    if filename not in ALLOWED_VECTOR_FILES:
+        raise HTTPException(status_code=400, detail="Invalid vector file name")
+
+    full_path = os.path.join(_db_dir(db_name), filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Vector file not found")
+    return FileResponse(full_path)
 
 
 @router.post("/api/databases/chat")
 async def database_chat(req: ChatRequest, request: Request):
     require_any_user(request)
-
-    chunks = _read_chunks(req.db)
-    if not chunks:
-        raise HTTPException(status_code=400, detail="Database has no built index yet. Click Build first.")
-
-    q = (req.query or "").strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="Query is empty")
-
-    qtok = _tokenize(q)
-    scored: List[tuple[float, Dict[str, Any]]] = []
-
-    for r in chunks:
-        txt = str(r.get("text") or "")
-        score = _score_overlap(qtok, _tokenize(txt))
-        if score > 0:
-            scored.append((score, r))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_k = max(1, min(int(req.top_k or DEFAULT_TOP_K), 8))
-    top = scored[:top_k] if scored else []
-
-    sources: List[str] = []
-    context_snips: List[str] = []
-
-    for _, r in top:
-        src = str(r.get("source") or "")
-        if src and src not in sources:
-            sources.append(src)
-
-        t = str(r.get("text") or "")
-        t = t.replace("\n", " ").strip()
-        context_snips.append(t[:500])
-
-    if not top:
-        return {
-            "answer": "I couldn’t find anything relevant in the indexed documents for that query.",
-            "sources": [],
-            "engine": "simple",
-        }
-
-    answer = "Top matches from your documents:\n\n" + "\n\n".join(
-        [f"- {snip}" for snip in context_snips[:3]]
+    raise HTTPException(
+        status_code=400,
+        detail="Website-side vectorization/chat is disabled. Run document chat from the Jetson-backed flow.",
     )
-
-    return {
-        "answer": answer,
-        "sources": sources,
-        "engine": "simple",
-    }
