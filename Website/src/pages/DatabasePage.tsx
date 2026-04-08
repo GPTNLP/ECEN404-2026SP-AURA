@@ -158,7 +158,6 @@ export default function DatabasePage() {
     target: null,
   });
 
-  const [buildMonitorJobId, setBuildMonitorJobId] = useState<string>("");
   const [buildMonitorActive, setBuildMonitorActive] = useState(false);
 
   const renameRef = useRef<HTMLInputElement | null>(null);
@@ -227,7 +226,6 @@ export default function DatabasePage() {
   useEffect(() => {
     refreshTree();
     refreshDatabases();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -581,7 +579,6 @@ export default function DatabasePage() {
 
   useEffect(() => {
     if (activeDb) loadDbStats(activeDb);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDb]);
 
   useEffect(() => {
@@ -606,7 +603,6 @@ export default function DatabasePage() {
         const build = data?.build || {};
         const buildStatus = String(build?.status || "") as BuildStatus;
         const msg = String(build?.message || "");
-        const failedFiles = Array.isArray(build?.extra?.failed_files) ? build.extra.failed_files : [];
         const processedCount = build?.extra?.processed_count;
         const skippedCount = build?.extra?.skipped_count;
         const failedCount = build?.extra?.failed_count;
@@ -721,8 +717,6 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Build request failed");
 
-      const jobId = String(data?.job_id || "");
-      setBuildMonitorJobId(jobId);
       setStatus(`⏳ Queued "${activeDb}" on Jetson…`);
       await loadDbStats(activeDb);
       setBuildMonitorActive(true);
