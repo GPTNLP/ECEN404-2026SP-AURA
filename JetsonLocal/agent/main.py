@@ -3,7 +3,12 @@ import time
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import Iterator, Optional
+import os
+import re
+import shutil
+import subprocess
+import threading
+from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -72,6 +77,117 @@ stt_service: Optional[STTService] = None
 stt_task: Optional[asyncio.Task] = None
 voice_enabled = True
 tts_service = TTSService()
+
+# -------------------------------------------------------------------
+# PUBLIC TUNNEL
+# -------------------------------------------------------------------
+_PUBLIC_URL: Optional[str] = None
+_TUNNEL_PROC: Optional[subprocess.Popen] = None
+
+_CF_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.trycloudflare\.com")
+_NGROK_URL_RE = re.compile(r"https://[a-zA-Z0-9.-]+\.ngrok(?:-free)?\.(?:app|io)")
+
+AURA_ENABLE_PUBLIC_TUNNEL = os.getenv("AURA_ENABLE_PUBLIC_TUNNEL", "0").strip() == "1"
+AURA_PUBLIC_TUNNEL_PROVIDER = os.getenv("AURA_PUBLIC_TUNNEL_PROVIDER", "cloudflared").strip().lower()
+AURA_PUBLIC_TUNNEL_PORT = int(os.getenv("AURA_PUBLIC_TUNNEL_PORT", "8000"))
+
+
+def get_public_url() -> str:
+    return _PUBLIC_URL or ""
+
+
+def _set_public_url(url: str) -> None:
+    global _PUBLIC_URL
+    url = (url or "").strip()
+    if not url:
+        return
+    if _PUBLIC_URL != url:
+        _PUBLIC_URL = url
+        quiet_print("public_url", f"[TUNNEL] public url: {_PUBLIC_URL}")
+
+
+def _consume_tunnel_stdout(proc: subprocess.Popen, provider: str) -> None:
+    try:
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line:
+                continue
+
+            quiet_print(f"tunnel_line_{provider}", f"[TUNNEL:{provider}] {line}")
+
+            if provider == "cloudflared":
+                m = _CF_URL_RE.search(line)
+                if m:
+                    _set_public_url(m.group(0))
+            elif provider == "ngrok":
+                m = _NGROK_URL_RE.search(line)
+                if m:
+                    _set_public_url(m.group(0))
+    except Exception as e:
+        quiet_print("tunnel_reader_err", f"[TUNNEL] stdout reader failed: {e}")
+
+
+def start_public_tunnel(local_port: int = 8000) -> str:
+    global _TUNNEL_PROC
+
+    if not AURA_ENABLE_PUBLIC_TUNNEL:
+        quiet_print("tunnel_disabled", "[TUNNEL] disabled")
+        return ""
+
+    if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
+        quiet_print("tunnel_running", "[TUNNEL] already running")
+        return get_public_url()
+
+    provider = AURA_PUBLIC_TUNNEL_PROVIDER
+    target = f"http://127.0.0.1:{int(local_port)}"
+
+    if provider == "cloudflared":
+        exe = shutil.which("cloudflared")
+        if not exe:
+            quiet_print("tunnel_missing", "[TUNNEL] cloudflared not found in PATH")
+            return ""
+        cmd = [exe, "tunnel", "--url", target, "--no-autoupdate"]
+
+    elif provider == "ngrok":
+        exe = shutil.which("ngrok")
+        if not exe:
+            quiet_print("tunnel_missing", "[TUNNEL] ngrok not found in PATH")
+            return ""
+        cmd = [exe, "http", str(int(local_port)), "--log", "stdout"]
+
+    else:
+        quiet_print("tunnel_bad_provider", f"[TUNNEL] unsupported provider: {provider}")
+        return ""
+
+    try:
+        _TUNNEL_PROC = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        t = threading.Thread(target=_consume_tunnel_stdout, args=(_TUNNEL_PROC, provider), daemon=True)
+        t.start()
+        quiet_print("tunnel_start", f"[TUNNEL] started {provider} for {target}")
+    except Exception as e:
+        quiet_print("tunnel_start_fail", f"[TUNNEL] failed to start {provider}: {e}")
+        return ""
+
+    return ""
+
+
+def stop_public_tunnel() -> None:
+    global _TUNNEL_PROC
+    try:
+        if _TUNNEL_PROC and _TUNNEL_PROC.poll() is None:
+            _TUNNEL_PROC.terminate()
+            quiet_print("tunnel_stop", "[TUNNEL] stopped")
+    except Exception as e:
+        quiet_print("tunnel_stop_fail", f"[TUNNEL] stop failed: {e}")
+    finally:
+        _TUNNEL_PROC = None
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -275,6 +391,7 @@ def build_register_payload():
         "software_version": DEVICE_SOFTWARE_VERSION,
         "hostname": hostname,
         "local_ip": local_ip,
+        "public_url": get_public_url(),
     }
 
 
@@ -312,6 +429,7 @@ async def heartbeat_loop():
     while True:
         try:
             payload = build_heartbeat_payload()
+            payload["public_url"] = get_public_url()
             await asyncio.to_thread(api.heartbeat, payload)
         except Exception as e:
             send_or_queue_log("warning", "heartbeat_failed", f"Heartbeat failed: {e}")
@@ -323,6 +441,7 @@ async def heartbeat_loop():
 async def status_loop():
     while True:
         payload = build_status_payload()
+        payload["public_url"] = get_public_url()
 
         try:
             await asyncio.to_thread(api.status, payload)
@@ -474,9 +593,50 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
-                elif cmd == "voice_start":
+                elif cmd == "sync_vectors":
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
                     try:
-                        await start_voice_loop()
+                        ok = await rag_manager.load_remote_db(db_name, api)
+                        status_note = f"Loaded vector DB '{db_name}'" if ok else f"Failed to load '{db_name}'"
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed" if ok else "failed",
+                                "note": status_note,
+                                "result": rag_manager.stats(),
+                            },
+                        )
+                        quiet_print("rag_cmd", f"[COMMAND] sync_vectors: {status_note}")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"sync_vectors failed: {e}",
+                            },
+                        )
+
+                elif cmd == "build_rag":
+                    import tempfile
+                    import shutil as _shutil
+
+                    db_name = payload.get("db_name", LOCAL_DB_NAME)
+                    doc_paths = payload.get("document_paths", [])
+                    try:
+                        tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
+                        local_pdfs = []
+                        for rel_path in doc_paths:
+                            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
+                            await asyncio.to_thread(api.download_document, rel_path, dest)
+                            local_pdfs.append(dest)
+
+                        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, db_name)
+                        _shutil.rmtree(tmp_dir, ignore_errors=True)
+
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -499,9 +659,17 @@ async def command_loop():
                         )
                         quiet_print("voice_cmd", f"[COMMAND] voice start failed: {e}")
 
-                elif cmd == "voice_stop":
+                elif cmd == "chat_prompt":
+                    query = payload.get("query", "")
+                    session_id = payload.get("session_id", chat_manager.active_session_id)
                     try:
-                        await stop_voice_loop()
+                        if session_id != chat_manager.active_session_id:
+                            chat_manager.set_session(session_id)
+
+                        chat_manager.add_message("user", query, api)
+                        answer = await rag_manager.query(query)
+                        chat_manager.add_message("assistant", answer, api)
+
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -632,7 +800,19 @@ async def lifespan(app_instance: FastAPI):
         quiet_print("serial", f"[SERIAL] unavailable: {e}")
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
-    quiet_print("tts", f"[TTS] ready voice={tts_service.voice} device={tts_service.device}")
+
+    try:
+        rag_manager.initialize()
+    except Exception as e:
+        quiet_print("rag", f"[RAG] init warning: {e}")
+
+    start_public_tunnel(local_port=AURA_PUBLIC_TUNNEL_PORT)
+
+    # give the tunnel a moment to print a URL, but don't block long
+    for _ in range(20):
+        if get_public_url():
+            break
+        await asyncio.sleep(0.25)
 
     try:
         await register_device()
@@ -667,6 +847,8 @@ async def lifespan(app_instance: FastAPI):
     except Exception:
         pass
 
+    stop_public_tunnel()
+
 
 app.router.lifespan_context = lifespan
 
@@ -692,24 +874,124 @@ async def health():
         "device_name": DEVICE_NAME,
         "device_type": DEVICE_TYPE,
         "db_name": LOCAL_DB_NAME,
+        "public_url": get_public_url(),
+        "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
-        "voice": {
-            "enabled": voice_enabled,
-            "running": voice_running,
-            "model_loaded": voice_loaded,
-            "device_index": stt_service.input_device if stt_service else None,
-            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
-            "channels": stt_service.channels if stt_service else None,
-            "noise_floor": stt_service.noise_floor if stt_service else None,
-            "idle_seconds": voice_idle_seconds,
-            "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
-        },
     }
+
+
+@app.get("/public_url")
+async def public_url():
+    return {
+        "ok": True,
+        "public_url": get_public_url(),
+        "provider": AURA_PUBLIC_TUNNEL_PROVIDER if AURA_ENABLE_PUBLIC_TUNNEL else "",
+        "enabled": AURA_ENABLE_PUBLIC_TUNNEL,
+    }
+
+
+# -------------------------------------------------------------------
+# RAG endpoints
+# -------------------------------------------------------------------
+from pydantic import BaseModel as _BaseModel
+
+
+class _ChatRequest(_BaseModel):
+    query: str
+    session_id: Optional[str] = None
+
+
+class _SyncVectorsRequest(_BaseModel):
+    db_name: str
+
+
+class _BuildRagRequest(_BaseModel):
+    db_name: str
+    document_paths: List[str] = []
+
+
+@app.get("/rag/stats")
+async def rag_stats():
+    return rag_manager.stats()
+
+
+@app.post("/rag/load_db")
+async def rag_load_db(req: _SyncVectorsRequest):
+    ok = await rag_manager.load_remote_db(req.db_name, api)
+    if not ok:
+        raise HTTPException(status_code=500, detail=f"Failed to load DB '{req.db_name}'")
+    return {"ok": True, "db_name": req.db_name, "stats": rag_manager.stats()}
+
+
+@app.post("/rag/build")
+async def rag_build(req: _BuildRagRequest):
+    import tempfile
+    import shutil as _shutil
+
+    tmp_dir = tempfile.mkdtemp(prefix="aura_rag_")
+    local_pdfs = []
+    try:
+        for rel_path in req.document_paths:
+            dest = os.path.join(tmp_dir, os.path.basename(rel_path))
+            await asyncio.to_thread(api.download_document, rel_path, dest)
+            local_pdfs.append(dest)
+
+        result = await rag_manager.ingest_pdfs_and_sync(local_pdfs, api, req.db_name)
+        return {"ok": True, **result, "stats": rag_manager.stats()}
+    finally:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@app.post("/rag/chat")
+async def rag_chat(req: _ChatRequest):
+    session_id = req.session_id or chat_manager.active_session_id
+    if session_id != chat_manager.active_session_id:
+        chat_manager.set_session(session_id)
+
+    chat_manager.add_message("user", req.query, api)
+    answer = await rag_manager.query(req.query)
+    chat_manager.add_message("assistant", answer, api)
+
+    return {
+        "ok": True,
+        "answer": answer,
+        "session_id": session_id,
+    }
+
+
+# -------------------------------------------------------------------
+# Session endpoints
+# -------------------------------------------------------------------
+@app.get("/sessions")
+async def list_sessions():
+    return {"sessions": chat_manager.list_local_sessions()}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    prev = chat_manager.active_session_id
+    chat_manager.set_session(session_id)
+    history = chat_manager.get_history()
+    chat_manager.set_session(prev)
+    return {"session_id": session_id, "history": history}
+
+
+@app.post("/sessions/load/{session_id}")
+async def load_session_from_cloud(session_id: str):
+    try:
+        data = await asyncio.to_thread(api.get_chat_session, session_id)
+        history = data.get("history", [])
+        chat_manager.set_session(session_id, remote_history=history)
+        return {"ok": True, "session_id": session_id, "messages": len(history)}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not pull session: {e}")
 
 
 @app.get("/status")
 async def status():
-    return build_status_payload()
+    payload = build_status_payload()
+    payload["public_url"] = get_public_url()
+    return payload
 
 
 @app.get("/voice/status")
