@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -71,6 +72,7 @@ class RagManager:
             return True
         except Exception as e:
             print(f"[RAG JOB] failed to initialize DB '{db_name}': {e}")
+            print(traceback.format_exc())
             self.rag_system = None
             self.active_db_name = None
             self.active_db_path = None
@@ -79,7 +81,14 @@ class RagManager:
     def stats(self) -> Dict[str, Any]:
         existing_files: List[str] = []
         if self.active_db_path and self.active_db_path.exists():
-            for name in ["faiss.index", "embeddings.npy", "meta.json", "db.json", "entities.json", "build_manifest.json"]:
+            for name in [
+                "faiss.index",
+                "embeddings.npy",
+                "meta.json",
+                "db.json",
+                "entities.json",
+                "build_manifest.json",
+            ]:
                 if (self.active_db_path / name).exists():
                     existing_files.append(name)
 
@@ -95,7 +104,9 @@ class RagManager:
             reader = PdfReader(pdf_path)
             parts = [page.extract_text() or "" for page in reader.pages]
             return "\n\n".join(part for part in parts if part.strip())
-        except Exception:
+        except Exception as e:
+            print(f"[RAG JOB] PDF extract failed for '{pdf_path}': {e}")
+            print(traceback.format_exc())
             return ""
 
     def write_manifest(
@@ -104,14 +115,17 @@ class RagManager:
         source_paths: List[str],
         processed_files: List[str],
         skipped_files: List[str],
+        failed_files: List[Dict[str, str]],
     ) -> Dict[str, Any]:
         manifest = {
             "db_name": db_name,
             "source_count": len(source_paths),
             "processed_count": len(processed_files),
             "skipped_count": len(skipped_files),
+            "failed_count": len(failed_files),
             "processed_files": processed_files,
             "skipped_files": skipped_files,
+            "failed_files": failed_files,
             "built_at_epoch": time.time(),
             "built_at_readable": time.strftime("%Y-%m-%d %H:%M:%S"),
             "storage_path": str(self.get_db_dir(db_name)),
@@ -146,38 +160,68 @@ class RagManager:
 
         processed_files: List[str] = []
         skipped_files: List[str] = []
+        failed_files: List[Dict[str, str]] = []
 
         try:
             for rel_path in document_paths:
                 filename = os.path.basename(rel_path) or "document.pdf"
                 local_pdf_path = temp_pdf_dir / filename
 
-                print(f"[RAG JOB] received PDF: {filename}")
-                await asyncio.to_thread(
-                    api_client.download_document,
-                    rel_path,
-                    str(local_pdf_path),
-                )
+                try:
+                    print(f"[RAG JOB] received PDF: {filename}")
+                    await asyncio.to_thread(
+                        api_client.download_document,
+                        rel_path,
+                        str(local_pdf_path),
+                    )
 
-                print(f'[RAG JOB] vectorizing "{filename}"')
-                text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
+                    if not local_pdf_path.exists():
+                        raise RuntimeError("Downloaded file does not exist after download")
 
-                if not text.strip():
-                    print(f'[RAG JOB] skipped "{filename}" (no extractable text)')
-                    skipped_files.append(filename)
+                    file_size = local_pdf_path.stat().st_size
+                    print(f"[RAG JOB] downloaded '{filename}' ({file_size} bytes)")
+
+                    print(f'[RAG JOB] vectorizing "{filename}"')
+                    text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
+                    text_len = len(text.strip())
+                    print(f"[RAG JOB] extracted {text_len} chars from '{filename}'")
+
+                    if not text.strip():
+                        print(f'[RAG JOB] skipped "{filename}" (no extractable text)')
+                        skipped_files.append(filename)
+                        continue
+
+                    if self.rag_system is None:
+                        raise RuntimeError("LightRAG is not initialized")
+
+                    print(f"[RAG JOB] inserting '{filename}' into LightRAG")
+                    await asyncio.to_thread(self.rag_system.insert, text)
+                    print(f"[RAG JOB] inserted '{filename}' successfully")
+
+                    processed_files.append(filename)
+
+                except Exception as file_error:
+                    err_msg = str(file_error)
+                    print(f"[RAG JOB] failed on '{filename}': {err_msg}")
+                    print(traceback.format_exc())
+                    failed_files.append({
+                        "file": filename,
+                        "error": err_msg,
+                    })
                     continue
 
-                await asyncio.to_thread(self.rag_system.insert, text)
-                processed_files.append(filename)
-
             if not processed_files:
-                raise RuntimeError("No PDFs produced extractable text, so no DB was built.")
+                raise RuntimeError(
+                    "No PDFs were successfully inserted into LightRAG. "
+                    f"Skipped={len(skipped_files)}, Failed={len(failed_files)}"
+                )
 
             manifest = self.write_manifest(
                 db_name=db_name,
                 source_paths=document_paths,
                 processed_files=processed_files,
                 skipped_files=skipped_files,
+                failed_files=failed_files,
             )
 
             print("[RAG JOB] deleting temporary PDFs from Jetson")
@@ -200,8 +244,10 @@ class RagManager:
                 "db_dir": str(db_dir),
                 "processed_count": len(processed_files),
                 "skipped_count": len(skipped_files),
+                "failed_count": len(failed_files),
                 "processed_files": processed_files,
                 "skipped_files": skipped_files,
+                "failed_files": failed_files,
                 "manifest": manifest,
                 "upload_result": upload_result,
             }
@@ -227,6 +273,7 @@ class RagManager:
             return self.initialize_db(db_name, reset=False)
         except Exception as e:
             print(f"[RAG JOB] failed to load remote DB '{db_name}': {e}")
+            print(traceback.format_exc())
             return False
 
     async def query(self, prompt: str) -> str:
