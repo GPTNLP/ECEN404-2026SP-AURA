@@ -43,13 +43,13 @@ Because this project spans multiple platforms, prerequisites depend on which par
 2.  **Models**: Pull the required default models (`llama3.2` for text generation, `nomic-embed-text` for embeddings).
 
 ### Edge Device (JetsonLocal)
-1.  **Python 3.13+**
+1.  **Python 3.10.12+**
 2.  Install requirements: `pip install -r JetsonLocal/requirements.txt`
 3.  *(Optional/Jetson Specific)*: Run `JetsonLocal/setup_orin.sh` for environment setup.
 
 ### Web Infrastructure (Website)
 1.  **Node.js & npm**: For the React frontend (`cd Website && npm install`).
-2.  **Python 3.13+**: For the backend API (`pip install -r Website/backend/requirements.txt`).
+2.  **Python 3.10.12+**: For the backend API (`pip install -r Website/backend/requirements.txt`).
 
 ### Firmware (ESP32)
 1.  **PlatformIO**: Recommended to use as a VS Code extension to build and flash the C++ code found in `JetsonLocal/firmware`.
