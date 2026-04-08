@@ -317,33 +317,6 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
-                elif cmd == "sync_vectors":
-                    db_name = payload.get("db_name", LOCAL_DB_NAME)
-                    try:
-                        ok = await rag_manager.load_remote_db(db_name, api)
-                        status_note = f"Loaded vector DB '{db_name}'" if ok else f"Failed to load '{db_name}'"
-                        await asyncio.to_thread(
-                            api.ack_command,
-                            {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "completed" if ok else "failed",
-                                "note": status_note,
-                                "result": rag_manager.stats(),
-                            },
-                        )
-                        quiet_print("rag_cmd", f"[COMMAND] sync_vectors: {status_note}")
-                    except Exception as e:
-                        await asyncio.to_thread(
-                            api.ack_command,
-                            {
-                                "command_id": command_id,
-                                "device_id": DEVICE_ID,
-                                "status": "failed",
-                                "note": f"sync_vectors failed: {e}",
-                            },
-                        )
-
                 elif cmd == "chat_prompt":
                     print(f"[CHAT] received command: {payload}")
 
@@ -355,12 +328,15 @@ async def command_loop():
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
-                        # Make sure the requested DB is actually active before querying.
-                        if db_name and rag_manager.active_db_name != db_name:
-                            print(f"[CHAT] loading DB: {db_name}")
-                            ok = await rag_manager.load_remote_db(db_name, api)
-                            if not ok:
-                                raise RuntimeError(f"Failed to load DB '{db_name}'")
+                        # only load DB if needed
+                        if db_name:
+                            if rag_manager.active_db_name != db_name or rag_manager.rag_system is None:
+                                print(f"[CHAT] loading DB: {db_name}")
+                                ok = await rag_manager.load_remote_db(db_name, api)
+                                if not ok:
+                                    raise RuntimeError(f"Failed to load DB '{db_name}'")
+                            else:
+                                print(f"[CHAT] reusing already loaded DB: {db_name}")
 
                         chat_manager.add_message("user", query, api, DEVICE_ID)
 
@@ -392,10 +368,7 @@ async def command_loop():
 
                         print(f"[CHAT] sending ack: {ack_payload}")
 
-                        await asyncio.to_thread(
-                            api.ack_command,
-                            ack_payload,
-                        )
+                        await asyncio.to_thread(api.ack_command, ack_payload)
 
                         print("[CHAT] ack sent successfully")
 
@@ -411,7 +384,6 @@ async def command_loop():
                                 "note": f"chat_prompt failed: {e}",
                             },
                         )
-
                 else:
                     await asyncio.to_thread(
                         api.ack_command,
