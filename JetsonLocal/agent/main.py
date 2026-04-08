@@ -3,7 +3,6 @@ import time
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-import os
 from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -53,6 +52,9 @@ from hardware.camera import camera_service, get_camera_status
 from ai.rag_manager import rag_manager
 from ai.chat_manager import chat_manager
 
+from stt_faster import STTService
+from tts import TTSService
+
 # -------------------------------------------------------------------
 # APP
 # -------------------------------------------------------------------
@@ -69,6 +71,17 @@ MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
+
+# -------------------------------------------------------------------
+# VOICE / TTS STATE
+# -------------------------------------------------------------------
+stt_task: Optional[asyncio.Task] = None
+stt_service: Optional[STTService] = None
+voice_enabled = True
+voice_running = False
+voice_loaded = False
+voice_idle_seconds = 0
+tts_service = TTSService()
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -146,6 +159,120 @@ async def refresh_config():
 
 
 # -------------------------------------------------------------------
+# VOICE HELPERS
+# -------------------------------------------------------------------
+async def handle_voice_transcript(final_text: str, intent: str, movement: Optional[str]) -> None:
+    global voice_idle_seconds
+
+    text = (final_text or "").strip()
+    if not text:
+        return
+
+    voice_idle_seconds = 0
+
+    try:
+        if movement and movement in MOVEMENT_COMMANDS:
+            serial_link.send_command(movement, "")
+            quiet_print("voice_move", f"[VOICE] movement command: {movement}")
+            send_or_queue_log(
+                "info",
+                "voice_movement",
+                f"Voice movement command: {movement}",
+                {"text": text, "intent": intent},
+            )
+            return
+
+        chat_manager.add_message("user", text, api, DEVICE_ID)
+        answer = await rag_manager.query(text)
+
+        if isinstance(answer, dict):
+            answer = answer.get("answer") or answer.get("response") or str(answer)
+
+        if not answer or not str(answer).strip():
+            answer = "No response generated from model."
+
+        answer = str(answer)
+        chat_manager.add_message("assistant", answer, api, DEVICE_ID)
+
+        await asyncio.to_thread(tts_service.speak, answer)
+
+        quiet_print("voice_chat", f"[VOICE] answered: {text}")
+        send_or_queue_log(
+            "info",
+            "voice_chat_answered",
+            "Voice question answered",
+            {"text": text, "intent": intent},
+        )
+
+    except Exception as e:
+        quiet_print("voice_chat_fail", f"[VOICE] failed: {e}")
+        send_or_queue_log(
+            "warning",
+            "voice_chat_failed",
+            f"Voice chat failed: {e}",
+            {"text": text, "intent": intent, "movement": movement},
+        )
+
+
+async def start_voice_loop():
+    global stt_task, stt_service, voice_running, voice_loaded
+
+    if voice_running:
+        quiet_print("voice_already_running", "[VOICE] already running")
+        return
+
+    if stt_service is None:
+        stt_service = STTService(
+            callback=handle_voice_transcript,
+            unload_after_idle_seconds=60.0,
+        )
+        voice_loaded = True
+
+    async def _runner():
+        global voice_running
+        try:
+            voice_running = True
+            quiet_print("voice_start", "[VOICE] started")
+            await stt_service.continuous_stt_loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            quiet_print("voice_loop_error", f"[VOICE] loop failed: {e}")
+        finally:
+            voice_running = False
+            quiet_print("voice_stop", "[VOICE] stopped")
+
+    stt_task = asyncio.create_task(_runner())
+
+
+async def stop_voice_loop():
+    global stt_task, voice_running
+
+    if stt_service is not None:
+        try:
+            stt_service.stop()
+        except Exception as e:
+            quiet_print("voice_stop_fail", f"[VOICE] stop failed: {e}")
+
+    if stt_task is not None:
+        try:
+            await asyncio.wait_for(stt_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            stt_task.cancel()
+            try:
+                await stt_task
+            except Exception:
+                pass
+        except Exception:
+            pass
+        finally:
+            stt_task = None
+
+    voice_running = False
+    quiet_print("voice_stop", "[VOICE] stopped")
+
+
+# -------------------------------------------------------------------
 # BACKGROUND LOOPS
 # -------------------------------------------------------------------
 async def heartbeat_loop():
@@ -161,8 +288,30 @@ async def heartbeat_loop():
 
 
 async def status_loop():
+    global voice_idle_seconds
+
     while True:
         payload = build_status_payload()
+
+        if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
+            voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+        else:
+            voice_idle_seconds = 0
+
+        payload.setdefault("extra", {})
+        payload["extra"]["voice"] = {
+            "enabled": voice_enabled,
+            "running": voice_running,
+            "model_loaded": voice_loaded,
+            "idle_seconds": voice_idle_seconds,
+            "device_index": stt_service.input_device if stt_service else None,
+            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
+            "channels": stt_service.channels if stt_service else None,
+            "noise_floor": stt_service.noise_floor if stt_service else None,
+            "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+            "tts_ready": True,
+            "tts_device": tts_service.device,
+        }
 
         try:
             await asyncio.to_thread(api.status, payload)
@@ -317,6 +466,56 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera off failed: {e}")
 
+                elif cmd == "voice_start":
+                    try:
+                        await start_voice_loop()
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Voice loop started",
+                            },
+                        )
+                        quiet_print("voice_cmd", "[COMMAND] voice start")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"voice_start failed: {e}",
+                            },
+                        )
+                        quiet_print("voice_cmd", f"[COMMAND] voice start failed: {e}")
+
+                elif cmd == "voice_stop":
+                    try:
+                        await stop_voice_loop()
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Voice loop stopped",
+                            },
+                        )
+                        quiet_print("voice_cmd", "[COMMAND] voice stop")
+                    except Exception as e:
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"voice_stop failed: {e}",
+                            },
+                        )
+                        quiet_print("voice_cmd", f"[COMMAND] voice stop failed: {e}")
+
                 elif cmd == "sync_vectors":
                     db_name = (payload.get("db_name") or LOCAL_DB_NAME or "").strip()
                     try:
@@ -437,6 +636,7 @@ async def command_loop():
                         if not answer or not str(answer).strip():
                             answer = "No response generated from model."
 
+                        answer = str(answer)
                         chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
                         ack_payload = {
@@ -661,6 +861,7 @@ async def lifespan(app_instance: FastAPI):
         quiet_print("serial", f"[SERIAL] unavailable: {e}")
 
     send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
+    quiet_print("tts", f"[TTS] ready device={tts_service.device}")
 
     try:
         rag_manager.initialize()
@@ -686,6 +887,11 @@ async def lifespan(app_instance: FastAPI):
     yield
 
     try:
+        await stop_voice_loop()
+    except Exception:
+        pass
+
+    try:
         camera_service.deactivate()
         _reset_uploaded_signature()
     except Exception:
@@ -700,6 +906,13 @@ app.router.lifespan_context = lifespan
 # -------------------------------------------------------------------
 @app.get("/health")
 async def health():
+    global voice_idle_seconds
+
+    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    else:
+        voice_idle_seconds = 0
+
     return {
         "ok": True,
         "device_id": DEVICE_ID,
@@ -708,7 +921,61 @@ async def health():
         "db_name": LOCAL_DB_NAME,
         "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
+        "voice": {
+            "enabled": voice_enabled,
+            "running": voice_running,
+            "model_loaded": voice_loaded,
+            "device_index": stt_service.input_device if stt_service else None,
+            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
+            "channels": stt_service.channels if stt_service else None,
+            "noise_floor": stt_service.noise_floor if stt_service else None,
+            "idle_seconds": voice_idle_seconds,
+            "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+            "tts_device": tts_service.device,
+        },
     }
+
+
+@app.get("/voice/status")
+async def voice_status():
+    global voice_idle_seconds
+
+    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    else:
+        voice_idle_seconds = 0
+
+    return {
+        "ok": True,
+        "enabled": voice_enabled,
+        "running": voice_running,
+        "model_loaded": voice_loaded,
+        "idle_seconds": voice_idle_seconds,
+        "device_index": stt_service.input_device if stt_service else None,
+        "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
+        "channels": stt_service.channels if stt_service else None,
+        "noise_floor": stt_service.noise_floor if stt_service else None,
+        "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+        "tts_device": tts_service.device,
+    }
+
+
+@app.post("/voice/start")
+async def voice_start():
+    try:
+        await start_voice_loop()
+        return {"ok": True, "running": voice_running}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start voice loop: {e}")
+
+
+@app.post("/voice/stop")
+async def voice_stop():
+    try:
+        await stop_voice_loop()
+        return {"ok": True, "running": voice_running}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop voice loop: {e}")
 
 
 # -------------------------------------------------------------------
@@ -762,6 +1029,11 @@ async def rag_chat(req: _ChatRequest):
 
     chat_manager.add_message("user", req.query, api, DEVICE_ID)
     answer = await rag_manager.query(req.query)
+
+    if isinstance(answer, dict):
+        answer = answer.get("answer") or answer.get("response") or str(answer)
+
+    answer = str(answer or "").strip() or "No response generated from model."
     chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
     return {
@@ -776,14 +1048,23 @@ async def rag_chat(req: _ChatRequest):
 # -------------------------------------------------------------------
 @app.get("/sessions")
 async def list_sessions():
-    return {"sessions": chat_manager.list_local_sessions()}
+    list_fn = getattr(chat_manager, "list_local_sessions", None)
+    if callable(list_fn):
+        return {"sessions": list_fn()}
+    return {"sessions": []}
 
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
     prev = chat_manager.active_session_id
     chat_manager.set_session(session_id)
-    history = chat_manager.get_history()
+
+    get_history_fn = getattr(chat_manager, "get_history", None)
+    if callable(get_history_fn):
+        history = get_history_fn()
+    else:
+        history = getattr(chat_manager, "history", [])
+
     chat_manager.set_session(prev)
     return {"session_id": session_id, "history": history}
 
@@ -801,7 +1082,24 @@ async def load_session_from_cloud(session_id: str):
 
 @app.get("/status")
 async def status():
-    return build_status_payload()
+    global voice_idle_seconds
+
+    payload = build_status_payload()
+
+    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    else:
+        voice_idle_seconds = 0
+
+    payload.setdefault("extra", {})
+    payload["extra"]["voice"] = {
+        "enabled": voice_enabled,
+        "running": voice_running,
+        "model_loaded": voice_loaded,
+        "idle_seconds": voice_idle_seconds,
+        "tts_device": tts_service.device,
+    }
+    return payload
 
 
 @app.get("/camera/status")
