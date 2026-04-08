@@ -8,8 +8,9 @@ type ChatMsg = {
 };
 
 type ChatResponse = {
+  ok?: boolean;
   answer?: string;
-  sources?: string[];
+  status?: string;
   detail?: string;
   message?: string;
 };
@@ -36,6 +37,10 @@ export default function SimulatorPage() {
       (import.meta.env.VITE_API_URL as string | undefined)?.trim() ||
       "http://127.0.0.1:9000"
     );
+  }, []);
+
+  const DEVICE_ID = useMemo(() => {
+    return (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() || "jetson-001";
   }, []);
 
   const authHeaders = useMemo(() => {
@@ -66,7 +71,7 @@ export default function SimulatorPage() {
           user_role: user?.role,
           prompt: payload.prompt,
           response_preview: payload.response_preview,
-          model: "rag-chat",
+          model: "jetson-chat",
           latency_ms: payload.latency_ms,
           meta: payload.meta || {},
         }),
@@ -99,9 +104,7 @@ export default function SimulatorPage() {
     };
 
     const start = () => {
-      if (timer == null) {
-        timer = window.setInterval(ping, 15000);
-      }
+      if (timer == null) timer = window.setInterval(ping, 15000);
     };
 
     const stop = () => {
@@ -184,14 +187,18 @@ export default function SimulatorPage() {
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
 
-      const res = await fetch(`${API_URL}/api/jetson/chat`, {
+      const res = await fetch(`${API_URL}/device/admin/chat`, {
         method: "POST",
         headers,
         credentials: "include",
         body: JSON.stringify({
-          db_name: activeDb,
-          query: q,
-          session_id: `${user?.email || "anon"}::${activeDb}`,
+          device_id: DEVICE_ID,
+          command: "chat_prompt",
+          payload: {
+            db_name: activeDb,
+            query: q,
+            session_id: `${user?.email || "anon"}::${activeDb}`,
+          },
         }),
         signal: controller.signal,
       });
@@ -213,9 +220,7 @@ export default function SimulatorPage() {
           ? data.answer
           : "(No answer returned)";
 
-      const sources = Array.isArray(data?.sources) ? data.sources : [];
-
-      setHistory((prev) => [...prev, { role: "ai", content: answer, sources }]);
+      setHistory((prev) => [...prev, { role: "ai", content: answer }]);
 
       const latency = Math.round(performance.now() - t0);
       await writeLog({
@@ -223,7 +228,11 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: answer.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb, sources_count: sources.length },
+        meta: {
+          db: activeDb,
+          device_id: DEVICE_ID,
+          command_status: data?.status || "unknown",
+        },
       });
     } catch (err: any) {
       if (err?.name === "AbortError") return;
@@ -237,7 +246,7 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: msg.slice(0, 600),
         latency_ms: latency,
-        meta: { db: activeDb },
+        meta: { db: activeDb, device_id: DEVICE_ID },
       });
     } finally {
       setLoading(false);
@@ -289,6 +298,20 @@ export default function SimulatorPage() {
                 }}
               >
                 API: {API_URL}
+              </span>
+
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "4px 10px",
+                  borderRadius: 999,
+                  border: "1px solid var(--card-border)",
+                  background: "color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft))",
+                  color: "var(--muted-text)",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                }}
+              >
+                Device: {DEVICE_ID}
               </span>
             </div>
 
@@ -437,24 +460,7 @@ export default function SimulatorPage() {
                   marginBottom: 12,
                 }}
               >
-                <div style={bubbleStyle}>
-                  {msg.content}
-                  {msg.sources && msg.sources.length > 0 && (
-                    <div
-                      style={{
-                        marginTop: 10,
-                        paddingTop: 10,
-                        borderTop: "1px solid var(--card-border)",
-                        fontSize: 12,
-                        opacity: 0.9,
-                        fontFamily:
-                          "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                      }}
-                    >
-                      <strong>Sources:</strong> {msg.sources.join(", ")}
-                    </div>
-                  )}
-                </div>
+                <div style={bubbleStyle}>{msg.content}</div>
               </div>
             );
           })}
