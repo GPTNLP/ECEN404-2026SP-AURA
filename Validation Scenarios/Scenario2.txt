@@ -1,0 +1,38 @@
+## Assisting with Research Lab Documentation and Data Review ##
+
+Overview:
+A graduate researcher in an electrical engineering research lab is preparing a weekly update for their advisor. They need to summarize lab notes, retrieve previous troubleshooting steps, and verify part of a circuit configuration using documentation.
+Steps:
+The researcher walks up to Temlog and says:
+“Hey Temlog, can you pull up last Tuesday’s circuit setup for the inverter tests?”
+
+
+Temlog checks the timestamped database logs and responds via speech and screen:
+“Found a file from Tuesday labeled ‘Inverter_Setup_Scan_09-09.pdf’. Displaying it now.”
+The document is shown on the screen.
+
+
+The researcher replies:
+“What values were used for the gate resistor and the load capacitance?”
+
+
+Temlog reads the PDF and says:
+“Gate resistor: 220Ω. Load capacitance: 100nF. These were noted in the test config block on page 2.”
+
+
+The researcher follows up:
+“Summarize the three main issues reported that day.”
+
+
+Temlog responds:
+“1. Gate ringing above 6V due to probe grounding.
+ 2. MOSFET temperature exceeded the safe limit after 15 minutes.
+ 3. Signal distortion in output waveform under high load.”
+
+
+The researcher says:
+“Thanks, can you save this session as ‘Advisor Summary’?”
+
+
+Temlog saves the transcript to the cloud and confirms:
+“Session logged and titled ‘Advisor Summary.’ You can access it anytime from your account.”

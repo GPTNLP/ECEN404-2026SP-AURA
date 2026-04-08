@@ -1,0 +1,14 @@
+## Preparing for Lab Practical Exam ##
+
+Overview:
+An instructor assigns students a lab practical exam where they must independently configure an op-amp circuit. A student decides to practice using Temlog before the exam.
+Steps:
+The student approaches Temlog and says:
+“Hey Temlog, can you quiz me on setting up an inverting amplifier circuit?”
+Temlog replies:
+“Sure. Step 1: Where should you connect the input signal? Step 2: Which pin must be connected to ground? Step 3: How do you calculate the gain from resistor values?”
+The student answers each step. Temlog provides corrective feedback:
+“Correct the input signal goes to the inverting input through the resistor. The non-inverting input should be grounded. Remember, the gain is -Rf/Rin.”
+The student then uploads a photo of their breadboard setup. Temlog analyzes it and responds:
+“Good placement. However, the feedback resistor should connect directly between the op-amp’s output and inverting input. Adjust that for stability.”
+After making the correction, the student confirms understanding. Temlog saves the interaction under “Op-Amp Exam Practice” for later review.
