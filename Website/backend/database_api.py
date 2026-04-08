@@ -57,6 +57,9 @@ ALLOWED_VECTOR_FILES = {"faiss.index", "embeddings.npy", "meta.json", "db.json",
 BUILD_JOBS_DIR = os.path.join(RAG_ROOT_DIR, "_build_jobs")
 os.makedirs(BUILD_JOBS_DIR, exist_ok=True)
 
+ACTIVE_BUILD_STATUSES = {"pending", "claimed", "running"}
+
+
 # ---------------------------
 # Auth helpers
 # ---------------------------
@@ -215,6 +218,47 @@ def _collect_pdf_files(folders: List[str]) -> List[str]:
                 files.append(rel)
 
     return sorted(set(files))
+
+
+def _get_active_build_job() -> Optional[Dict[str, Any]]:
+    jobs: List[Dict[str, Any]] = []
+
+    for name in os.listdir(BUILD_JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+
+        path = os.path.join(BUILD_JOBS_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        status = str(job.get("status") or "").lower()
+        if status in ACTIVE_BUILD_STATUSES:
+            jobs.append(job)
+
+    if not jobs:
+        return None
+
+    jobs.sort(key=lambda j: float(j.get("created_at") or 0.0))
+    return jobs[0]
+
+
+def _raise_if_build_in_progress(action_label: str):
+    active_job = _get_active_build_job()
+    if not active_job:
+        return
+
+    active_db = str(active_job.get("db_name") or "unknown")
+    active_status = str(active_job.get("status") or "running")
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f'Jetson is currently vectorizing "{active_db}" '
+            f'({active_status}). No new database actions can be taken right now.'
+        ),
+    )
 
 
 # ---------------------------
@@ -385,6 +429,7 @@ def list_databases(request: Request):
 @router.post("/api/databases/create")
 def create_database(req: CreateDBRequest, request: Request):
     require_admin(request)
+    _raise_if_build_in_progress("create")
 
     db_dir = _db_dir(req.name)
     os.makedirs(db_dir, exist_ok=True)
@@ -450,6 +495,7 @@ def database_stats(db_name: str, request: Request):
 @router.post("/api/databases/build")
 async def build_database(req: BuildDBRequest, request: Request):
     require_admin(request)
+    _raise_if_build_in_progress("build")
 
     cfg = _load_db_config(req.name)
     folders = req.folders if req.folders is not None else cfg.get("folders", [])
