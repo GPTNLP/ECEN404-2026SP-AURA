@@ -1,0 +1,16 @@
+## Lab Safety and Equipment Setup ##
+
+An undergraduate student in an Electronics I lab is preparing to operate a power supply for the first time. The TA is occupied, so the student asks Temlog:
+Student: “Hey Temlog, how do I safely connect the bench power supply to my circuit?”
+
+
+Temlog: “First, confirm the voltage requirements of your circuit. For today’s op-amp lab, keep it under ±15V. Always turn the supply off before connecting wires.”
+
+
+The student holds the front panel of the power supply up to the camera. Temlog detects the channel labels and highlights the correct positive, negative, and ground terminals on the screen.
+
+
+Temlog: “Connect red to +15V, black to ground. Make sure your circuit’s ground is in common with the supply ground.”
+
+
+The student completes the setup, thanks Temlog, and begins the experiment. The interaction log is saved with a timestamp for the instructor’s review.

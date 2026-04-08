@@ -1,0 +1,12 @@
+## Checking Component Values Before Use ##
+
+Overview:
+A first-year student in an Intro to Circuits lab needs to confirm the value of a resistor before inserting it into their breadboard. They are unsure how to read the color bands.
+Steps:
+The student says:
+“Hey Temlog, what value is this resistor?”
+The student holds the resistor up to Temlog’s camera. Temlog uses its vision system and responds:
+“This resistor has bands brown, black, orange, and gold — that corresponds to 10kΩ with ±5% tolerance.”
+The student replies:
+“Thanks, that’s what I needed.”
+The session is logged under “Component Identification.”
