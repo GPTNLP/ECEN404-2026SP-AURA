@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../services/authService";
+import "../styles/page-ui.css";
+import "../styles/simulator.css";
 
 type ChatMsg = {
   role: "user" | "assistant" | "error";
@@ -45,6 +47,20 @@ function fmtTime(ts?: number) {
   }
 }
 
+function fmtShortTime(ts?: number) {
+  if (!ts) return "";
+  try {
+    return new Date(ts * 1000).toLocaleString([], {
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(ts);
+  }
+}
+
 function buildSessionTitle(query: string) {
   const trimmed = query.trim().replace(/\s+/g, " ");
   if (!trimmed) return "New chat";
@@ -58,11 +74,17 @@ function normalizeHistory(history: SessionDetail["history"] | undefined | null):
       msg.role === "user"
         ? "user"
         : msg.role === "error"
-          ? "error"
-          : "assistant",
+        ? "error"
+        : "assistant",
     content: String(msg.content ?? ""),
     ts: typeof msg.ts === "number" ? msg.ts : undefined,
   }));
+}
+
+function initialsFromTitle(title?: string) {
+  const raw = (title || "Chat").trim();
+  const parts = raw.split(/\s+/).slice(0, 2);
+  return parts.map((p) => p[0]?.toUpperCase() || "").join("") || "C";
 }
 
 export default function SimulatorPage() {
@@ -79,6 +101,7 @@ export default function SimulatorPage() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [activeSessionTitle, setActiveSessionTitle] = useState("New chat");
+  const [sessionSearch, setSessionSearch] = useState("");
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -101,6 +124,28 @@ export default function SimulatorPage() {
     if (token) h.set("Authorization", `Bearer ${token}`);
     return h;
   }, [token]);
+
+  const filteredSessions = useMemo(() => {
+    const needle = sessionSearch.trim().toLowerCase();
+    if (!needle) return sessions;
+
+    return sessions.filter((s) => {
+      const haystack = [
+        s.title,
+        s.session_id,
+        s.db_name,
+        s.device_id,
+        s.owner_email,
+        s.owner_role,
+        s.source,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(needle);
+    });
+  }, [sessions, sessionSearch]);
 
   const refreshLoadedDb = () => {
     setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
@@ -486,286 +531,215 @@ export default function SimulatorPage() {
   }, [token, sessions]);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "320px minmax(0, 1fr)", gap: 18 }}>
-      <aside
-        className="card card-pad"
-        style={{
-          minHeight: "78vh",
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+    <div className="page-shell">
+      <div className="page-wrap simulator-page">
+        <div className="page-header simulator-header">
           <div>
-            <h2 style={{ margin: 0 }}>Chats</h2>
-            <div style={{ fontSize: 13, opacity: 0.75 }}>
-              {sessionsLoading ? "Loading..." : `${sessions.length} saved`}
+            <h1 className="page-title">Simulator</h1>
+            <div className="page-subtitle">
+              Jetson chat, saved sessions, and database-backed Q&A
             </div>
           </div>
 
-          <button className="btn" onClick={startNewChat}>
-            New chat
-          </button>
-        </div>
-
-        <div
-          style={{
-            fontSize: 12,
-            padding: 10,
-            borderRadius: 12,
-            background: "var(--panel-2, rgba(0,0,0,.03))",
-            border: "1px solid var(--card-border)",
-            lineHeight: 1.45,
-          }}
-        >
-          <div><strong>DB:</strong> {loadedDb || "(none loaded)"}</div>
-          <div><strong>Device:</strong> {DEVICE_ID}</div>
-        </div>
-
-        <div style={{ overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
-          {sessions.map((s) => {
-            const selected = s.session_id === activeSessionId;
-            return (
-              <button
-                key={s.session_id}
-                type="button"
-                onClick={() => {
-                  localStorage.setItem("aura_active_session_id", s.session_id);
-                  void loadSession(s.session_id);
-                }}
-                style={{
-                  textAlign: "left",
-                  width: "100%",
-                  padding: 12,
-                  borderRadius: 14,
-                  border: selected
-                    ? "1px solid var(--accent)"
-                    : "1px solid var(--card-border)",
-                  background: selected
-                    ? "color-mix(in srgb, var(--accent) 10%, var(--card-bg))"
-                    : "var(--card-bg)",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                }}
-              >
-                <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                  {s.title || "Untitled chat"}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  {s.message_count} messages
-                  {s.db_name ? ` • ${s.db_name}` : ""}
-                </div>
-                <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-                  {fmtTime(s.updated_ts)}
-                </div>
-              </button>
-            );
-          })}
-
-          {!sessionsLoading && sessions.length === 0 && (
-            <div
-              style={{
-                fontSize: 14,
-                opacity: 0.7,
-                padding: 12,
-                borderRadius: 12,
-                border: "1px dashed var(--card-border)",
-              }}
-            >
-              No saved chats yet.
+          <div className="simulator-header-actions">
+            <div className={`simulator-status-pill ${apiOnline ? "online" : "offline"}`}>
+              <span className="simulator-status-dot" />
+              {apiOnline === null ? "Checking..." : apiOnline ? "Backend online" : "Backend offline"}
             </div>
-          )}
-        </div>
-      </aside>
 
-      <section
-        className="card card-pad"
-        style={{
-          minHeight: "78vh",
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-          <div>
-            <h2 style={{ margin: 0 }}>{activeSessionTitle}</h2>
-            <div style={{ fontSize: 13, opacity: 0.75 }}>
-              {activeSessionId ? `Session: ${activeSessionId}` : "Unsaved draft chat"}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-            <span
-              style={{
-                width: 10,
-                height: 10,
-                borderRadius: 999,
-                display: "inline-block",
-                background:
-                  apiOnline === null
-                    ? "#cbd5e1"
-                    : apiOnline
-                      ? "#10b981"
-                      : "#ef4444",
-              }}
-            />
-            {apiOnline === null ? "Checking…" : apiOnline ? "Backend online" : "Backend offline"}
+            <button className="btn" type="button" onClick={startNewChat}>
+              New Chat
+            </button>
           </div>
         </div>
 
-        <div style={{ fontSize: 13, opacity: 0.82 }}>
-          Ask questions using the database currently loaded from the Database page.
-        </div>
-
-        {statusText && (
-          <div
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              background: "color-mix(in srgb, var(--accent) 8%, var(--card-bg))",
-              border: "1px solid var(--card-border)",
-            }}
-          >
-            {statusText}
-          </div>
-        )}
-
-        <div
-          ref={scrollRef}
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            borderRadius: 16,
-            border: "1px solid var(--card-border)",
-            background: "var(--panel-2, rgba(0,0,0,.02))",
-            padding: 14,
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-          }}
-        >
-          {history.length === 0 && !loading && (
-            <div style={{ opacity: 0.8, lineHeight: 1.6 }}>
-              <div style={{ fontWeight: 800, marginBottom: 4 }}>Ready.</div>
+        <div className="simulator-layout">
+          <aside className="card simulator-sidebar">
+            <div className="simulator-sidebar-top">
               <div>
-                {loadedDb
-                  ? `Using ${loadedDb}. Ask something like: "Explain Ohm's law with units."`
-                  : "Go to Database page and push a DB to Jetson first."}
+                <div className="simulator-section-title">Chats</div>
+                <div className="simulator-section-subtitle">
+                  {sessionsLoading ? "Loading..." : `${sessions.length} saved`}
+                </div>
+              </div>
+
+              <button className="btn" type="button" onClick={() => void fetchMySessions()}>
+                Refresh
+              </button>
+            </div>
+
+            <div className="simulator-sidebar-info">
+              <div className="simulator-sidebar-info-row">
+                <span>DB</span>
+                <strong>{loadedDb || "(none loaded)"}</strong>
+              </div>
+              <div className="simulator-sidebar-info-row">
+                <span>Device</span>
+                <strong>{DEVICE_ID}</strong>
               </div>
             </div>
-          )}
 
-          {history.map((msg, i) => {
-            const isUser = msg.role === "user";
-            const isError = msg.role === "error";
+            <input
+              className="input simulator-session-search"
+              value={sessionSearch}
+              onChange={(e) => setSessionSearch(e.target.value)}
+              placeholder="Search chats..."
+            />
 
-            const bubbleStyle: CSSProperties = {
-              maxWidth: "78%",
-              padding: "12px 14px",
-              borderRadius: 16,
-              whiteSpace: "pre-wrap",
-              lineHeight: 1.45,
-              fontSize: 14,
-              boxShadow: "var(--shadow)",
-              border: "1px solid var(--card-border)",
-              background: "var(--card-bg)",
-              color: "var(--text)",
-            };
+            <div className="simulator-session-list">
+              {filteredSessions.map((s) => {
+                const selected = s.session_id === activeSessionId;
 
-            if (isUser) {
-              bubbleStyle.background = "var(--accent)";
-              bubbleStyle.color = "white";
-              bubbleStyle.border = "1px solid rgba(0,0,0,0)";
-              bubbleStyle.borderBottomRightRadius = 6;
-            } else if (isError) {
-              bubbleStyle.background = "color-mix(in srgb, var(--status-bad) 12%, var(--card-bg))";
-              bubbleStyle.color = "color-mix(in srgb, var(--status-bad) 80%, var(--text))";
-              bubbleStyle.border =
-                "1px solid color-mix(in srgb, var(--status-bad) 35%, var(--card-border))";
-              bubbleStyle.borderBottomLeftRadius = 6;
-            } else {
-              bubbleStyle.borderBottomLeftRadius = 6;
-            }
+                return (
+                  <button
+                    key={s.session_id}
+                    type="button"
+                    onClick={() => {
+                      localStorage.setItem("aura_active_session_id", s.session_id);
+                      void loadSession(s.session_id);
+                    }}
+                    className={`simulator-session-card ${selected ? "selected" : ""}`}
+                  >
+                    <div className="simulator-session-avatar">
+                      {initialsFromTitle(s.title)}
+                    </div>
 
-            return (
-              <div
-                key={`${msg.role}-${i}-${msg.ts || 0}`}
-                style={{
-                  display: "flex",
-                  justifyContent: isUser ? "flex-end" : "flex-start",
-                }}
-              >
-                <div style={bubbleStyle}>{msg.content}</div>
+                    <div className="simulator-session-content">
+                      <div className="simulator-session-row">
+                        <div className="simulator-session-title">
+                          {s.title || "Untitled chat"}
+                        </div>
+                        <div className="simulator-session-time">
+                          {fmtShortTime(s.updated_ts)}
+                        </div>
+                      </div>
+
+                      <div className="simulator-session-meta">
+                        <span>{s.message_count} messages</span>
+                        {s.db_name && <span>{s.db_name}</span>}
+                      </div>
+
+                      <div className="simulator-session-updated">
+                        {fmtTime(s.updated_ts)}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+
+              {!sessionsLoading && filteredSessions.length === 0 && (
+                <div className="simulator-empty-sessions">No saved chats yet.</div>
+              )}
+            </div>
+          </aside>
+
+          <section className="card simulator-main">
+            <div className="simulator-main-top">
+              <div>
+                <h2 className="simulator-thread-title">{activeSessionTitle}</h2>
+                <div className="simulator-thread-subtitle">
+                  {activeSessionId ? `Session: ${activeSessionId}` : "Unsaved draft chat"}
+                </div>
               </div>
-            );
-          })}
 
-          {loading && (
-            <div style={{ display: "flex", justifyContent: "flex-start" }}>
-              <div
-                style={{
-                  maxWidth: "78%",
-                  padding: "12px 14px",
-                  borderRadius: 16,
-                  borderBottomLeftRadius: 6,
-                  border: "1px solid var(--card-border)",
-                  background: "var(--card-bg)",
-                }}
-              >
-                AURA is thinking…
+              <div className="simulator-thread-badges">
+                <span className="badge">{loadedDb ? `DB: ${loadedDb}` : "No DB loaded"}</span>
+                <span className="badge">Device: {DEVICE_ID}</span>
               </div>
             </div>
-          )}
-        </div>
 
-        <div style={{ display: "flex", gap: 10 }}>
-          <textarea
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={loadedDb ? `Ask ${loadedDb}…` : "Push a database from Database page first…"}
-            disabled={loading || !loadedDb}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void handleAsk();
-              }
-            }}
-            style={{
-              flex: 1,
-              minHeight: 56,
-              resize: "vertical",
-              padding: "12px 12px",
-              borderRadius: 12,
-              border: "1px solid var(--card-border)",
-              background: "var(--card-bg)",
-              color: "var(--text)",
-              outline: "none",
-              fontFamily: "inherit",
-            }}
-          />
+            <div className="simulator-thread-note">
+              Ask questions using the database currently loaded from the Database page.
+            </div>
 
-          <button
-            onClick={() => void handleAsk()}
-            disabled={loading || !query.trim() || !loadedDb}
-            style={{
-              padding: "12px 16px",
-              borderRadius: 12,
-              border: "1px solid rgba(0,0,0,0)",
-              background: "var(--accent)",
-              color: "white",
-              fontWeight: 900,
-              cursor: loading || !query.trim() || !loadedDb ? "not-allowed" : "pointer",
-              opacity: loading || !query.trim() || !loadedDb ? 0.6 : 1,
-              boxShadow: "var(--shadow)",
-              alignSelf: "stretch",
-            }}
-          >
-            Ask
-          </button>
+            {statusText && <div className="simulator-alert">{statusText}</div>}
+
+            <div ref={scrollRef} className="simulator-thread-body">
+              {history.length === 0 && !loading && (
+                <div className="simulator-empty-chat">
+                  <div className="simulator-empty-icon">AURA</div>
+                  <div className="simulator-empty-title">Ready.</div>
+                  <div className="simulator-empty-text">
+                    {loadedDb
+                      ? `Using ${loadedDb}. Ask something like: "Explain Ohm's law with units."`
+                      : "Go to Database page and push a DB to Jetson first."}
+                  </div>
+                </div>
+              )}
+
+              {history.map((msg, i) => {
+                const isUser = msg.role === "user";
+                const isError = msg.role === "error";
+
+                return (
+                  <div
+                    key={`${msg.role}-${i}-${msg.ts || 0}`}
+                    className={`simulator-message-row ${isUser ? "user" : "assistant"}`}
+                  >
+                    <div
+                      className={`simulator-message ${
+                        isUser ? "user" : isError ? "error" : "assistant"
+                      }`}
+                    >
+                      <div className="simulator-message-top">
+                        <span className="simulator-message-role">
+                          {isUser ? "User" : isError ? "Error" : "AURA"}
+                        </span>
+                        {msg.ts && (
+                          <span className="simulator-message-time">{fmtTime(msg.ts)}</span>
+                        )}
+                      </div>
+
+                      <div className="simulator-message-content">{msg.content}</div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {loading && (
+                <div className="simulator-message-row assistant">
+                  <div className="simulator-message assistant typing">
+                    <div className="simulator-message-top">
+                      <span className="simulator-message-role">AURA</span>
+                    </div>
+                    <div className="simulator-typing">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="simulator-composer">
+              <textarea
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={loadedDb ? `Ask ${loadedDb}...` : "Push a database from Database page first..."}
+                disabled={loading || !loadedDb}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void handleAsk();
+                  }
+                }}
+                className="simulator-input"
+                rows={1}
+              />
+
+              <button
+                onClick={() => void handleAsk()}
+                disabled={loading || !query.trim() || !loadedDb}
+                className="btn btn-primary simulator-send-btn"
+                type="button"
+              >
+                Ask
+              </button>
+            </div>
+          </section>
         </div>
-      </section>
+      </div>
     </div>
   );
 }

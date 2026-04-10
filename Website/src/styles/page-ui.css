@@ -1,153 +1,408 @@
-/* Token-based UI helpers for all pages (works with theme.css) */
-
-.page-shell {
-  width: 100%;
-}
-
-.page-wrap {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-.page-header {
+.chatlogs-page {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 14px;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.page-title {
-  margin: 0;
-  color: var(--text);
-  font-weight: 900;
-  letter-spacing: 0.2px;
+.chatlogs-header {
+  align-items: flex-start;
 }
 
-.page-subtitle {
-  font-size: 12px;
-  color: var(--muted-text);
-  margin-top: 4px;
-}
-
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: var(--card-radius);
-  box-shadow: var(--shadow);
-}
-
-.card-pad {
-  padding: 18px;
-}
-
-.muted {
-  color: var(--muted-text);
-}
-
-.badge {
+.chatlogs-tabs {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
-  border-radius: 999px;
+  padding: 6px;
   border: 1px solid var(--card-border);
-  background: rgba(255,255,255,0.55);
-  color: var(--muted-text);
-  font-weight: 700;
-  font-size: 12px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--card-bg) 88%, var(--accent-soft));
+  box-shadow: var(--shadow);
 }
 
-[data-theme="robotic"] .badge,
-[data-theme="dark"] .badge {
-  background: rgba(255,255,255,0.04);
-}
-
-.btn {
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--card-border);
+.chatlogs-tab {
+  appearance: none;
+  border: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--muted-text);
   font-weight: 800;
-  cursor: pointer;
-}
-
-.btn:hover {
-  box-shadow: var(--shadow-hover);
-  transform: translateY(-1px);
-}
-
-.btn-primary {
-  background: var(--accent);
-  border-color: rgba(0,0,0,0);
-  color: white;
-}
-
-.btn-primary:hover {
-  filter: brightness(1.03);
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: none;
-}
-
-.input, .select {
-  padding: 10px 12px;
+  font-size: 14px;
+  padding: 10px 16px;
   border-radius: 10px;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.chatlogs-tab:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
+}
+
+.chatlogs-tab.active {
+  color: white;
+  background: var(--accent);
+  box-shadow: var(--shadow);
+}
+
+.chatlogs-layout {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 18px;
+  min-height: calc(100vh - 220px);
+}
+
+.chatlogs-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 18px;
+  gap: 14px;
+}
+
+.chatlogs-sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chatlogs-section-title {
+  font-size: 1.6rem;
+  font-weight: 900;
+  color: var(--text);
+}
+
+.chatlogs-section-subtitle {
+  font-size: 13px;
+  color: var(--muted-text);
+  margin-top: 3px;
+}
+
+.chatlogs-session-search {
+  width: 100%;
+}
+
+.chatlogs-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chatlogs-session-card {
+  width: 100%;
   border: 1px solid var(--card-border);
+  border-radius: 18px;
   background: var(--card-bg);
   color: var(--text);
-  outline: none;
-}
-
-.input::placeholder {
-  color: color-mix(in srgb, var(--muted-text) 85%, transparent);
-}
-
-.table-wrap {
-  overflow-x: auto;
-}
-
-.table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.table thead tr {
-  background: color-mix(in srgb, var(--card-bg) 75%, var(--accent-soft));
-}
-
-.table th, .table td {
-  padding: 10px;
-  border-bottom: 1px solid var(--card-border);
-  color: var(--text);
-  vertical-align: top;
-}
-
-.table tbody tr:hover {
-  background: color-mix(in srgb, var(--card-bg) 70%, var(--accent-soft));
-}
-
-.panel {
-  border: 1px dashed color-mix(in srgb, var(--card-border) 70%, var(--accent));
-  background: color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft));
-  border-radius: 12px;
+  text-align: left;
   padding: 14px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 12px;
+  cursor: pointer;
+  transition: 0.18s ease;
+  box-shadow: var(--shadow);
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+.chatlogs-session-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-hover);
+  border-color: color-mix(in srgb, var(--card-border) 55%, var(--accent));
 }
 
-.status-box {
-  margin-top: 14px;
-  padding: 12px;
-  border-radius: 12px;
+.chatlogs-session-card.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--card-bg) 82%, var(--accent-soft));
+}
+
+.chatlogs-session-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  font-weight: 900;
+  font-size: 14px;
+  color: white;
+  background: linear-gradient(
+    135deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 70%, black)
+  );
+}
+
+.chatlogs-session-content {
+  min-width: 0;
+}
+
+.chatlogs-session-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chatlogs-session-title {
+  font-size: 1.1rem;
+  font-weight: 900;
+  color: var(--text);
+  line-height: 1.2;
+}
+
+.chatlogs-session-time {
+  font-size: 12px;
+  color: var(--muted-text);
+  white-space: nowrap;
+}
+
+.chatlogs-session-owner {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--muted-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chatlogs-session-meta {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted-text);
+}
+
+.chatlogs-session-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--card-bg) 78%, var(--accent-soft));
   border: 1px solid var(--card-border);
-  background: color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft));
+}
+
+.chatlogs-thread-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chatlogs-thread-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 22px 16px;
+  border-bottom: 1px solid var(--card-border);
+  background: color-mix(in srgb, var(--card-bg) 90%, var(--accent-soft));
+}
+
+.chatlogs-thread-title {
+  margin: 0;
+  font-size: 2rem;
+  line-height: 1.05;
+  color: var(--text);
+  font-weight: 900;
+}
+
+.chatlogs-thread-meta {
+  margin-top: 8px;
+  font-size: 14px;
+  color: var(--muted-text);
+}
+
+.chatlogs-thread-dates {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted-text);
+}
+
+.chatlogs-thread-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background:
+    radial-gradient(circle at top, color-mix(in srgb, var(--accent-soft) 28%, transparent), transparent 35%),
+    var(--card-bg);
+}
+
+.chatlogs-thread-empty,
+.chatlogs-empty-state {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: var(--muted-text);
+  font-weight: 700;
+}
+
+.chatlogs-message-row {
+  display: flex;
+  width: 100%;
+}
+
+.chatlogs-message-row.assistant {
+  justify-content: flex-start;
+}
+
+.chatlogs-message-row.user {
+  justify-content: flex-end;
+}
+
+.chatlogs-message {
+  max-width: min(72%, 860px);
+  border-radius: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--card-border);
+  box-shadow: var(--shadow);
+}
+
+.chatlogs-message.assistant {
+  background: color-mix(in srgb, var(--card-bg) 92%, var(--accent-soft));
+}
+
+.chatlogs-message.user {
+  background: var(--accent);
+  color: white;
+  border-color: transparent;
+}
+
+.chatlogs-message.error {
+  background: color-mix(in srgb, #ff4d4f 10%, var(--card-bg));
+  border-color: color-mix(in srgb, #ff4d4f 35%, var(--card-border));
+}
+
+.chatlogs-message-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.chatlogs-message-role {
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.92;
+}
+
+.chatlogs-message-time {
+  font-size: 11px;
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.chatlogs-message-content {
+  font-size: 15px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chatlogs-events-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chatlogs-events-controls {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 150px 170px 100px auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.chatlogs-events-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.chatlogs-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chatlogs-pagination-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 1200px) {
+  .chatlogs-layout {
+    grid-template-columns: 320px minmax(0, 1fr);
+  }
+
+  .chatlogs-events-controls {
+    grid-template-columns: 1fr 150px 160px 100px;
+  }
+}
+
+@media (max-width: 980px) {
+  .chatlogs-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .chatlogs-tabs {
+    width: fit-content;
+  }
+
+  .chatlogs-layout {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .chatlogs-sidebar {
+    max-height: 420px;
+  }
+
+  .chatlogs-thread-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .chatlogs-message {
+    max-width: 88%;
+  }
+
+  .chatlogs-events-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .chatlogs-tab {
+    padding: 9px 12px;
+    font-size: 13px;
+  }
+
+  .chatlogs-thread-title {
+    font-size: 1.5rem;
+  }
+
+  .chatlogs-message {
+    max-width: 94%;
+  }
+
+  .chatlogs-events-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .chatlogs-pagination {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
