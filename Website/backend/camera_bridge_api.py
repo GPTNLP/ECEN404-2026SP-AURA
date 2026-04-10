@@ -21,8 +21,6 @@ FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMANDS_FILE = STORAGE_DIR / "device_commands.json"
 
-CAMERA_MODE_PATTERN = "^(raw|detection|colorcode|face)$"
-
 
 def _load_commands() -> list[dict]:
     if not COMMANDS_FILE.exists():
@@ -80,37 +78,20 @@ def _queue_command(device_id: str, command: str, payload: dict | None = None) ->
     return entry
 
 
-def _camera_activate_command_for_mode(mode: str) -> str:
-    mode = (mode or "raw").strip().lower()
-
-    if mode == "raw":
-        return "camera_activate_raw"
-    if mode == "detection":
-        return "camera_activate_detection"
-    if mode == "colorcode":
-        return "camera_activate_colorcode"
-    if mode == "face":
-        return "camera_activate_face"
-
-    raise HTTPException(status_code=400, detail=f"Unsupported camera mode: {mode}")
-
-
 @router.post("/camera/control/activate")
 def activate_camera(
     request: Request,
     device_id: str = Query(...),
-    mode: str = Query("raw", pattern=CAMERA_MODE_PATTERN),
 ):
     require_role(request, "admin")
 
-    command = _camera_activate_command_for_mode(mode)
-    queued = _queue_command(device_id=device_id, command=command)
+    queued = _queue_command(device_id=device_id, command="camera_activate_raw")
 
     return {
         "ok": True,
         "queued": queued,
         "device_id": device_id,
-        "mode": mode,
+        "mode": "raw",
     }
 
 
@@ -120,7 +101,9 @@ def deactivate_camera(
     device_id: str = Query(...),
 ):
     require_role(request, "admin")
+
     queued = _queue_command(device_id=device_id, command="camera_deactivate")
+
     return {
         "ok": True,
         "queued": queued,
@@ -133,7 +116,6 @@ def deactivate_camera(
 async def upload_camera_frame(
     request: Request,
     device_id: str = Query(...),
-    mode: str = Query("raw", pattern=CAMERA_MODE_PATTERN),
     x_device_secret: str | None = Header(default=None, alias="X-Device-Secret"),
 ):
     _require_device_secret(x_device_secret)
@@ -153,7 +135,7 @@ async def upload_camera_frame(
         json.dumps(
             {
                 "device_id": device_id,
-                "mode": mode,
+                "mode": "raw",
                 "updated_at": int(time.time()),
                 "bytes": len(body),
             },
@@ -165,7 +147,7 @@ async def upload_camera_frame(
     return {
         "ok": True,
         "device_id": device_id,
-        "mode": mode,
+        "mode": "raw",
         "bytes": len(body),
     }
 
@@ -173,6 +155,7 @@ async def upload_camera_frame(
 @router.get("/camera/latest")
 def get_latest_camera_frame(device_id: str = Query(...)):
     frame_path = _latest_frame_path(device_id)
+
     if not frame_path.exists():
         raise HTTPException(status_code=404, detail="No camera frame available yet")
 
@@ -190,7 +173,6 @@ def get_latest_camera_frame(device_id: str = Query(...)):
 @router.get("/camera/stream")
 def stream_camera(device_id: str = Query(...)):
     frame_path = _latest_frame_path(device_id)
-
     boundary = "frame"
 
     def gen():
@@ -214,8 +196,9 @@ def stream_camera(device_id: str = Query(...)):
                     b"--" + boundary.encode() + b"\r\n"
                     b"Content-Type: image/jpeg\r\n"
                     b"Content-Length: " + str(len(jpg)).encode() + b"\r\n"
-                    b"Cache-Control: no-store\r\n\r\n" +
-                    jpg + b"\r\n"
+                    b"Cache-Control: no-store\r\n\r\n"
+                    + jpg
+                    + b"\r\n"
                 )
 
             except GeneratorExit:

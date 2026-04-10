@@ -6,30 +6,13 @@ const API_BASE = import.meta.env.VITE_CAMERA_API_BASE as string | undefined;
 const DEVICE_ID =
   (import.meta.env.VITE_DEVICE_ID as string | undefined) || "jetson-001";
 
-type CameraMode = "raw" | "detection" | "colorcode" | "face";
-
 type CameraMeta = {
   ok?: boolean;
   device_id?: string;
   available?: boolean;
-  mode?: CameraMode;
+  mode?: string;
   updated_at?: number;
   bytes?: number;
-};
-
-const modeLabel = (mode: CameraMode) => {
-  switch (mode) {
-    case "raw":
-      return "Raw";
-    case "detection":
-      return "Detection";
-    case "colorcode":
-      return "Color Code";
-    case "face":
-      return "Face";
-    default:
-      return mode;
-  }
 };
 
 export default function CameraFeedSecure() {
@@ -37,7 +20,6 @@ export default function CameraFeedSecure() {
 
   const [ok, setOk] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [mode, setMode] = useState<CameraMode>("raw");
   const [busy, setBusy] = useState(false);
   const [streamNonce, setStreamNonce] = useState(0);
   const [statusText, setStatusText] = useState("Starting camera...");
@@ -55,8 +37,8 @@ export default function CameraFeedSecure() {
     if (!base) return "";
     return `${base}/camera/stream?device_id=${encodeURIComponent(
       DEVICE_ID
-    )}&mode=${encodeURIComponent(mode)}&t=${streamNonce}`;
-  }, [base, mode, streamNonce]);
+    )}&t=${streamNonce}`;
+  }, [base, streamNonce]);
 
   const metaUrl = useMemo(() => {
     if (!base) return "";
@@ -65,23 +47,18 @@ export default function CameraFeedSecure() {
     )}`;
   }, [base]);
 
-  const activateCamera = async (newMode: CameraMode) => {
+  const activateCamera = async () => {
     if (!base) return;
 
     setBusy(true);
     setErr(null);
-    setStatusText(`Starting ${modeLabel(newMode)}...`);
+    setStatusText("Starting raw camera...");
 
     try {
       const res = await fetch(
         `${base}/camera/control/activate?device_id=${encodeURIComponent(
           DEVICE_ID
-        )}&mode=${encodeURIComponent(newMode)}`,
-        {
-          method: "POST",
-          credentials: "include",
-          headers: authHeaders(),
-        }
+        )}`
       );
 
       const data = await res.json().catch(() => null);
@@ -92,10 +69,9 @@ export default function CameraFeedSecure() {
 
       if (!mountedRef.current) return;
 
-      setMode(newMode);
       setOk(false);
       setErr(null);
-      setStatusText(`${modeLabel(newMode)} active`);
+      setStatusText("Raw camera active");
       setStreamNonce((n) => n + 1);
     } catch (e: any) {
       if (!mountedRef.current) return;
@@ -132,17 +108,11 @@ export default function CameraFeedSecure() {
     }
   };
 
-  const setCameraMode = async (newMode: CameraMode) => {
-    if (busy) return;
-    if (mode === newMode) return;
-    await activateCamera(newMode);
-  };
-
   useEffect(() => {
     mountedRef.current = true;
 
     const start = async () => {
-      await activateCamera("raw");
+      await activateCamera();
     };
 
     start();
@@ -198,16 +168,7 @@ export default function CameraFeedSecure() {
             ? Date.now() / 1000 - data.updated_at < 2
             : false;
 
-        if (typeof data.mode === "string" && data.mode !== mode) {
-          setMode(data.mode);
-          setStreamNonce((n) => n + 1);
-        }
-
-        setStatusText(
-          isFresh
-            ? `${modeLabel((data.mode || mode) as CameraMode)} active`
-            : "Camera paused"
-        );
+        setStatusText(isFresh ? "Raw camera active" : "Camera paused");
         setOk(isFresh && !!data.available);
         setErr(null);
       } catch {
@@ -223,7 +184,7 @@ export default function CameraFeedSecure() {
     return () => {
       if (metaTimerRef.current) window.clearInterval(metaTimerRef.current);
     };
-  }, [base, metaUrl, mode, token]);
+  }, [base, metaUrl, token]);
 
   if (!API_BASE) {
     return (
@@ -258,51 +219,9 @@ export default function CameraFeedSecure() {
         </div>
 
         <div className="cam-frame">
-          <div className="cam-toolbar-overlay">
-            <button
-              onClick={() => setCameraMode("raw")}
-              disabled={busy || mode === "raw"}
-              className={`cam-btn ${mode === "raw" ? "active" : ""}`}
-            >
-              Raw
-            </button>
-
-            <button
-              onClick={() => setCameraMode("detection")}
-              disabled={busy || mode === "detection"}
-              className={`cam-btn ${mode === "detection" ? "active" : ""}`}
-            >
-              Detection
-            </button>
-
-            <button
-              onClick={() => setCameraMode("colorcode")}
-              disabled={busy || mode === "colorcode"}
-              className={`cam-btn ${mode === "colorcode" ? "active" : ""}`}
-            >
-              Color Code
-            </button>
-
-            <button
-              onClick={() => setCameraMode("face")}
-              disabled={busy || mode === "face"}
-              className={`cam-btn ${mode === "face" ? "active" : ""}`}
-            >
-              Face
-            </button>
-
-            <button
-              onClick={() => setStreamNonce((n) => n + 1)}
-              disabled={busy}
-              className="cam-btn cam-btn-secondary"
-            >
-              Refresh
-            </button>
-          </div>
-
           {streamSrc ? (
             <img
-              key={`${mode}-${streamNonce}`}
+              key={streamNonce}
               className="cam-img"
               src={streamSrc}
               alt="AURA camera stream"
@@ -326,7 +245,7 @@ export default function CameraFeedSecure() {
             </div>
           )}
 
-          {!ok && (
+          {!ok && !busy && (
             <div className="cam-overlay-message">
               <div className="cam-overlay-title">Camera offline</div>
               <div className="cam-overlay-sub">Waiting for Jetson stream...</div>
