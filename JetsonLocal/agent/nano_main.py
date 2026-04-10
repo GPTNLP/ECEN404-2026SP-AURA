@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-import os
 import re
-import sys
-import time
 import queue
-import signal
 import subprocess
 import threading
 import tkinter as tk
@@ -45,18 +41,39 @@ class AuraConsoleApp:
 
     def _build_ui(self):
         screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
 
-        title_font = tkfont.Font(family="Courier", size=max(22, int(screen_w * 0.022)), weight="bold")
-        status_font = tkfont.Font(family="Courier", size=max(36, int(screen_w * 0.04)), weight="bold")
-        sub_font = tkfont.Font(family="Courier", size=max(14, int(screen_w * 0.015)))
-        meta_font = tkfont.Font(family="Courier", size=max(12, int(screen_w * 0.012)))
-        log_font = tkfont.Font(family="Courier", size=max(12, int(screen_w * 0.012)))
+        title_font = tkfont.Font(
+            family="Courier",
+            size=max(22, int(screen_w * 0.022)),
+            weight="bold",
+        )
+        status_font = tkfont.Font(
+            family="Courier",
+            size=max(36, int(screen_w * 0.04)),
+            weight="bold",
+        )
+        sub_font = tkfont.Font(
+            family="Courier",
+            size=max(14, int(screen_w * 0.015)),
+        )
+        meta_font = tkfont.Font(
+            family="Courier",
+            size=max(12, int(screen_w * 0.012)),
+        )
+        log_font = tkfont.Font(
+            family="Courier",
+            size=max(12, int(screen_w * 0.012)),
+        )
 
         outer = tk.Frame(self.root, bg="#05070a")
         outer.pack(fill="both", expand=True, padx=18, pady=18)
 
-        header = tk.Frame(outer, bg="#0b0f14", highlightbackground="#14f195", highlightthickness=1)
+        header = tk.Frame(
+            outer,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
         header.pack(fill="x", pady=(0, 14))
 
         tk.Label(
@@ -73,7 +90,12 @@ class AuraConsoleApp:
         mid = tk.Frame(outer, bg="#05070a")
         mid.pack(fill="both", expand=False)
 
-        status_card = tk.Frame(mid, bg="#0b0f14", highlightbackground="#14f195", highlightthickness=1)
+        status_card = tk.Frame(
+            mid,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
         status_card.pack(fill="x", pady=(0, 14))
 
         tk.Label(
@@ -82,8 +104,7 @@ class AuraConsoleApp:
             fg="#eafff5",
             bg="#0b0f14",
             font=status_font,
-            pady=16,
-        ).pack(fill="x")
+        ).pack(fill="x", pady=(16, 6))
 
         tk.Label(
             status_card,
@@ -91,17 +112,27 @@ class AuraConsoleApp:
             fg="#8bb8a7",
             bg="#0b0f14",
             font=sub_font,
-            pady=(0, 14),
-        ).pack(fill="x")
+        ).pack(fill="x", pady=(0, 14))
 
         meta = tk.Frame(mid, bg="#05070a")
         meta.pack(fill="x", pady=(0, 14))
 
-        self._meta_box(meta, "STATE", self.mode_text, meta_font).pack(side="left", fill="x", expand=True, padx=(0, 7))
-        self._meta_box(meta, "TIME", self.clock_text, meta_font).pack(side="left", fill="x", expand=True, padx=7)
-        self._meta_box(meta, "AGENT", self.agent_text, meta_font).pack(side="left", fill="x", expand=True, padx=(7, 0))
+        self._meta_box(meta, "STATE", self.mode_text, meta_font).pack(
+            side="left", fill="x", expand=True, padx=(0, 7)
+        )
+        self._meta_box(meta, "TIME", self.clock_text, meta_font).pack(
+            side="left", fill="x", expand=True, padx=7
+        )
+        self._meta_box(meta, "AGENT", self.agent_text, meta_font).pack(
+            side="left", fill="x", expand=True, padx=(7, 0)
+        )
 
-        event_card = tk.Frame(outer, bg="#0b0f14", highlightbackground="#14f195", highlightthickness=1)
+        event_card = tk.Frame(
+            outer,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
         event_card.pack(fill="x", pady=(0, 14))
 
         tk.Label(
@@ -116,7 +147,12 @@ class AuraConsoleApp:
             pady=10,
         ).pack(fill="x")
 
-        logs_card = tk.Frame(outer, bg="#0b0f14", highlightbackground="#14f195", highlightthickness=1)
+        logs_card = tk.Frame(
+            outer,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
         logs_card.pack(fill="both", expand=True)
 
         tk.Label(
@@ -145,7 +181,13 @@ class AuraConsoleApp:
         self.log_text.pack(fill="both", expand=True)
 
     def _meta_box(self, parent, title: str, var: tk.StringVar, font_obj):
-        box = tk.Frame(parent, bg="#0b0f14", highlightbackground="#14f195", highlightthickness=1)
+        box = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+
         tk.Label(
             box,
             text=title,
@@ -154,8 +196,9 @@ class AuraConsoleApp:
             font=font_obj,
             anchor="w",
             padx=12,
-            pady=(10, 2),
+            pady=10,
         ).pack(fill="x")
+
         tk.Label(
             box,
             textvariable=var,
@@ -164,8 +207,9 @@ class AuraConsoleApp:
             font=font_obj,
             anchor="w",
             padx=12,
-            pady=(0, 10),
+            pady=10,
         ).pack(fill="x")
+
         return box
 
     def _start_reader(self):
@@ -175,11 +219,14 @@ class AuraConsoleApp:
     def _reader_worker(self):
         cmd = [
             "journalctl",
-            "-u", SERVICE_NAME,
+            "-u",
+            SERVICE_NAME,
             "-f",
-            "-n", "150",
+            "-n",
+            "150",
             "--no-pager",
-            "-o", "cat",
+            "-o",
+            "cat",
         ]
 
         try:
@@ -208,6 +255,7 @@ class AuraConsoleApp:
                     continue
 
                 self.log_queue.put(line)
+
         except Exception as e:
             self.log_queue.put(f"[UI ERROR] Reader crashed: {e}")
 
@@ -218,6 +266,7 @@ class AuraConsoleApp:
 
     def _poll_logs(self):
         processed = 0
+
         while processed < 50:
             try:
                 line = self.log_queue.get_nowait()
@@ -279,11 +328,15 @@ class AuraConsoleApp:
             self._set_status("VOICE", "Voice pipeline active", "VOICE", clean)
             return
 
-        if "[chat]" in lower and ("running rag query" in lower or "received command" in lower):
+        if "[chat]" in lower and (
+            "running rag query" in lower or "received command" in lower
+        ):
             self._set_status("THINKING", "Running local RAG/LLM query", "LLM", clean)
             return
 
-        if "[chat]" in lower and ("raw answer" in lower or "ack sent successfully" in lower):
+        if "[chat]" in lower and (
+            "raw answer" in lower or "ack sent successfully" in lower
+        ):
             self._set_status("READY", "Response completed", "LLM", clean)
             return
 
@@ -329,7 +382,7 @@ class AuraConsoleApp:
 
 def main():
     root = tk.Tk()
-    app = AuraConsoleApp(root)
+    AuraConsoleApp(root)
     root.mainloop()
 
 
