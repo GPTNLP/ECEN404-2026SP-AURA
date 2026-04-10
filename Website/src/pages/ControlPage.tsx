@@ -57,7 +57,6 @@ export default function ControlPage() {
 
   const startMove = useCallback((cmd: MoveCmd) => {
     if (cmd === "stop" || cmd === "pitch" || cmd === "yaw") return;
-    if (activeMoveRef.current === cmd) return;
     activeMoveRef.current = cmd;
     sendMove(cmd);
   }, []);
