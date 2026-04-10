@@ -6,7 +6,7 @@ const API_BASE = import.meta.env.VITE_CAMERA_API_BASE as string | undefined;
 const DEVICE_ID =
   (import.meta.env.VITE_DEVICE_ID as string | undefined) || "jetson-001";
 
-type CameraMode = "raw" | "detection";
+type CameraMode = "raw" | "detection" | "colorcode" | "face";
 
 type CameraMeta = {
   ok?: boolean;
@@ -15,6 +15,21 @@ type CameraMeta = {
   mode?: CameraMode;
   updated_at?: number;
   bytes?: number;
+};
+
+const modeLabel = (mode: CameraMode) => {
+  switch (mode) {
+    case "raw":
+      return "Raw";
+    case "detection":
+      return "Detection";
+    case "colorcode":
+      return "Color Code";
+    case "face":
+      return "Face";
+    default:
+      return mode;
+  }
 };
 
 export default function CameraFeedSecure() {
@@ -45,7 +60,9 @@ export default function CameraFeedSecure() {
 
   const metaUrl = useMemo(() => {
     if (!base) return "";
-    return `${base}/camera/latest/meta?device_id=${encodeURIComponent(DEVICE_ID)}`;
+    return `${base}/camera/latest/meta?device_id=${encodeURIComponent(
+      DEVICE_ID
+    )}`;
   }, [base]);
 
   const activateCamera = async (newMode: CameraMode) => {
@@ -53,7 +70,7 @@ export default function CameraFeedSecure() {
 
     setBusy(true);
     setErr(null);
-    setStatusText(newMode === "raw" ? "Starting raw mode..." : "Starting detection...");
+    setStatusText(`Starting ${modeLabel(newMode)}...`);
 
     try {
       const res = await fetch(
@@ -78,7 +95,7 @@ export default function CameraFeedSecure() {
       setMode(newMode);
       setOk(false);
       setErr(null);
-      setStatusText(newMode === "raw" ? "Raw mode active" : "Detection mode active");
+      setStatusText(`${modeLabel(newMode)} active`);
       setStreamNonce((n) => n + 1);
     } catch (e: any) {
       if (!mountedRef.current) return;
@@ -132,7 +149,9 @@ export default function CameraFeedSecure() {
 
     const onPageHide = () => {
       fetch(
-        `${base}/camera/control/deactivate?device_id=${encodeURIComponent(DEVICE_ID)}`,
+        `${base}/camera/control/deactivate?device_id=${encodeURIComponent(
+          DEVICE_ID
+        )}`,
         {
           method: "POST",
           credentials: "include",
@@ -146,9 +165,7 @@ export default function CameraFeedSecure() {
 
     return () => {
       mountedRef.current = false;
-
       if (metaTimerRef.current) window.clearInterval(metaTimerRef.current);
-
       window.removeEventListener("pagehide", onPageHide);
       deactivateCamera();
     };
@@ -178,20 +195,17 @@ export default function CameraFeedSecure() {
 
         const isFresh =
           typeof data.updated_at === "number"
-            ? Date.now() / 1000 - data.updated_at < 3
+            ? Date.now() / 1000 - data.updated_at < 2
             : false;
-
-        if (data.mode === "detection") {
-          setStatusText(isFresh ? "Detection mode active" : "Detection paused");
-        } else {
-          setStatusText(isFresh ? "Raw mode active" : "Raw paused");
-        }
 
         if (typeof data.mode === "string" && data.mode !== mode) {
           setMode(data.mode);
           setStreamNonce((n) => n + 1);
         }
 
+        setStatusText(
+          isFresh ? `${modeLabel((data.mode || mode) as CameraMode)} active` : "Camera paused"
+        );
         setOk(isFresh && !!data.available);
         setErr(null);
       } catch {
@@ -202,7 +216,7 @@ export default function CameraFeedSecure() {
     };
 
     pollMeta();
-    metaTimerRef.current = window.setInterval(pollMeta, 1000);
+    metaTimerRef.current = window.setInterval(pollMeta, 500);
 
     return () => {
       if (metaTimerRef.current) window.clearInterval(metaTimerRef.current);
@@ -212,61 +226,80 @@ export default function CameraFeedSecure() {
   if (!API_BASE) {
     return (
       <div className="cam-card">
-        <div className="cam-card-header">
-          <div className="cam-title">Live Camera Feed</div>
-          <div className="cam-status bad">● Missing VITE_CAMERA_API_BASE</div>
+        <div className="cam-header">
+          <h2>Live Camera Feed</h2>
         </div>
-        <div className="cam-help">Set VITE_CAMERA_API_BASE in your frontend env.</div>
+        <div className="cam-status error">Missing VITE_CAMERA_API_BASE</div>
+        <p>Set VITE_CAMERA_API_BASE in your frontend env.</p>
       </div>
     );
   }
 
   return (
     <div className="cam-card">
-      <div className="cam-card-header">
-        <div className="cam-title">Live Camera Feed</div>
-
-        <div className="cam-toolbar">
-          <div className="cam-status-text">{statusText}</div>
-
-          <div className={`cam-status ${ok ? "good" : "bad"}`}>
-            ● {ok ? "Connected" : "Disconnected"}
-          </div>
-
-          <button
-            onClick={() => setCameraMode("raw")}
-            disabled={busy || mode === "raw"}
-            className={`cam-btn ${mode === "raw" ? "active" : ""}`}
-          >
-            Raw
-          </button>
-
-          <button
-            onClick={() => setCameraMode("detection")}
-            disabled={busy || mode === "detection"}
-            className={`cam-btn ${mode === "detection" ? "active" : ""}`}
-          >
-            Detection
-          </button>
-
-          <button
-            onClick={() => setStreamNonce((n) => n + 1)}
-            disabled={busy}
-            className="cam-btn"
-          >
-            Refresh
-          </button>
+      <div className="cam-header">
+        <h2>Live Camera Feed</h2>
+        <div className={`cam-status ${ok ? "ok" : "error"}`}>
+          ● {ok ? "Connected" : "Disconnected"}
         </div>
       </div>
 
-      <div className="cam-frame">
+      <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 10 }}>
+        {statusText}
+      </div>
+
+      <div
+        className="cam-toolbar"
+        style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}
+      >
+        <button
+          onClick={() => setCameraMode("raw")}
+          disabled={busy || mode === "raw"}
+          className={`cam-btn ${mode === "raw" ? "active" : ""}`}
+        >
+          Raw
+        </button>
+
+        <button
+          onClick={() => setCameraMode("detection")}
+          disabled={busy || mode === "detection"}
+          className={`cam-btn ${mode === "detection" ? "active" : ""}`}
+        >
+          Detection
+        </button>
+
+        <button
+          onClick={() => setCameraMode("colorcode")}
+          disabled={busy || mode === "colorcode"}
+          className={`cam-btn ${mode === "colorcode" ? "active" : ""}`}
+        >
+          Color Code
+        </button>
+
+        <button
+          onClick={() => setCameraMode("face")}
+          disabled={busy || mode === "face"}
+          className={`cam-btn ${mode === "face" ? "active" : ""}`}
+        >
+          Face
+        </button>
+
+        <button
+          onClick={() => setStreamNonce((n) => n + 1)}
+          disabled={busy}
+          className="cam-btn"
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div className="cam-frame" style={{ position: "relative" }}>
         {streamSrc ? (
           <img
             key={`${mode}-${streamNonce}`}
             className="cam-img"
             src={streamSrc}
-            alt="Camera feed"
-            draggable={false}
+            alt="AURA camera stream"
             onLoad={() => {
               if (!mountedRef.current) return;
               setOk(true);
@@ -280,15 +313,19 @@ export default function CameraFeedSecure() {
           />
         ) : (
           <div className="cam-placeholder">
-            <div className="cam-placeholder-title">Waiting for camera frame...</div>
-            <div className="cam-placeholder-subtitle">
+            <div>Waiting for camera frame...</div>
+            <div style={{ marginTop: 8, fontSize: 13, opacity: 0.8 }}>
               The Jetson camera is starting up.
             </div>
           </div>
         )}
       </div>
 
-      {err && <div className="cam-error">{err}</div>}
+      {err && (
+        <div className="cam-error" style={{ marginTop: 12 }}>
+          {err}
+        </div>
+      )}
     </div>
   );
 }

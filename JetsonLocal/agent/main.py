@@ -69,6 +69,7 @@ runtime_config = {
 }
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
+CAMERA_MODE_PATTERN = "^(raw|detection|colorcode|face)$"
 
 VOICE_RAG_TIMEOUT_SECONDS = 45.0
 VOICE_TTS_TIMEOUT_SECONDS = 20.0
@@ -617,6 +618,60 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", f"[COMMAND] camera detection failed: {e}")
 
+                elif cmd == "camera_activate_colorcode":
+                    try:
+                        camera_service.activate("colorcode")
+                        _reset_uploaded_signature()
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in colorcode mode",
+                            },
+                        )
+                        quiet_print("camera_cmd", "[COMMAND] camera colorcode")
+                    except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera colorcode activation failed: {e}",
+                            },
+                        )
+                        quiet_print("camera_cmd", f"[COMMAND] camera colorcode failed: {e}")
+
+                elif cmd == "camera_activate_face":
+                    try:
+                        camera_service.activate("face")
+                        _reset_uploaded_signature()
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": "Camera activated in face mode",
+                            },
+                        )
+                        quiet_print("camera_cmd", "[COMMAND] camera face")
+                    except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"Camera face activation failed: {e}",
+                            },
+                        )
+                        quiet_print("camera_cmd", f"[COMMAND] camera face failed: {e}")
+
                 elif cmd == "camera_deactivate":
                     try:
                         camera_service.deactivate()
@@ -1003,7 +1058,7 @@ def upload_latest_frame_once():
         "mode": mode,
     }
 
-    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=3)
+    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=2.0)
     resp.raise_for_status()
     _last_uploaded_signature = signature
 
@@ -1015,7 +1070,7 @@ async def camera_upload_loop():
         except Exception as e:
             quiet_print("camera_upload", f"[CAMERA_UPLOAD] failed: {e}")
 
-        await asyncio.sleep(0.10)
+        await asyncio.sleep(0.03)
 
 
 # -------------------------------------------------------------------
@@ -1033,7 +1088,7 @@ def mjpeg_generator() -> Iterator[bytes]:
                 empty_count += 1
                 if empty_count % 50 == 0:
                     quiet_print("camera_stream_wait", "[CAMERA] waiting for first frame")
-                time.sleep(0.03)
+                time.sleep(0.02)
                 continue
 
             empty_count = 0
@@ -1058,7 +1113,13 @@ async def lifespan(app_instance: FastAPI):
         send_or_queue_log("warning", "serial_unavailable", f"Serial unavailable: {e}")
         quiet_print("serial", f"[SERIAL] unavailable: {e}")
 
-    send_or_queue_log("info", "camera_idle", "Camera service idle until activated")
+    try:
+        camera_service.deactivate()
+        _reset_uploaded_signature()
+        quiet_print("camera_idle", "[CAMERA] idle until website activates raw mode")
+    except Exception as e:
+        quiet_print("camera_idle", f"[CAMERA] idle init warning: {e}")
+
     quiet_print("tts", f"[TTS] ready device={tts_service.device}")
 
     try:
@@ -1327,13 +1388,6 @@ async def camera_detections():
 
 @app.get("/camera/frame.jpg")
 async def camera_frame():
-    status = camera_service.get_status()
-
-    if not status.get("enabled"):
-        camera_service.activate("raw")
-        _reset_uploaded_signature()
-        time.sleep(0.4)
-
     frame = camera_service.get_jpeg()
     if frame is None:
         raise HTTPException(status_code=503, detail="No camera frame available yet")
@@ -1350,7 +1404,7 @@ async def camera_frame():
 
 
 @app.post("/camera/activate")
-async def activate_camera(mode: str = Query("raw", pattern="^(raw|detection)$")):
+async def activate_camera(mode: str = Query("raw", pattern=CAMERA_MODE_PATTERN)):
     try:
         camera_service.activate(mode)
         _reset_uploaded_signature()
@@ -1367,7 +1421,7 @@ async def deactivate_camera():
 
 
 @app.post("/camera/mode")
-async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
+async def set_camera_mode(mode: str = Query(..., pattern=CAMERA_MODE_PATTERN)):
     status = camera_service.get_status()
 
     if not status.get("enabled"):
@@ -1380,18 +1434,16 @@ async def set_camera_mode(mode: str = Query(..., pattern="^(raw|detection)$")):
 
 
 @app.get("/camera/stream")
-async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
+async def camera_stream(mode: str = Query("raw", pattern=CAMERA_MODE_PATTERN)):
     try:
         status = camera_service.get_status()
 
         if not status.get("enabled"):
-            camera_service.activate(mode)
-            _reset_uploaded_signature()
-            time.sleep(0.4)
+            raise HTTPException(status_code=503, detail="Camera is not active")
         elif camera_service.get_mode() != mode:
             camera_service.set_mode(mode)
             _reset_uploaded_signature()
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         return StreamingResponse(
             mjpeg_generator(),
@@ -1403,6 +1455,8 @@ async def camera_stream(mode: str = Query("raw", pattern="^(raw|detection)$")):
                 "Connection": "keep-alive",
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start camera stream: {e}")
 

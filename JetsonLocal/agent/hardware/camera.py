@@ -24,8 +24,16 @@ except Exception:
     YOLO = None
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = BASE_DIR / "models" / "component_best.pt"
+BASE_DIR = Path(__file__).resolve().parent
+AGENT_DIR = BASE_DIR.parent
+JETSONLOCAL_DIR = AGENT_DIR.parent
+MODEL_DIR = JETSONLOCAL_DIR / "models"
+
+COMPONENT_MODEL_PATH = MODEL_DIR / "component_best.pt"
+COLORCODE_MODEL_PATH = MODEL_DIR / "colorcode_best.pt"
+FACE_MODEL_PATH = MODEL_DIR / "yolov11s-face.pt"
+
+SUPPORTED_MODES = {"raw", "detection", "colorcode", "face"}
 
 
 class CameraService:
@@ -67,31 +75,61 @@ class CameraService:
             dtype=np.float32,
         )
 
-        self.model = None
+        self.models: Dict[str, Optional[Any]] = {
+            "detection": None,
+            "colorcode": None,
+            "face": None,
+        }
+        self.model_paths: Dict[str, Path] = {
+            "detection": COMPONENT_MODEL_PATH,
+            "colorcode": COLORCODE_MODEL_PATH,
+            "face": FACE_MODEL_PATH,
+        }
+
+        self.last_annotated_frame: Optional[np.ndarray] = None
+        self.last_mode_for_annotation: Optional[str] = None
+        self.last_inference_time = 0.0
+        self.inference_interval_s = 0.12
+        self.last_frame_ts = 0.0
+
         if YOLO is None:
-            self.last_error = "ultralytics is not installed; detection disabled"
-        elif MODEL_PATH.exists():
-            try:
-                self.model = YOLO(str(MODEL_PATH))
-                self.last_error = None
-            except Exception as e:
-                self.model = None
-                self.last_error = f"Failed to load model: {e}"
-        else:
-            self.last_error = f"Model not found: {MODEL_PATH}"
+            self.last_error = "ultralytics is not installed; detection modes disabled"
+
+    def _ensure_model_loaded(self, mode: str):
+        if YOLO is None:
+            self.last_error = "ultralytics is not installed; detection modes disabled"
+            return None
+
+        if mode not in {"detection", "colorcode", "face"}:
+            return None
+
+        if self.models.get(mode) is not None:
+            return self.models[mode]
+
+        model_path = self.model_paths[mode]
+        if not model_path.exists():
+            self.last_error = f"Model not found: {model_path}"
+            return None
+
+        try:
+            self.models[mode] = YOLO(str(model_path))
+            self.last_error = None
+            print(f"[CAMERA] loaded model for mode='{mode}' from {model_path}")
+            return self.models[mode]
+        except Exception as e:
+            self.models[mode] = None
+            self.last_error = f"Failed to load model '{mode}': {e}"
+            print(f"[CAMERA] failed to load model '{mode}': {e}")
+            return None
 
     def _source_candidates(self) -> list[tuple[str, Any]]:
         candidates: list[tuple[str, Any]] = []
-
         if self.device_path:
             candidates.append(("v4l2-path", self.device_path))
-
         candidates.append(("v4l2-index", self.device_index))
-
         for idx in [0, 1, 2, 3]:
             if idx != self.device_index:
                 candidates.append((f"v4l2-index-{idx}", idx))
-
         return candidates
 
     def _configure_cap(self, cap: cv2.VideoCapture) -> None:
@@ -111,9 +149,9 @@ class CameraService:
     def _read_probe_frame(
         self,
         cap: cv2.VideoCapture,
-        warmup_frames: int = 10,
-        tries: int = 40,
-        delay_s: float = 0.08,
+        warmup_frames: int = 8,
+        tries: int = 30,
+        delay_s: float = 0.04,
     ) -> Optional[np.ndarray]:
         for _ in range(warmup_frames):
             try:
@@ -147,7 +185,6 @@ class CameraService:
                     raise RuntimeError("VideoCapture did not open")
 
                 self._configure_cap(cap)
-
                 frame = self._read_probe_frame(cap)
                 if frame is None:
                     raise RuntimeError("Opened camera but never received a usable frame")
@@ -170,12 +207,14 @@ class CameraService:
                 err = f"{source_name}: {e}"
                 errors.append(err)
                 print(f"[CAMERA] source failed: {err}")
+
                 try:
                     if cap is not None:
                         cap.release()
                 except Exception:
                     pass
-                time.sleep(0.4)
+
+                time.sleep(0.2)
 
         raise RuntimeError(" | ".join(errors))
 
@@ -190,11 +229,13 @@ class CameraService:
         self.latest_raw_jpeg = None
         self.latest_annotated_jpeg = None
         self.latest_detections = []
+        self.last_annotated_frame = None
+        self.last_mode_for_annotation = None
         self.active_source = None
 
     def activate(self, mode: str = "raw") -> None:
         mode = (mode or "raw").strip().lower()
-        if mode not in {"raw", "detection"}:
+        if mode not in SUPPORTED_MODES:
             mode = "raw"
 
         with self.lock:
@@ -215,7 +256,7 @@ class CameraService:
 
     def set_mode(self, mode: str) -> None:
         mode = (mode or "").strip().lower()
-        if mode not in {"raw", "detection"}:
+        if mode not in SUPPORTED_MODES:
             return
 
         with self.lock:
@@ -251,15 +292,17 @@ class CameraService:
 
     def stop(self) -> None:
         self.running = False
+
         if self.thread is not None:
             self.thread.join(timeout=2.0)
+
         self._close_camera()
         self.thread = None
 
     def restart_camera(self) -> None:
         print("[CAMERA] restarting camera")
         self._close_camera()
-        time.sleep(0.8)
+        time.sleep(0.4)
         self.cap = self._open_camera()
         self.consecutive_failures = 0
 
@@ -273,16 +316,38 @@ class CameraService:
             return None
         return buf.tobytes()
 
-    def _run_detection(self, frame: np.ndarray) -> tuple[np.ndarray, list[dict]]:
-        if self.model is None:
+    def _rotate_frame(self, frame: np.ndarray) -> np.ndarray:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
+    def _draw_tracking_overlay(self, annotated: np.ndarray, detections: list[dict]) -> None:
+        h, w = annotated.shape[:2]
+        cx = w // 2
+        cy = h // 2
+
+        cv2.line(annotated, (cx - 20, cy), (cx + 20, cy), (255, 255, 0), 2)
+        cv2.line(annotated, (cx, cy - 20), (cx, cy + 20), (255, 255, 0), 2)
+
+        if not detections:
+            return
+
+        best = max(detections, key=lambda d: d["confidence"])
+        x1, y1, x2, y2 = best["bbox"]
+        tx = (x1 + x2) // 2
+        ty = (y1 + y2) // 2
+
+        cv2.line(annotated, (cx, cy), (tx, ty), (0, 255, 255), 2)
+        cv2.circle(annotated, (tx, ty), 7, (0, 255, 255), -1)
+
+    def _run_model_mode(self, frame: np.ndarray, mode: str) -> tuple[np.ndarray, list[dict]]:
+        model = self._ensure_model_loaded(mode)
+        if model is None:
             return frame.copy(), []
 
         sharp = cv2.filter2D(frame, -1, self.kernel)
         h, w = sharp.shape[:2]
         infer = cv2.resize(sharp, (self.infer_size, self.infer_size))
 
-        results = self.model(infer, verbose=False, conf=self.detect_conf)
-
+        results = model(infer, verbose=False, conf=self.detect_conf)
         annotated = sharp.copy()
         detections: list[dict] = []
 
@@ -294,7 +359,7 @@ class CameraService:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 cls_id = int(box.cls[0].item())
                 conf = float(box.conf[0].item())
-                label = self.model.names[cls_id]
+                label = model.names[cls_id]
 
                 x1 = int(x1 * scale_x)
                 x2 = int(x2 * scale_x)
@@ -306,20 +371,30 @@ class CameraService:
                         "label": label,
                         "confidence": round(conf, 4),
                         "bbox": [x1, y1, x2, y2],
+                        "mode": mode,
                     }
                 )
 
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                color = (0, 255, 0)
+                if mode == "colorcode":
+                    color = (255, 200, 0)
+                elif mode == "face":
+                    color = (255, 0, 255)
+
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(
                     annotated,
                     f"{label} {conf:.2f}",
                     (x1, max(25, y1 - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
-                    (0, 255, 0),
+                    color,
                     2,
                     cv2.LINE_AA,
                 )
+
+        if mode == "face":
+            self._draw_tracking_overlay(annotated, detections)
 
         return annotated, detections
 
@@ -350,7 +425,7 @@ class CameraService:
                         f"Failed to read frame ({self.consecutive_failures}) "
                         f"on backend={self.capture_backend}"
                     )
-                    time.sleep(0.03)
+                    time.sleep(0.01)
 
                     if self.consecutive_failures >= 10:
                         self.last_error = (
@@ -358,35 +433,59 @@ class CameraService:
                             f"restarting camera"
                         )
                         self.restart_camera()
-
                     continue
 
                 self.consecutive_failures = 0
+                frame = self._rotate_frame(frame)
+                self.last_frame_ts = time.time()
 
                 raw_jpeg = self._encode_jpeg(frame)
 
                 with self.lock:
                     current_mode = self.mode
 
-                if current_mode == "detection":
-                    annotated, detections = self._run_detection(frame)
-                    annotated_jpeg = self._encode_jpeg(annotated)
-                else:
-                    annotated_jpeg = None
-                    detections = []
+                annotated_jpeg = None
+                detections: list[dict] = []
+
+                if current_mode != "raw":
+                    now = time.time()
+                    should_run_inference = (
+                        self.last_mode_for_annotation != current_mode
+                        or self.last_annotated_frame is None
+                        or (now - self.last_inference_time) >= self.inference_interval_s
+                    )
+
+                    if should_run_inference:
+                        annotated_frame, detections = self._run_model_mode(frame, current_mode)
+                        self.last_annotated_frame = annotated_frame
+                        self.last_mode_for_annotation = current_mode
+                        self.last_inference_time = now
+                        annotated_jpeg = self._encode_jpeg(annotated_frame)
+                        if annotated_jpeg is not None:
+                            self.latest_annotated_jpeg = annotated_jpeg
+                            self.latest_detections = detections
+                    else:
+                        if self.last_annotated_frame is not None:
+                            annotated_jpeg = self._encode_jpeg(self.last_annotated_frame)
+                        detections = self.latest_detections
 
                 with self.lock:
                     self.latest_raw_jpeg = raw_jpeg
-                    self.latest_annotated_jpeg = annotated_jpeg
-                    self.latest_detections = detections
+                    if current_mode == "raw":
+                        self.latest_annotated_jpeg = None
+                        self.latest_detections = []
+                    elif annotated_jpeg is not None:
+                        self.latest_annotated_jpeg = annotated_jpeg
+                        self.latest_detections = detections
                     self.last_error = None
 
-                time.sleep(0.01)
+                time.sleep(0.001)
 
             except Exception as e:
                 self.last_error = str(e)
                 print(f"[CAMERA] loop error: {e}")
                 time.sleep(0.2)
+
                 try:
                     self.restart_camera()
                 except Exception as inner:
@@ -400,9 +499,9 @@ class CameraService:
     def get_jpeg(self) -> Optional[bytes]:
         self.mark_access()
         with self.lock:
-            if self.mode == "detection":
-                return self.latest_annotated_jpeg
-            return self.latest_raw_jpeg
+            if self.mode == "raw":
+                return self.latest_raw_jpeg
+            return self.latest_annotated_jpeg or self.latest_raw_jpeg
 
     def get_detections(self) -> list[dict]:
         self.mark_access()
@@ -419,7 +518,7 @@ class CameraService:
                 try:
                     actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
                     actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-                    actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0)
+                    actual_fps = float(cv2.CAP_PROP_FPS and self.cap.get(cv2.CAP_PROP_FPS) or 0)
                 except Exception:
                     pass
 
@@ -428,9 +527,10 @@ class CameraService:
                 "enabled": self.enabled,
                 "running": self.running,
                 "mode": self.mode,
+                "available_modes": sorted(SUPPORTED_MODES),
                 "stream_clients": self.stream_clients,
-                "model_path": str(MODEL_PATH),
-                "model_loaded": self.model is not None,
+                "model_paths": {k: str(v) for k, v in self.model_paths.items()},
+                "models_loaded": {k: self.models[k] is not None for k in self.models},
                 "raw_frame_ready": self.latest_raw_jpeg is not None,
                 "annotated_frame_ready": self.latest_annotated_jpeg is not None,
                 "detection_count": len(self.latest_detections),
@@ -444,6 +544,8 @@ class CameraService:
                 "device_index": self.device_index,
                 "device_path": self.device_path,
                 "active_source": self.active_source,
+                "last_frame_ts": self.last_frame_ts,
+                "rotation": "90cw",
             }
 
 
