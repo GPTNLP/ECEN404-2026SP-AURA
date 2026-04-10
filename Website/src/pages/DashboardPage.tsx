@@ -41,8 +41,14 @@ type AdminListResponse = {
   items: DeviceRecord[];
 };
 
-const API_BASE = "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
-const DEVICE_ID = "jetson-001";
+const API_BASE =
+  (import.meta.env.VITE_AUTH_API_BASE as string | undefined)?.trim() ||
+  "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
+
+const DEVICE_ID =
+  (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() ||
+  "jetson-001";
+
 const LS_TOKEN = "aura-auth-token";
 
 function dotColor(status: HealthStatus) {
@@ -80,6 +86,18 @@ function formatUpdated(unixSeconds?: number) {
 function fmt(value?: number | null, suffix = "", digits = 1) {
   if (value == null || Number.isNaN(value)) return "—";
   return `${value.toFixed(digits)}${suffix}`;
+}
+
+function statusTextFromBool(value?: boolean | null) {
+  if (value === true) return "Ready";
+  if (value === false) return "Not Ready";
+  return "Unknown";
+}
+
+function healthFromReadyText(value: string): HealthStatus {
+  if (value === "Ready") return "OK";
+  if (value === "Not Ready") return "BAD";
+  return "WARN";
 }
 
 export default function DashboardPage() {
@@ -152,6 +170,9 @@ export default function DashboardPage() {
 
   const thermalsHealth = thermalStatus(s?.temperature_c);
 
+  const aiReadyText = statusTextFromBool(s?.ollama_ready);
+  const vectorReadyText = statusTextFromBool(s?.vector_db_ready);
+
   return (
     <div className="dashboard-page">
       <div className="aura-header">
@@ -176,12 +197,43 @@ export default function DashboardPage() {
         </div>
 
         <div className="filo-grid">
-          <FiloCard label="Battery" value={fmt(s?.battery_percent, "%", 1)} sub="Robot power" />
-          <FiloCard label="Battery Voltage" value={fmt(s?.battery_voltage, " V", 2)} sub="Pack voltage" />
-          <FiloCard label="RAM Usage" value={fmt(s?.ram_percent, "%", 1)} sub="Memory load" />
-          <FiloCard label="CPU Usage" value={fmt(s?.cpu_percent, "%", 1)} sub="Processor load" />
-          <FiloCard label="GPU Usage" value={fmt(extra?.gpu_percent, "%", 1)} sub="GPU load" />
-          <FiloCard label="Uptime" value={formatUptime(extra?.uptime_seconds)} sub="Since boot" />
+          <FiloCard
+            label="RAM Usage"
+            value={fmt(s?.ram_percent, "%", 1)}
+            sub="Memory load"
+          />
+          <FiloCard
+            label="CPU Usage"
+            value={fmt(s?.cpu_percent, "%", 1)}
+            sub="Processor load"
+          />
+          <FiloCard
+            label="GPU Usage"
+            value={fmt(extra?.gpu_percent, "%", 1)}
+            sub="GPU load"
+          />
+          <FiloCard
+            label="Uptime"
+            value={formatUptime(extra?.uptime_seconds)}
+            sub="Since boot"
+          />
+          <FiloCard
+            label="Active DB"
+            value={extra?.db_name || "None"}
+            sub="Loaded on Jetson"
+          />
+          <FiloCard
+            label="AI (LLM)"
+            value={aiReadyText}
+            sub="Ollama status"
+            status={healthFromReadyText(aiReadyText)}
+          />
+          <FiloCard
+            label="Vector DB"
+            value={vectorReadyText}
+            sub="RAG system"
+            status={healthFromReadyText(vectorReadyText)}
+          />
         </div>
       </section>
 
@@ -201,12 +253,25 @@ export default function DashboardPage() {
   );
 }
 
-function FiloCard({ label, value, sub }: { label: string; value: string; sub: string }) {
+function FiloCard({
+  label,
+  value,
+  sub,
+  status,
+}: {
+  label: string;
+  value: string;
+  sub: string;
+  status?: HealthStatus;
+}) {
+  const dot =
+    status != null ? dotColor(status) : "var(--accent)";
+
   return (
     <div className="filo-item">
       <div className="filo-top">
         <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: "var(--accent)" }} />
+        <div className="filo-dot" style={{ background: dot }} />
       </div>
       <div className="filo-value">{value}</div>
       <div className="filo-sub">{sub}</div>
