@@ -1,220 +1,153 @@
 #!/usr/bin/env python3
-import re
 import queue
+import re
 import subprocess
 import threading
 import tkinter as tk
 from tkinter import font as tkfont
-from datetime import datetime
 
 
 SERVICE_NAME = "aura-agent.service"
-MAX_LOG_LINES = 250
+MAX_LOG_LINES = 220
+
+STATUS_STYLES = {
+    "BOOTING": {"fg": "#7dd3fc", "sub": "Starting services"},
+    "READY": {"fg": "#a7f3d0", "sub": "Ready"},
+    "LISTENING": {"fg": "#67e8f9", "sub": "Listening for wake word"},
+    "THINKING": {"fg": "#fcd34d", "sub": "Thinking"},
+    "SPEAKING": {"fg": "#c4b5fd", "sub": "Speaking"},
+    "VECTORIZING": {"fg": "#f9a8d4", "sub": "Vectorizing PDFs"},
+    "COMMAND": {"fg": "#fdba74", "sub": "Running command"},
+    "ERROR": {"fg": "#fca5a5", "sub": "Check live console"},
+    "OFFLINE": {"fg": "#94a3b8", "sub": "Waiting for agent"},
+}
 
 
 class AuraConsoleApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("AURA Console")
+        self.root.title("AURA")
         self.root.configure(bg="#05070a")
         self.root.attributes("-fullscreen", True)
-        self.root.bind("<Escape>", self.on_escape)
-        self.root.bind("q", self.on_escape)
+        self.root.bind("<Escape>", self.on_close)
+        self.root.bind("q", self.on_close)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.log_queue: queue.Queue[str] = queue.Queue()
-        self.reader_thread = None
-        self.reader_process = None
         self.running = True
+        self.reader_process = None
+        self.log_queue: queue.Queue[str] = queue.Queue()
+
+        self.state = "BOOTING"
 
         self.status_text = tk.StringVar(value="BOOTING")
-        self.substatus_text = tk.StringVar(value="Waiting for AURA agent logs...")
-        self.clock_text = tk.StringVar(value="")
-        self.mode_text = tk.StringVar(value="MODE: INIT")
-        self.agent_text = tk.StringVar(value=f"SOURCE: {SERVICE_NAME}")
-        self.last_event_text = tk.StringVar(value="LAST EVENT: none")
+        self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
+        self.banner_text = tk.StringVar(value="AURA")
 
         self._build_ui()
         self._start_reader()
-        self._tick_clock()
         self._poll_logs()
 
     def _build_ui(self):
-        screen_w = self.root.winfo_screenwidth()
+        sw = self.root.winfo_screenwidth()
 
-        title_font = tkfont.Font(
-            family="Courier",
-            size=max(22, int(screen_w * 0.022)),
-            weight="bold",
-        )
-        status_font = tkfont.Font(
-            family="Courier",
-            size=max(36, int(screen_w * 0.04)),
-            weight="bold",
-        )
-        sub_font = tkfont.Font(
-            family="Courier",
-            size=max(14, int(screen_w * 0.015)),
-        )
-        meta_font = tkfont.Font(
-            family="Courier",
-            size=max(12, int(screen_w * 0.012)),
-        )
-        log_font = tkfont.Font(
-            family="Courier",
-            size=max(12, int(screen_w * 0.012)),
-        )
+        title_font = tkfont.Font(family="Courier", size=max(22, int(sw * 0.030)), weight="bold")
+        status_font = tkfont.Font(family="Courier", size=max(28, int(sw * 0.050)), weight="bold")
+        sub_font = tkfont.Font(family="Courier", size=max(11, int(sw * 0.016)))
+        section_font = tkfont.Font(family="Courier", size=max(17, int(sw * 0.024)), weight="bold")
+        log_font = tkfont.Font(family="Courier", size=max(9, int(sw * 0.013)))
 
         outer = tk.Frame(self.root, bg="#05070a")
-        outer.pack(fill="both", expand=True, padx=18, pady=18)
+        outer.pack(fill="both", expand=True, padx=12, pady=12)
 
-        header = tk.Frame(
+        self.header = tk.Frame(
             outer,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        header.pack(fill="x", pady=(0, 14))
+        self.header.pack(fill="x", pady=(0, 10))
 
-        tk.Label(
-            header,
-            text="AURA // AUTONOMOUS UNIVERSITY ROBOT ASSISTANT",
+        self.header_label = tk.Label(
+            self.header,
+            textvariable=self.banner_text,
             fg="#14f195",
             bg="#0b0f14",
             font=title_font,
-            anchor="w",
-            padx=18,
-            pady=12,
-        ).pack(fill="x")
+            anchor="center",
+            padx=10,
+            pady=10,
+        )
+        self.header_label.pack(fill="x")
 
-        mid = tk.Frame(outer, bg="#05070a")
-        mid.pack(fill="both", expand=False)
-
-        status_card = tk.Frame(
-            mid,
+        self.status_card = tk.Frame(
+            outer,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        status_card.pack(fill="x", pady=(0, 14))
+        self.status_card.pack(fill="x", pady=(0, 10))
 
-        tk.Label(
-            status_card,
+        self.status_label = tk.Label(
+            self.status_card,
             textvariable=self.status_text,
-            fg="#eafff5",
+            fg=STATUS_STYLES["BOOTING"]["fg"],
             bg="#0b0f14",
             font=status_font,
-        ).pack(fill="x", pady=(16, 6))
+            anchor="center",
+            pady=12,
+        )
+        self.status_label.pack(fill="x")
 
-        tk.Label(
-            status_card,
-            textvariable=self.substatus_text,
-            fg="#8bb8a7",
+        self.sub_label = tk.Label(
+            self.status_card,
+            textvariable=self.sub_text,
+            fg="#b8c4cf",
             bg="#0b0f14",
             font=sub_font,
-        ).pack(fill="x", pady=(0, 14))
-
-        meta = tk.Frame(mid, bg="#05070a")
-        meta.pack(fill="x", pady=(0, 14))
-
-        self._meta_box(meta, "STATE", self.mode_text, meta_font).pack(
-            side="left", fill="x", expand=True, padx=(0, 7)
+            justify="center",
+            wraplength=max(220, sw - 80),
+            padx=14,
+            pady=(0, 12),
         )
-        self._meta_box(meta, "TIME", self.clock_text, meta_font).pack(
-            side="left", fill="x", expand=True, padx=7
-        )
-        self._meta_box(meta, "AGENT", self.agent_text, meta_font).pack(
-            side="left", fill="x", expand=True, padx=(7, 0)
-        )
+        self.sub_label.pack(fill="x")
 
-        event_card = tk.Frame(
+        self.console_card = tk.Frame(
             outer,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        event_card.pack(fill="x", pady=(0, 14))
+        self.console_card.pack(fill="both", expand=True)
 
         tk.Label(
-            event_card,
-            textvariable=self.last_event_text,
-            fg="#d8fff0",
-            bg="#0b0f14",
-            font=sub_font,
-            anchor="w",
-            justify="left",
-            padx=16,
-            pady=10,
-        ).pack(fill="x")
-
-        logs_card = tk.Frame(
-            outer,
-            bg="#0b0f14",
-            highlightbackground="#14f195",
-            highlightthickness=1,
-        )
-        logs_card.pack(fill="both", expand=True)
-
-        tk.Label(
-            logs_card,
+            self.console_card,
             text="LIVE CONSOLE",
             fg="#14f195",
             bg="#0b0f14",
-            font=title_font,
+            font=section_font,
             anchor="w",
-            padx=16,
+            padx=12,
             pady=10,
         ).pack(fill="x")
 
         self.log_text = tk.Text(
-            logs_card,
+            self.console_card,
             bg="#05070a",
-            fg="#9effc7",
-            insertbackground="#9effc7",
+            fg="#a7f3d0",
+            insertbackground="#a7f3d0",
             relief="flat",
             wrap="word",
             font=log_font,
-            padx=16,
-            pady=16,
+            padx=12,
+            pady=12,
             state="disabled",
         )
         self.log_text.pack(fill="both", expand=True)
 
-    def _meta_box(self, parent, title: str, var: tk.StringVar, font_obj):
-        box = tk.Frame(
-            parent,
-            bg="#0b0f14",
-            highlightbackground="#14f195",
-            highlightthickness=1,
-        )
-
-        tk.Label(
-            box,
-            text=title,
-            fg="#14f195",
-            bg="#0b0f14",
-            font=font_obj,
-            anchor="w",
-            padx=12,
-            pady=10,
-        ).pack(fill="x")
-
-        tk.Label(
-            box,
-            textvariable=var,
-            fg="#eafff5",
-            bg="#0b0f14",
-            font=font_obj,
-            anchor="w",
-            padx=12,
-            pady=10,
-        ).pack(fill="x")
-
-        return box
+        self._apply_state_style("BOOTING")
 
     def _start_reader(self):
-        self.reader_thread = threading.Thread(target=self._reader_worker, daemon=True)
-        self.reader_thread.start()
+        threading.Thread(target=self._reader_worker, daemon=True).start()
 
     def _reader_worker(self):
         cmd = [
@@ -228,7 +161,6 @@ class AuraConsoleApp:
             "-o",
             "cat",
         ]
-
         try:
             self.reader_process = subprocess.Popen(
                 cmd,
@@ -241,51 +173,107 @@ class AuraConsoleApp:
             self.log_queue.put(f"[UI ERROR] Failed to start journal reader: {e}")
             return
 
-        try:
-            if self.reader_process.stdout is None:
-                self.log_queue.put("[UI ERROR] journalctl stdout unavailable")
-                return
+        if self.reader_process.stdout is None:
+            self.log_queue.put("[UI ERROR] journalctl stdout unavailable")
+            return
 
-            for raw_line in self.reader_process.stdout:
-                if not self.running:
-                    break
-
-                line = raw_line.rstrip("\n")
-                if not line.strip():
-                    continue
-
+        for raw_line in self.reader_process.stdout:
+            if not self.running:
+                break
+            line = raw_line.rstrip("\n")
+            if line.strip():
                 self.log_queue.put(line)
-
-        except Exception as e:
-            self.log_queue.put(f"[UI ERROR] Reader crashed: {e}")
-
-    def _tick_clock(self):
-        self.clock_text.set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        if self.running:
-            self.root.after(500, self._tick_clock)
 
     def _poll_logs(self):
         processed = 0
-
         while processed < 50:
             try:
                 line = self.log_queue.get_nowait()
             except queue.Empty:
                 break
 
-            self._append_log(line)
-            self._update_state_from_line(line)
+            self._handle_line(line)
             processed += 1
 
         if self.running:
             self.root.after(100, self._poll_logs)
 
-    def _append_log(self, line: str):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        display_line = f"[{timestamp}] {line}\n"
+    def _handle_line(self, line: str):
+        self._append_log(line)
 
+        explicit_state, explicit_detail = self._extract_explicit_state(line)
+        if explicit_state:
+            self._set_state(explicit_state, explicit_detail or self._friendly_subtext(explicit_state))
+            return
+
+        lower = line.lower()
+        compact = self._compact(line)
+
+        if "[wake check]" in lower or "[voice] listening" in lower:
+            self._set_state("LISTENING", "Listening for wake word")
+            return
+
+        if "[voice] question received" in lower or "[chat] running rag query" in lower:
+            self._set_state("THINKING", compact)
+            return
+
+        if "[voice] speaking" in lower or "[voice] answered" in lower or "[tts]" in lower:
+            self._set_state("SPEAKING", compact)
+            return
+
+        if "[jetson db]" in lower or "[rag job]" in lower:
+            if "failed" in lower:
+                self._set_state("ERROR", compact)
+            elif "completed" in lower or "loaded" in lower or "deleted" in lower or "ready" in lower:
+                self._set_state("READY", compact)
+            else:
+                self._set_state("VECTORIZING", compact)
+            return
+
+        if "[command]" in lower:
+            self._set_state("COMMAND", compact)
+            return
+
+        if "[status] ok" in lower and self.state in {"BOOTING", "OFFLINE"}:
+            self._set_state("READY", "Ready")
+            return
+
+        if "traceback" in lower or "failed" in lower or "error" in lower:
+            self._set_state("ERROR", compact)
+
+    def _extract_explicit_state(self, line: str):
+        match = re.search(r"\[UI_STATE\]\s+([A-Z_]+)(?:\s+\|\s+(.*))?$", line)
+        if not match:
+            return None, None
+        state = match.group(1).strip().upper()
+        detail = (match.group(2) or "").strip()
+        return state, detail
+
+    def _friendly_subtext(self, state: str) -> str:
+        return STATUS_STYLES.get(state, STATUS_STYLES["READY"])["sub"]
+
+    def _compact(self, line: str) -> str:
+        line = re.sub(r"\s+", " ", line).strip()
+        return line[:110]
+
+    def _set_state(self, state: str, subtitle: str):
+        if not subtitle:
+            subtitle = self._friendly_subtext(state)
+
+        self.state = state
+        self.status_text.set(state)
+        self.sub_text.set(subtitle)
+        self._apply_state_style(state)
+
+    def _apply_state_style(self, state: str):
+        style = STATUS_STYLES.get(state, STATUS_STYLES["READY"])
+        self.status_label.configure(fg=style["fg"])
+        self.status_card.configure(highlightbackground=style["fg"])
+        self.header.configure(highlightbackground=style["fg"])
+
+    def _append_log(self, line: str):
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", display_line)
+        self.log_text.insert("end", line + "\n")
 
         line_count = int(self.log_text.index("end-1c").split(".")[0])
         if line_count > MAX_LOG_LINES:
@@ -294,83 +282,7 @@ class AuraConsoleApp:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    def _set_status(self, status: str, substatus: str, mode: str, last_event: str):
-        self.status_text.set(status)
-        self.substatus_text.set(substatus)
-        self.mode_text.set(f"MODE: {mode}")
-        self.last_event_text.set(f"LAST EVENT: {last_event}")
-
-    def _clean_event(self, line: str) -> str:
-        line = re.sub(r"\s+", " ", line).strip()
-        return line[:140]
-
-    def _update_state_from_line(self, line: str):
-        lower = line.lower()
-        clean = self._clean_event(line)
-
-        if "[startup]" in lower or "telemetry agent running" in lower:
-            self._set_status("ONLINE", "AURA services are up", "READY", clean)
-            return
-
-        if "[wake check]" in lower or "wake" in lower:
-            self._set_status("LISTENING", "Wake word detection active", "VOICE", clean)
-            return
-
-        if "listening" in lower and "[voice" in lower:
-            self._set_status("LISTENING", "Microphone input in progress", "VOICE", clean)
-            return
-
-        if "[voice]" in lower and "answered" in lower:
-            self._set_status("SPEAKING", "AURA is replying out loud", "VOICE", clean)
-            return
-
-        if "[voice]" in lower or "[tts]" in lower or "tts" in lower:
-            self._set_status("VOICE", "Voice pipeline active", "VOICE", clean)
-            return
-
-        if "[chat]" in lower and (
-            "running rag query" in lower or "received command" in lower
-        ):
-            self._set_status("THINKING", "Running local RAG/LLM query", "LLM", clean)
-            return
-
-        if "[chat]" in lower and (
-            "raw answer" in lower or "ack sent successfully" in lower
-        ):
-            self._set_status("READY", "Response completed", "LLM", clean)
-            return
-
-        if "[jetson db]" in lower and (
-            "loading" in lower
-            or "loaded" in lower
-            or "vector" in lower
-            or "build" in lower
-            or "chunk" in lower
-            or "delete" in lower
-            or "database" in lower
-        ):
-            if "loaded" in lower or "deleted" in lower:
-                self._set_status("READY", "Database operation completed", "DATABASE", clean)
-            else:
-                self._set_status("VECTORIZING", "Working on local database files", "DATABASE", clean)
-            return
-
-        if "[command]" in lower:
-            self._set_status("COMMAND", "Processing control command", "CONTROL", clean)
-            return
-
-        if "[status] ok" in lower:
-            self._set_status("READY", "Systems nominal", "READY", clean)
-            return
-
-        if "error" in lower or "failed" in lower or "traceback" in lower:
-            self._set_status("ERROR", "Check live console for details", "FAULT", clean)
-            return
-
-    def on_escape(self, event=None):
-        self.on_close()
-
-    def on_close(self):
+    def on_close(self, event=None):
         self.running = False
         try:
             if self.reader_process and self.reader_process.poll() is None:

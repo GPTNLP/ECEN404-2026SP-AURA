@@ -70,6 +70,10 @@ runtime_config = {
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 
+VOICE_RAG_TIMEOUT_SECONDS = 45.0
+VOICE_TTS_TIMEOUT_SECONDS = 20.0
+CHAT_RAG_TIMEOUT_SECONDS = 60.0
+
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
 
@@ -89,6 +93,31 @@ def quiet_print(key: str, message: str) -> None:
     if _last_messages.get(key) != message:
         print(message)
         _last_messages[key] = message
+
+
+_current_ui_state: Optional[str] = None
+
+
+def set_ui_state(state: str, detail: str = "") -> None:
+    global _current_ui_state
+
+    state = (state or "READY").strip().upper()
+    detail = (detail or "").strip()
+
+    payload = f"[UI_STATE] {state}"
+    if detail:
+        payload += f" | {detail}"
+
+    if _current_ui_state != payload:
+        print(payload)
+        _current_ui_state = payload
+
+
+def truncate_for_ui(text: str, limit: int = 80) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
 
 
 # -------------------------------------------------------------------
@@ -201,6 +230,44 @@ def extract_speak_payload(text: str) -> str:
     return payload
 
 
+async def speak_with_timeout(text: str, ui_detail: str = "") -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+
+    detail = truncate_for_ui(ui_detail or text)
+    set_ui_state("SPEAKING", detail)
+    quiet_print("voice_speaking", f"[VOICE] speaking: {truncate_for_ui(text, 120)}")
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(tts_service.speak, text),
+            timeout=VOICE_TTS_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        quiet_print("tts_timeout", "[TTS] timeout waiting for playback")
+        send_or_queue_log(
+            "warning",
+            "tts_timeout",
+            "TTS playback timed out",
+            {"text": truncate_for_ui(text, 160)},
+        )
+        return False
+    except Exception as e:
+        quiet_print("tts_fail", f"[TTS] failed: {e}")
+        send_or_queue_log(
+            "warning",
+            "tts_failed",
+            f"TTS failed: {e}",
+            {"text": truncate_for_ui(text, 160)},
+        )
+        return False
+
+
+async def query_rag_with_timeout(query: str, timeout_seconds: float):
+    return await asyncio.wait_for(rag_manager.query(query), timeout=timeout_seconds)
+
+
 async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
     global voice_idle_seconds
 
@@ -210,6 +277,9 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
 
     voice_idle_seconds = 0
     lowered = text.lower()
+
+    set_ui_state("THINKING", truncate_for_ui(text))
+    quiet_print("voice_question_received", f"[VOICE] question received: {text}")
 
     try:
         if "speak" in lowered:
@@ -223,7 +293,7 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text, "spoken_text": speak_payload},
                 )
                 quiet_print("voice_action", f"[VOICE] tts -> {speak_payload}")
-                await asyncio.to_thread(tts_service.speak, speak_payload)
+                await speak_with_timeout(speak_payload, speak_payload)
             else:
                 send_or_queue_log(
                     "warning",
@@ -232,11 +302,15 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text},
                 )
                 quiet_print("voice_action", "[VOICE] tts requested but no payload found")
-                await asyncio.to_thread(tts_service.speak, "Please tell me what you want me to say.")
+                await speak_with_timeout(
+                    "Please tell me what you want me to say.",
+                    "Prompting for speech text",
+                )
             return
 
         if movement and movement in MOVEMENT_COMMANDS:
             serial_link.send_command(movement, "")
+            set_ui_state("COMMAND", movement)
             quiet_print("voice_move", f"[VOICE] movement command: {movement}")
             send_or_queue_log(
                 "info",
@@ -247,7 +321,12 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
             return
 
         chat_manager.add_message("user", text, api, DEVICE_ID)
-        answer = await rag_manager.query(text)
+        set_ui_state("THINKING", "Running local RAG query")
+
+        try:
+            answer = await query_rag_with_timeout(text, VOICE_RAG_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            answer = "I timed out while thinking. Please ask again."
 
         if isinstance(answer, dict):
             answer = answer.get("answer") or answer.get("response") or str(answer)
@@ -258,7 +337,7 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
         answer = str(answer)
         chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
-        await asyncio.to_thread(tts_service.speak, answer)
+        await speak_with_timeout(answer, truncate_for_ui(answer))
 
         quiet_print("voice_chat", f"[VOICE] answered: {text}")
         send_or_queue_log(
@@ -269,6 +348,7 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
         )
 
     except Exception as e:
+        set_ui_state("ERROR", truncate_for_ui(str(e)))
         quiet_print("voice_chat_fail", f"[VOICE] failed: {e}")
         send_or_queue_log(
             "warning",
@@ -276,6 +356,10 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
             f"Voice chat failed: {e}",
             {"text": text, "intent": intent, "movement": movement},
         )
+    finally:
+        if voice_running:
+            set_ui_state("LISTENING", "Wake word active")
+            quiet_print("voice_listening", "[VOICE] listening")
 
 
 def build_stt_service() -> STTService:
@@ -301,31 +385,37 @@ async def start_voice_loop():
 
     if stt_task and not stt_task.done():
         quiet_print("voice_already_running", "[VOICE] already running")
+        set_ui_state("LISTENING", "Wake word active")
         return
 
     stt_service = build_stt_service()
     voice_loaded = True
 
     async def _runner():
-        global voice_running
+        global voice_running, voice_loaded
         try:
             voice_running = True
             quiet_print("voice_start", "[VOICE] started")
+            set_ui_state("LISTENING", "Wake word active")
+            quiet_print("voice_listening", "[VOICE] listening")
             await stt_service.continuous_stt_loop()
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            set_ui_state("ERROR", truncate_for_ui(str(e)))
             quiet_print("voice_loop_error", f"[VOICE] loop failed: {e}")
             raise
         finally:
             voice_running = False
+            voice_loaded = False
             quiet_print("voice_stop", "[VOICE] stopped")
+            set_ui_state("READY", "Voice stopped")
 
     stt_task = asyncio.create_task(_runner())
 
 
 async def stop_voice_loop():
-    global stt_task, stt_service, voice_running
+    global stt_task, stt_service, voice_running, voice_loaded
 
     if stt_service is not None:
         try:
@@ -349,7 +439,9 @@ async def stop_voice_loop():
 
     stt_service = None
     voice_running = False
+    voice_loaded = False
     quiet_print("voice_stop", "[VOICE] stopped")
+    set_ui_state("READY", "Voice stopped")
 
 
 # -------------------------------------------------------------------
@@ -446,6 +538,7 @@ async def command_loop():
                 if cmd in MOVEMENT_COMMANDS:
                     try:
                         serial_link.send_command(cmd, payload.get("value", ""))
+                        set_ui_state("COMMAND", cmd)
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -456,7 +549,9 @@ async def command_loop():
                             },
                         )
                         quiet_print("command", f"[COMMAND] ok {cmd}")
+                        set_ui_state("READY", "Ready")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -483,6 +578,7 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", "[COMMAND] camera raw")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -509,6 +605,7 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", "[COMMAND] camera detection")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -535,6 +632,7 @@ async def command_loop():
                         )
                         quiet_print("camera_cmd", "[COMMAND] camera off")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -560,6 +658,7 @@ async def command_loop():
                         )
                         quiet_print("voice_cmd", "[COMMAND] voice start")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -585,6 +684,7 @@ async def command_loop():
                         )
                         quiet_print("voice_cmd", "[COMMAND] voice stop")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
@@ -600,6 +700,7 @@ async def command_loop():
                     db_name = (payload.get("db_name") or LOCAL_DB_NAME or "").strip()
                     try:
                         print(f"[JETSON DB] loading database '{db_name}' from website")
+                        set_ui_state("VECTORIZING", f"Loading {db_name}")
                         ok = await rag_manager.load_remote_db(db_name, api)
                         status_note = f"Loaded vector DB '{db_name}'" if ok else f"Failed to load '{db_name}'"
 
@@ -619,9 +720,12 @@ async def command_loop():
 
                         if ok:
                             print(f"[JETSON DB] loaded database '{db_name}' successfully")
+                            set_ui_state("READY", f"Loaded {db_name}")
                         else:
                             print(f"[JETSON DB] failed loading database '{db_name}'")
+                            set_ui_state("ERROR", f"Failed to load {db_name}")
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         print(f"[JETSON DB] sync_vectors failed for '{db_name}': {e}")
                         await asyncio.to_thread(
                             api.ack_command,
@@ -643,6 +747,7 @@ async def command_loop():
                         db_dir = rag_manager.get_db_dir(db_name)
 
                         print(f"[JETSON DB] deleting database '{db_name}' from Jetson")
+                        set_ui_state("VECTORIZING", f"Deleting {db_name}")
 
                         if db_dir.exists():
                             import shutil
@@ -669,8 +774,10 @@ async def command_loop():
                         )
 
                         print(f"[JETSON DB] deleted database '{db_name}' from Jetson")
+                        set_ui_state("READY", f"Deleted {db_name}")
 
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         print(f"[JETSON DB] delete_vectors failed for '{db_name}': {e}")
                         await asyncio.to_thread(
                             api.ack_command,
@@ -690,6 +797,8 @@ async def command_loop():
                     session_id = payload.get("session_id", chat_manager.active_session_id)
 
                     try:
+                        set_ui_state("THINKING", "Chat request received")
+
                         if session_id != chat_manager.active_session_id:
                             chat_manager.set_session(session_id)
 
@@ -705,8 +814,12 @@ async def command_loop():
                         chat_manager.add_message("user", query, api, DEVICE_ID)
 
                         print(f"[CHAT] running RAG query on db='{rag_manager.active_db_name}': {query}")
+                        set_ui_state("THINKING", truncate_for_ui(query))
 
-                        answer = await rag_manager.query(query)
+                        try:
+                            answer = await query_rag_with_timeout(query, CHAT_RAG_TIMEOUT_SECONDS)
+                        except asyncio.TimeoutError:
+                            answer = "I timed out while generating a response."
 
                         if isinstance(answer, dict):
                             answer = answer.get("answer") or answer.get("response") or str(answer)
@@ -732,12 +845,14 @@ async def command_loop():
                         }
 
                         print(f"[CHAT] sending ack: {ack_payload}")
+                        set_ui_state("READY", "Chat response ready")
 
                         await asyncio.to_thread(api.ack_command, ack_payload)
 
                         print("[CHAT] ack sent successfully")
 
                     except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
                         print(f"[CHAT ERROR] {e}")
 
                         await asyncio.to_thread(
@@ -790,6 +905,7 @@ async def rag_build_loop():
                 "rag_job_claimed",
                 f"[RAG JOB] claimed '{db_name}' with {len(document_paths)} PDF(s)",
             )
+            set_ui_state("VECTORIZING", f"{db_name} ({len(document_paths)} PDF(s))")
 
             await asyncio.to_thread(
                 api.ack_rag_build_job,
@@ -823,6 +939,7 @@ async def rag_build_loop():
                     "rag_job_completed",
                     f"[RAG JOB] completed '{db_name}'",
                 )
+                set_ui_state("READY", f"{db_name} ready")
 
             except Exception as build_error:
                 await asyncio.to_thread(
@@ -841,6 +958,7 @@ async def rag_build_loop():
                     "rag_job_failed",
                     f"[RAG JOB] failed '{db_name}': {build_error}",
                 )
+                set_ui_state("ERROR", truncate_for_ui(str(build_error)))
 
         except Exception as poll_error:
             quiet_print("rag_job_poll_error", f"[RAG JOB] poll failed: {poll_error}")
@@ -970,6 +1088,7 @@ async def lifespan(app_instance: FastAPI):
             send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
             quiet_print("voice", f"[VOICE] failed to start: {e}")
 
+    set_ui_state("READY", "AURA online")
     quiet_print("startup", "[STARTUP] telemetry agent running")
     yield
 
@@ -1115,7 +1234,11 @@ async def rag_chat(req: _ChatRequest):
         chat_manager.set_session(session_id)
 
     chat_manager.add_message("user", req.query, api, DEVICE_ID)
-    answer = await rag_manager.query(req.query)
+
+    try:
+        answer = await query_rag_with_timeout(req.query, CHAT_RAG_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        answer = "I timed out while generating a response."
 
     if isinstance(answer, dict):
         answer = answer.get("answer") or answer.get("response") or str(answer)
