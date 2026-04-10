@@ -1,0 +1,691 @@
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+
+#define SDA_PIN 4
+#define SCL_PIN 5
+#define PCA_ADDR 0x40
+
+Adafruit_PWMServoDriver pca(PCA_ADDR);
+
+const uint8_t NUM_SERVOS = 4;
+const uint8_t CH[NUM_SERVOS] = {0, 1, 2, 3};
+
+// PWM0 = Right shoulder
+// PWM1 = Left shoulder
+// PWM2 = Right arm
+// PWM3 = Left arm
+const uint16_t SERVO_MIN[NUM_SERVOS]  = {1650,  650, 1220, 1125};
+const uint16_t SERVO_MAX[NUM_SERVOS]  = {2300, 1650, 1625, 1530};
+const uint16_t SERVO_HOME[NUM_SERVOS] = {1850, 1100, 1400, 1350};
+
+// Slow/safe motion settings for testing
+const uint16_t SERVO_FREQ = 50;
+const uint16_t STEP_US = 16;
+const unsigned long MOTION_UPDATE_MS = 35;
+const unsigned long PHASE_HOLD_MS = 350;
+
+// Amount the arms move in the opposite direction before returning home
+const uint16_t ARM_RETURN_OVERSHOOT_US = 150;
+
+// Forward-only left shoulder trim.
+// Positive value moves PWM1 farther downward.
+// If this makes the robot turn more left, change it to a negative value.
+const int16_t FORWARD_LEFT_SHOULDER_TRIM_US = 30;
+
+uint16_t currentUs[NUM_SERVOS];
+uint16_t targetUs[NUM_SERVOS];
+
+unsigned long lastMotionUpdate = 0;
+String serialBuffer = "";
+
+// -------------------- Calibrated sequence targets --------------------
+// Shoulders: "max lift"
+const uint16_t RIGHT_SHOULDER_UP_US = SERVO_MAX[0]; // 2300
+const uint16_t LEFT_SHOULDER_UP_US  = SERVO_MIN[1]; // 650
+
+// Arms: forward / backward
+const uint16_t RIGHT_ARM_FORWARD_US  = SERVO_MAX[2]; // 1625
+const uint16_t RIGHT_ARM_BACKWARD_US = SERVO_MIN[2]; // 1220
+const uint16_t LEFT_ARM_FORWARD_US   = SERVO_MIN[3]; // 1125
+const uint16_t LEFT_ARM_BACKWARD_US  = SERVO_MAX[3]; // 1530
+
+// Final standby / ready pose after each movement
+const uint16_t RIGHT_SHOULDER_READY_US = (SERVO_HOME[0] + RIGHT_SHOULDER_UP_US) / 2; // 2075
+const uint16_t LEFT_SHOULDER_READY_US  = (SERVO_HOME[1] + LEFT_SHOULDER_UP_US) / 2;  // 875
+
+// -------------------- Sequence engine --------------------
+enum SequenceType {
+  SEQ_NONE,
+  SEQ_FORWARD,
+  SEQ_BACKWARD,
+  SEQ_TURN_LEFT,
+  SEQ_TURN_RIGHT
+};
+
+enum SequencePhase {
+  PHASE_IDLE,
+  PHASE_SHOULDERS_UP,
+  PHASE_ARMS_MOVE,
+  PHASE_SHOULDERS_HOME,
+  PHASE_ARMS_OPPOSITE,
+  PHASE_ARMS_HOME,
+  PHASE_READY_POSE,
+  PHASE_FINAL_HOME,
+  PHASE_DONE
+};
+
+SequenceType activeSequence = SEQ_NONE;
+SequencePhase activePhase = PHASE_IDLE;
+unsigned long phaseStartMs = 0;
+
+// -------------------- Utility --------------------
+uint16_t usToTicks(uint16_t us) {
+  return (uint16_t)((us * 4096.0) / 20000.0);
+}
+
+uint16_t clampUs(uint8_t i, int us) {
+  if (us < SERVO_MIN[i]) us = SERVO_MIN[i];
+  if (us > SERVO_MAX[i]) us = SERVO_MAX[i];
+  return (uint16_t)us;
+}
+
+void writeServo(uint8_t i, uint16_t us) {
+  us = clampUs(i, us);
+  pca.setPWM(CH[i], 0, usToTicks(us));
+  currentUs[i] = us;
+}
+
+void setTarget(uint8_t i, int us) {
+  targetUs[i] = clampUs(i, us);
+}
+
+void setHomeTargets() {
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    targetUs[i] = SERVO_HOME[i];
+  }
+}
+
+bool allTargetsReached() {
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    if (currentUs[i] != targetUs[i]) return false;
+  }
+  return true;
+}
+
+void cancelSequenceAndHome() {
+  activeSequence = SEQ_NONE;
+  activePhase = PHASE_IDLE;
+  setHomeTargets();
+  Serial.println("ACK:STOP:HOME");
+}
+
+void printStatus() {
+  Serial.println("---- SERVO STATUS ----");
+
+  Serial.print("PWM0 Right shoulder | current=");
+  Serial.print(currentUs[0]);
+  Serial.print(" target=");
+  Serial.println(targetUs[0]);
+
+  Serial.print("PWM1 Left shoulder  | current=");
+  Serial.print(currentUs[1]);
+  Serial.print(" target=");
+  Serial.println(targetUs[1]);
+
+  Serial.print("PWM2 Right arm      | current=");
+  Serial.print(currentUs[2]);
+  Serial.print(" target=");
+  Serial.println(targetUs[2]);
+
+  Serial.print("PWM3 Left arm       | current=");
+  Serial.print(currentUs[3]);
+  Serial.print(" target=");
+  Serial.println(targetUs[3]);
+
+  Serial.print("Sequence = ");
+  Serial.println((int)activeSequence);
+  Serial.print("Phase = ");
+  Serial.println((int)activePhase);
+  Serial.println("----------------------");
+}
+
+void printHelp() {
+  Serial.println();
+  Serial.println("Predefined movement commands:");
+  Serial.println("  forward       -> one slow forward step");
+  Serial.println("  backward      -> one slow backward step");
+  Serial.println("  left          -> one slow left turn step");
+  Serial.println("  right         -> one slow right turn step");
+  Serial.println("  stop          -> cancel active sequence and return true home");
+  Serial.println("  home          -> same as stop");
+  Serial.println();
+
+  Serial.println("Shoulder calibration commands:");
+  Serial.println("  both_up:25");
+  Serial.println("  both_down:25");
+  Serial.println("  r_up:25");
+  Serial.println("  r_down:25");
+  Serial.println("  l_up:25");
+  Serial.println("  l_down:25");
+  Serial.println("  set0:1900");
+  Serial.println("  set1:1100");
+  Serial.println();
+
+  Serial.println("Arm calibration commands:");
+  Serial.println("  both_arm_fwd:25");
+  Serial.println("  both_arm_back:25");
+  Serial.println("  ra_fwd:25");
+  Serial.println("  ra_back:25");
+  Serial.println("  la_fwd:25");
+  Serial.println("  la_back:25");
+  Serial.println("  set2:1400");
+  Serial.println("  set3:1350");
+  Serial.println();
+
+  Serial.println("Other:");
+  Serial.println("  status");
+  Serial.println("  help");
+  Serial.println();
+}
+
+int parseValueAfterColon(String cmd) {
+  int colon = cmd.indexOf(':');
+  if (colon < 0) return -1;
+
+  String valueText = cmd.substring(colon + 1);
+  valueText.trim();
+  if (valueText.length() == 0) return -1;
+
+  return valueText.toInt();
+}
+
+void moveServoRaw(uint8_t idx, int signedDeltaUs) {
+  setTarget(idx, targetUs[idx] + signedDeltaUs);
+
+  Serial.print("ACK:SERVO");
+  Serial.print(idx);
+  Serial.print(":TARGET=");
+  Serial.println(targetUs[idx]);
+}
+
+// -------------------- Manual calibration helpers --------------------
+// Shoulders
+void moveRightShoulderUp(int deltaUs)    { moveServoRaw(0, +deltaUs); }
+void moveRightShoulderDown(int deltaUs)  { moveServoRaw(0, -deltaUs); }
+void moveLeftShoulderUp(int deltaUs)     { moveServoRaw(1, -deltaUs); }
+void moveLeftShoulderDown(int deltaUs)   { moveServoRaw(1, +deltaUs); }
+
+// Arms
+void moveRightArmForward(int deltaUs)    { moveServoRaw(2, +deltaUs); }
+void moveRightArmBackward(int deltaUs)   { moveServoRaw(2, -deltaUs); }
+void moveLeftArmForward(int deltaUs)     { moveServoRaw(3, -deltaUs); }
+void moveLeftArmBackward(int deltaUs)    { moveServoRaw(3, +deltaUs); }
+
+// -------------------- Sequence targets --------------------
+void applyShouldersUpTargets() {
+  setTarget(0, RIGHT_SHOULDER_UP_US);
+  setTarget(1, LEFT_SHOULDER_UP_US);
+}
+
+void applyShouldersHomeTargets() {
+  setTarget(0, SERVO_HOME[0]);
+  setTarget(1, SERVO_HOME[1]);
+}
+
+void applyForwardShouldersHomeTargets() {
+  setTarget(0, SERVO_HOME[0]);
+  setTarget(1, SERVO_HOME[1] + FORWARD_LEFT_SHOULDER_TRIM_US);
+}
+
+void applyArmsHomeTargets() {
+  setTarget(2, SERVO_HOME[2]);
+  setTarget(3, SERVO_HOME[3]);
+}
+
+void applyReadyPoseTargets() {
+  // Ready pose only affects shoulders.
+  setTarget(0, RIGHT_SHOULDER_READY_US);
+  setTarget(1, LEFT_SHOULDER_READY_US);
+}
+
+void applyForwardArmTargets() {
+  setTarget(2, RIGHT_ARM_FORWARD_US);
+  setTarget(3, LEFT_ARM_FORWARD_US);
+}
+
+void applyBackwardArmTargets() {
+  setTarget(2, RIGHT_ARM_BACKWARD_US);
+  setTarget(3, LEFT_ARM_BACKWARD_US);
+}
+
+void applyLeftTurnArmTargets() {
+  // Left turn = right arm forward, left arm backward
+  setTarget(2, RIGHT_ARM_FORWARD_US);
+  setTarget(3, LEFT_ARM_BACKWARD_US);
+}
+
+void applyRightTurnArmTargets() {
+  // Right turn = right arm backward, left arm forward
+  setTarget(2, RIGHT_ARM_BACKWARD_US);
+  setTarget(3, LEFT_ARM_FORWARD_US);
+}
+
+void applyOppositeArmTargets() {
+  if (activeSequence == SEQ_FORWARD) {
+    // After forward, move partway toward backward
+    setTarget(2, RIGHT_ARM_FORWARD_US - ARM_RETURN_OVERSHOOT_US);
+    setTarget(3, LEFT_ARM_FORWARD_US + ARM_RETURN_OVERSHOOT_US);
+    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_FORWARD");
+  }
+  else if (activeSequence == SEQ_BACKWARD) {
+    // After backward, move partway toward forward
+    setTarget(2, RIGHT_ARM_BACKWARD_US + ARM_RETURN_OVERSHOOT_US);
+    setTarget(3, LEFT_ARM_BACKWARD_US - ARM_RETURN_OVERSHOOT_US);
+    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_BACKWARD");
+  }
+  else if (activeSequence == SEQ_TURN_LEFT) {
+    // Left turn = right arm forward, left arm backward
+    setTarget(2, RIGHT_ARM_FORWARD_US - ARM_RETURN_OVERSHOOT_US);
+    setTarget(3, LEFT_ARM_BACKWARD_US - ARM_RETURN_OVERSHOOT_US);
+    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_LEFT");
+  }
+  else if (activeSequence == SEQ_TURN_RIGHT) {
+    // Right turn = right arm backward, left arm forward
+    setTarget(2, RIGHT_ARM_BACKWARD_US + ARM_RETURN_OVERSHOOT_US);
+    setTarget(3, LEFT_ARM_FORWARD_US + ARM_RETURN_OVERSHOOT_US);
+    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_RIGHT");
+  }
+}
+
+void startSequence(SequenceType seq) {
+  activeSequence = seq;
+  activePhase = PHASE_SHOULDERS_UP;
+  phaseStartMs = millis();
+
+  applyShouldersUpTargets();
+  applyArmsHomeTargets();
+
+  if (seq == SEQ_FORWARD) {
+    Serial.println("ACK:SEQ:FORWARD:START");
+  } else if (seq == SEQ_BACKWARD) {
+    Serial.println("ACK:SEQ:BACKWARD:START");
+  } else if (seq == SEQ_TURN_LEFT) {
+    Serial.println("ACK:SEQ:LEFT:START");
+  } else if (seq == SEQ_TURN_RIGHT) {
+    Serial.println("ACK:SEQ:RIGHT:START");
+  }
+}
+
+void advanceSequencePhase() {
+  activePhase = (SequencePhase)((int)activePhase + 1);
+  phaseStartMs = millis();
+
+  if (activePhase == PHASE_ARMS_MOVE) {
+    if (activeSequence == SEQ_FORWARD) {
+      applyForwardArmTargets();
+      Serial.println("ACK:PHASE:ARMS_FORWARD");
+    }
+    else if (activeSequence == SEQ_BACKWARD) {
+      applyBackwardArmTargets();
+      Serial.println("ACK:PHASE:ARMS_BACKWARD");
+    }
+    else if (activeSequence == SEQ_TURN_LEFT) {
+      applyLeftTurnArmTargets();
+      Serial.println("ACK:PHASE:ARMS_LEFT_TURN");
+    }
+    else if (activeSequence == SEQ_TURN_RIGHT) {
+      applyRightTurnArmTargets();
+      Serial.println("ACK:PHASE:ARMS_RIGHT_TURN");
+    }
+  }
+  else if (activePhase == PHASE_SHOULDERS_HOME) {
+    if (activeSequence == SEQ_FORWARD) {
+      applyForwardShouldersHomeTargets();
+      Serial.println("ACK:PHASE:SHOULDERS_HOME_FORWARD_TRIM");
+    } else {
+      applyShouldersHomeTargets();
+      Serial.println("ACK:PHASE:SHOULDERS_HOME");
+    }
+  }
+  else if (activePhase == PHASE_ARMS_OPPOSITE) {
+    applyOppositeArmTargets();
+  }
+  else if (activePhase == PHASE_ARMS_HOME) {
+    applyArmsHomeTargets();
+    Serial.println("ACK:PHASE:ARMS_HOME");
+  }
+  else if (activePhase == PHASE_READY_POSE) {
+    applyReadyPoseTargets();
+    Serial.println("ACK:PHASE:READY_POSE");
+  }
+  else if (activePhase == PHASE_FINAL_HOME) {
+    setHomeTargets();
+    Serial.println("ACK:PHASE:FINAL_HOME");
+  }
+  else if (activePhase == PHASE_DONE) {
+    Serial.println("ACK:SEQ:DONE");
+    activeSequence = SEQ_NONE;
+    activePhase = PHASE_IDLE;
+  }
+}
+
+void serviceSequence() {
+  if (activeSequence == SEQ_NONE || activePhase == PHASE_IDLE) return;
+  if (!allTargetsReached()) return;
+  if (millis() - phaseStartMs < PHASE_HOLD_MS) return;
+
+  advanceSequencePhase();
+}
+
+// -------------------- Serial command parsing --------------------
+String normalizeCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+
+  while (cmd.startsWith("move:")) {
+    cmd = cmd.substring(5);
+    cmd.trim();
+  }
+
+  while (cmd.startsWith(":")) {
+    cmd = cmd.substring(1);
+    cmd.trim();
+  }
+
+  return cmd;
+}
+
+void handleCommand(String raw) {
+  String cmd = normalizeCommand(raw);
+
+  Serial.print("CMD: ");
+  Serial.println(cmd);
+
+  if (cmd == "forward") {
+    startSequence(SEQ_FORWARD);
+  }
+  else if (cmd == "backward") {
+    startSequence(SEQ_BACKWARD);
+  }
+  else if (cmd == "left") {
+    startSequence(SEQ_TURN_LEFT);
+  }
+  else if (cmd == "right") {
+    startSequence(SEQ_TURN_RIGHT);
+  }
+  else if (cmd == "stop" || cmd == "home") {
+    cancelSequenceAndHome();
+  }
+  else if (cmd == "status") {
+    printStatus();
+  }
+  else if (cmd == "help") {
+    printHelp();
+  }
+
+  // -------- Shoulder calibration --------
+  else if (cmd.startsWith("both_up:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightShoulderUp(delta);
+      moveLeftShoulderUp(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("both_down:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightShoulderDown(delta);
+      moveLeftShoulderDown(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("r_up:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightShoulderUp(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("r_down:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightShoulderDown(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("l_up:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveLeftShoulderUp(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("l_down:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveLeftShoulderDown(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+
+  // -------- Arm calibration --------
+  else if (cmd.startsWith("both_arm_fwd:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightArmForward(delta);
+      moveLeftArmForward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("both_arm_back:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightArmBackward(delta);
+      moveLeftArmBackward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("ra_fwd:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightArmForward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("ra_back:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveRightArmBackward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("la_fwd:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveLeftArmForward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("la_back:")) {
+    int delta = parseValueAfterColon(cmd);
+    if (delta > 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      moveLeftArmBackward(delta);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+
+  // -------- Direct set commands --------
+  else if (cmd.startsWith("set0:")) {
+    int value = parseValueAfterColon(cmd);
+    if (value >= 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      setTarget(0, value);
+      Serial.print("ACK:SERVO0:TARGET=");
+      Serial.println(targetUs[0]);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("set1:")) {
+    int value = parseValueAfterColon(cmd);
+    if (value >= 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      setTarget(1, value);
+      Serial.print("ACK:SERVO1:TARGET=");
+      Serial.println(targetUs[1]);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("set2:")) {
+    int value = parseValueAfterColon(cmd);
+    if (value >= 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      setTarget(2, value);
+      Serial.print("ACK:SERVO2:TARGET=");
+      Serial.println(targetUs[2]);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.startsWith("set3:")) {
+    int value = parseValueAfterColon(cmd);
+    if (value >= 0) {
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      setTarget(3, value);
+      Serial.print("ACK:SERVO3:TARGET=");
+      Serial.println(targetUs[3]);
+    } else {
+      Serial.println("ERR:BAD_VALUE");
+    }
+  }
+  else if (cmd.length() == 0) {
+    Serial.println("ERR:EMPTY");
+  }
+  else {
+    Serial.print("ERR:UNKNOWN:");
+    Serial.println(cmd);
+  }
+}
+
+void serviceSerial() {
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (serialBuffer.length() > 0) {
+        handleCommand(serialBuffer);
+        serialBuffer = "";
+      }
+    } else {
+      serialBuffer += c;
+      if (serialBuffer.length() > 120) {
+        serialBuffer = "";
+      }
+    }
+  }
+}
+
+void serviceMotion() {
+  unsigned long now = millis();
+  if (now - lastMotionUpdate < MOTION_UPDATE_MS) return;
+  lastMotionUpdate = now;
+
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    int cur = currentUs[i];
+    int tgt = targetUs[i];
+
+    if (cur == tgt) continue;
+
+    if (abs(tgt - cur) <= STEP_US) {
+      cur = tgt;
+    } else if (tgt > cur) {
+      cur += STEP_US;
+    } else {
+      cur -= STEP_US;
+    }
+
+    writeServo(i, (uint16_t)cur);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+
+  Serial.println("BOOT");
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  Wire.beginTransmission(PCA_ADDR);
+  byte err = Wire.endTransmission();
+
+  if (err != 0) {
+    Serial.print("ERR:PCA9685_NOT_FOUND:");
+    Serial.println(err);
+  } else {
+    Serial.println("PCA9685 OK");
+  }
+
+  pca.begin();
+  pca.setPWMFreq(SERVO_FREQ);
+  delay(10);
+
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    currentUs[i] = SERVO_HOME[i];
+    targetUs[i] = SERVO_HOME[i];
+    writeServo(i, SERVO_HOME[i]);
+    delay(60);
+  }
+
+  setHomeTargets();
+
+  Serial.println("READY");
+  printHelp();
+}
+
+void loop() {
+  serviceSerial();
+  serviceSequence();
+  serviceMotion();
+}
