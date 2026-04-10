@@ -58,7 +58,12 @@ export default function CameraFeedSecure() {
       const res = await fetch(
         `${base}/camera/control/activate?device_id=${encodeURIComponent(
           DEVICE_ID
-        )}`
+        )}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: authHeaders(),
+        }
       );
 
       const data = await res.json().catch(() => null);
