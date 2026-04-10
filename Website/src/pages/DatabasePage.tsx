@@ -873,7 +873,7 @@ export default function DatabasePage() {
                 <div className="db-panel-sub">Right-click folders for actions</div>
               </div>
 
-              <button className="btn" disabled={busy !== ""} onClick={refreshTree}>
+              <button className="btn btn-primary" disabled={busy !== ""} onClick={refreshTree}>
                 {busy === "tree" ? "Refreshing…" : "Refresh"}
               </button>
             </div>
@@ -933,7 +933,7 @@ export default function DatabasePage() {
 
               <div className="db-actions">
                 <button
-                  className="btn"
+                  className="btn btn-primary"
                   onClick={() => setDeleteOpen(true)}
                   disabled={busy !== "" || !selected || selected.path === ""}
                   title="Delete selected item"
@@ -1000,7 +1000,11 @@ export default function DatabasePage() {
                     onChange={(e) => setFiles(e.target.files)}
                     className="db-hidden-input"
                   />
-                  <button className="btn" onClick={() => fileInputRef.current?.click()} disabled={busy !== ""}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={busy !== ""}
+                  >
                     Browse
                   </button>
                   <button className="btn btn-primary" onClick={doUpload} disabled={busy !== "" || selectedFiles.length === 0}>
@@ -1045,7 +1049,7 @@ export default function DatabasePage() {
                     disabled={busy !== "" || !selected || selected.path === ""}
                   />
                   <button
-                    className="btn"
+                    className="btn btn-primary"
                     onClick={doRename}
                     disabled={
                       busy !== "" ||
@@ -1079,7 +1083,11 @@ export default function DatabasePage() {
                         </option>
                       ))}
                   </select>
-                  <button className="btn" onClick={doMoveToFolder} disabled={busy !== "" || !selected || selected.path === ""}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={doMoveToFolder}
+                    disabled={busy !== "" || !selected || selected.path === ""}
+                  >
                     {busy === "move" ? "Moving…" : "Move"}
                   </button>
                 </div>
@@ -1231,7 +1239,7 @@ export default function DatabasePage() {
 
             <div className="db-box">
               <button
-                className="btn"
+                className="btn btn-primary"
                 style={{ width: "100%" }}
                 disabled={busy !== "" || !activeDb}
                 onClick={doDeleteDb}

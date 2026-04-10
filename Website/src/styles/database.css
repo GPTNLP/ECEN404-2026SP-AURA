@@ -2,7 +2,7 @@
 .db-grid {
   display: grid;
   grid-template-columns: 320px minmax(420px, 1.35fr) minmax(320px, 0.9fr);
-  gap: 14px;
+  gap: 16px;
   align-items: start;
 }
 
@@ -16,7 +16,7 @@
   min-height: 720px;
   display: flex;
   flex-direction: column;
-  min-width: 0; /* IMPORTANT: prevents overflow in grid columns */
+  min-width: 0;
 }
 
 .db-panel-head {
@@ -30,6 +30,7 @@
 .db-panel-title {
   font-weight: 900;
   font-size: 14px;
+  color: var(--text);
 }
 
 .db-panel-sub {
@@ -42,10 +43,11 @@
   margin-left: 6px;
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid var(--card-border);
-  background: color-mix(in srgb, var(--card-bg) 85%, var(--accent-soft));
-  color: var(--muted-text);
+  border: 1px solid color-mix(in srgb, var(--card-border) 72%, var(--accent));
+  background: color-mix(in srgb, var(--card-bg) 82%, var(--accent-soft));
+  color: var(--accent);
   font-weight: 900;
+  box-shadow: var(--shadow);
 }
 
 .db-input {
@@ -58,20 +60,19 @@
   outline: none;
   font-weight: 800;
   min-width: 0;
+  box-shadow: var(--shadow);
+}
+
+.db-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--card-border));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent-soft) 55%, transparent);
 }
 
 .db-mini {
   font-size: 12px;
   color: var(--muted-text);
   font-weight: 800;
-
-  /* FIX: allow wrapping instead of forcing one line */
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-
-  /* prevents flex overflow issues */
-  min-width: 0;
+  white-space: nowrap;
 }
 
 .db-mono {
@@ -107,28 +108,48 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
   border: 1px solid var(--card-border);
   background: var(--card-bg);
   cursor: pointer;
   min-width: 0;
+  box-shadow: var(--shadow);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.db-tree-row:hover,
+.db-item:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-hover);
+  border-color: color-mix(in srgb, var(--card-border) 55%, var(--accent));
 }
 
 .db-tree-row.is-selected,
 .db-item.is-selected {
-  background: color-mix(in srgb, var(--accent) 10%, var(--card-bg));
-  border-color: color-mix(in srgb, var(--accent) 22%, var(--card-border));
+  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--card-border));
 }
 
 .db-tree-toggle {
-  padding: 6px 10px;
+  padding: 7px 10px;
   border-radius: 10px;
   font-weight: 900;
-  border: 1px solid var(--card-border);
-  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
-  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--card-border) 70%, var(--accent));
+  background: color-mix(in srgb, var(--card-bg) 74%, var(--accent-soft));
+  color: var(--accent);
   cursor: pointer;
+  box-shadow: var(--shadow);
+}
+
+.db-tree-toggle:hover {
+  background: var(--accent);
+  color: white;
+  border-color: transparent;
 }
 
 .db-tree-main {
@@ -151,7 +172,6 @@
   min-width: 0;
 }
 
-/* Include checkbox: always visible */
 .db-tree-include {
   display: flex;
   align-items: center;
@@ -160,9 +180,12 @@
   color: var(--muted-text);
   font-weight: 900;
   user-select: none;
-
   opacity: 1;
   pointer-events: auto;
+}
+
+.db-tree-include input[type="checkbox"] {
+  accent-color: var(--accent);
 }
 
 .db-tree-row:hover .db-tree-include,
@@ -199,12 +222,13 @@
   color: var(--muted-text);
   font-weight: 900;
   cursor: pointer;
-  padding: 6px 6px;
+  padding: 6px 8px;
   border-radius: 10px;
 }
 
 .db-crumb:hover {
   background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
+  color: var(--accent);
 }
 
 .db-crumb-sep {
@@ -215,10 +239,10 @@
 /* Upload dropzone */
 .db-dropzone {
   margin-top: 12px;
-  border: 1px dashed color-mix(in srgb, var(--card-border) 70%, var(--accent-soft));
-  background: color-mix(in srgb, var(--card-bg) 88%, var(--accent-soft));
-  border-radius: 14px;
-  padding: 12px;
+  border: 1px dashed color-mix(in srgb, var(--card-border) 60%, var(--accent));
+  background: color-mix(in srgb, var(--card-bg) 86%, var(--accent-soft));
+  border-radius: 16px;
+  padding: 14px;
   min-width: 0;
 }
 
@@ -245,6 +269,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 520px;
+  color: var(--text);
 }
 
 .db-drop-sub {
@@ -276,13 +301,14 @@
   padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid var(--card-border);
-  background: var(--card-bg);
+  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
   font-weight: 800;
   font-size: 12px;
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
 }
 
 .db-chip-muted {
@@ -292,15 +318,20 @@
 .db-link {
   background: transparent;
   border: none;
-  color: var(--muted-text);
+  color: var(--accent);
   font-weight: 900;
   cursor: pointer;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-radius: 10px;
 }
 
 .db-link:hover {
-  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
+  background: color-mix(in srgb, var(--card-bg) 75%, var(--accent-soft));
+}
+
+.db-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Boxes */
@@ -319,17 +350,20 @@
 
 .db-box {
   border: 1px solid var(--card-border);
-  border-radius: 14px;
-  padding: 12px;
-  background: color-mix(in srgb, var(--card-bg) 92%, var(--accent-soft));
+  border-radius: 16px;
+  padding: 14px;
+  background: color-mix(in srgb, var(--card-bg) 90%, var(--accent-soft));
   min-width: 0;
+  box-shadow: var(--shadow);
 }
 
 .db-box-title {
   font-weight: 900;
   font-size: 12px;
   color: var(--muted-text);
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .db-row {
@@ -353,29 +387,35 @@
   max-height: 360px;
 }
 
-/* Item rows (fix overflow hard) */
 .db-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 10px;
-  border-radius: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
   border: 1px solid var(--card-border);
   background: var(--card-bg);
   cursor: pointer;
   margin-top: 8px;
   min-width: 0;
+  box-shadow: var(--shadow);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
 }
 
 .db-item-ic {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   border-radius: 12px;
-  border: 1px solid var(--card-border);
-  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
+  border: 1px solid color-mix(in srgb, var(--card-border) 70%, var(--accent));
+  background: color-mix(in srgb, var(--card-bg) 75%, var(--accent-soft));
   flex: 0 0 auto;
+  color: var(--accent);
 }
 
 .db-item-main {
@@ -430,6 +470,7 @@
   font-weight: 900;
   font-size: 16px;
   margin-bottom: 6px;
+  color: var(--text);
 }
 
 .db-modal-path {
@@ -441,6 +482,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;
   overflow-wrap: anywhere;
+  color: var(--text);
 }
 
 .db-modal-actions {
@@ -458,7 +500,7 @@
   border: 1px solid var(--card-border);
   border-radius: 14px;
   background: var(--card-bg);
-  box-shadow: 0 12px 30px rgba(0,0,0,0.20);
+  box-shadow: var(--shadow-hover);
   overflow: hidden;
 }
 
@@ -489,7 +531,7 @@
 }
 
 .db-ctx-item.danger {
-  color: color-mix(in srgb, var(--text) 40%, #d11);
+  color: color-mix(in srgb, var(--status-bad) 72%, var(--text));
 }
 
 .db-ctx-sep {
@@ -497,14 +539,41 @@
   background: var(--card-border);
 }
 
-/* Push-to-Jetson text wrapping fix */
-.db-mini-wrap {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  min-width: 0;
+/* Stronger button feel for native buttons inside database page */
+.db-panel .btn,
+.db-panel button.btn {
+  box-shadow: var(--shadow);
 }
 
-.db-box .db-mini {
-  max-width: 100%;
+.db-panel .btn-primary,
+.db-panel button.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: transparent;
+}
+
+.db-panel .btn-primary:hover,
+.db-panel button.btn-primary:hover {
+  box-shadow: var(--shadow-hover);
+  filter: brightness(1.03);
+}
+
+/* Make plain action buttons feel more themed */
+.db-panel button:not(.db-crumb):not(.db-link):not(.db-ctx-item):not(.btn):not(.db-tree-row):not(.db-item) {
+  border-radius: 10px;
+}
+
+/* Mobile */
+@media (max-width: 980px) {
+  .db-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .db-panel {
+    min-height: auto;
+  }
+
+  .db-scroll {
+    max-height: 420px;
+  }
 }
