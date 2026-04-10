@@ -107,9 +107,8 @@ class AuraConsoleApp:
             justify="center",
             wraplength=max(220, sw - 80),
             padx=14,
-            pady=(0, 12),
         )
-        self.sub_label.pack(fill="x")
+        self.sub_label.pack(fill="x", pady=(0, 12))
 
         self.console_card = tk.Frame(
             outer,
