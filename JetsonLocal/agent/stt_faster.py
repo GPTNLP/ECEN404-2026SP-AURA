@@ -12,24 +12,23 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-WAKE_AUDIO_THRESHOLD = 0.030
-COMMAND_AUDIO_THRESHOLD = 0.018
-END_SILENCE_SECONDS = 1.0
+WAKE_AUDIO_THRESHOLD = 0.020
+COMMAND_AUDIO_THRESHOLD = 0.012
+END_SILENCE_SECONDS = 1.3
 WAKE_CHUNK_SECONDS = 1.8
-COMMAND_CHUNK_SECONDS = 0.30
-COMMAND_TIMEOUT_SECONDS = 8.0
+COMMAND_CHUNK_SECONDS = 0.50
+COMMAND_TIMEOUT_SECONDS = 10.0
 NEAR_FIELD_BOOST = 1.15
-USE_ONLY_LEFT_CHANNEL = False
+USE_ONLY_LEFT_CHANNEL = True
 WAKE_MATCH_MODE = 1
 
 NOISE_FLOOR_SAMPLES = 5
-NOISE_FLOOR_MULTIPLIER = 2.2
-MIN_DYNAMIC_THRESHOLD = 0.012
+NOISE_FLOOR_MULTIPLIER = 1.8
+MIN_DYNAMIC_THRESHOLD = 0.008
 
-# 🔥 UPDATED HERE
 DEFAULT_MODEL_SIZE = "base.en"
-DEFAULT_DEVICE = "cuda"          # ← GPU enabled
-DEFAULT_COMPUTE_TYPE = "float16" # ← optimal for Jetson
+DEFAULT_DEVICE = "cuda"
+DEFAULT_COMPUTE_TYPE = "float16"
 
 DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
@@ -534,9 +533,9 @@ class STTService:
             audio_16k,
             task=self.task,
             language=self.language,
-            vad_filter=True,
-            beam_size=1,
-            best_of=1,
+            vad_filter=False,
+            beam_size=5,
+            best_of=5,
             temperature=0.0,
             condition_on_previous_text=False,
         )
