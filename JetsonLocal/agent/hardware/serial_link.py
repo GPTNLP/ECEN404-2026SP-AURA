@@ -7,7 +7,6 @@ from core.config import (
     SERIAL_PORT,
     SERIAL_BAUDRATE,
     SERIAL_TIMEOUT,
-    SERIAL_ACK_TIMEOUT,
     SERIAL_DRY_RUN,
 )
 
@@ -41,8 +40,13 @@ class SerialLink:
                 timeout=SERIAL_TIMEOUT,
             )
             time.sleep(2.0)
-            self.esp_serial.reset_input_buffer()
-            self.esp_serial.reset_output_buffer()
+
+            try:
+                self.esp_serial.reset_input_buffer()
+                self.esp_serial.reset_output_buffer()
+            except Exception:
+                pass
+
             print(f"[SERIAL] Connected to {SERIAL_PORT}")
             return True
 
@@ -51,40 +55,84 @@ class SerialLink:
             print(f"[SERIAL] Connect failed: {e}")
             return False
 
+    def disconnect(self) -> None:
+        try:
+            if self.esp_serial and self.esp_serial.is_open:
+                self.esp_serial.close()
+        except Exception:
+            pass
+        finally:
+            self.esp_serial = None
+
+    def _ensure_live_connection(self) -> None:
+        if self.esp_serial is None or not self.esp_serial.is_open:
+            if not self.connect():
+                raise RuntimeError("ESP serial is not connected")
+            return
+
+        try:
+            if hasattr(self.esp_serial, "in_waiting"):
+                _ = self.esp_serial.in_waiting
+        except Exception:
+            self.disconnect()
+            if not self.connect():
+                raise RuntimeError("ESP serial reconnect failed")
+
     def send_command(self, cmd: str, val: str = "") -> str:
-        cmd = cmd.strip().lower()
+        cmd = (cmd or "").strip().lower()
 
         if cmd not in self.MOVEMENT_COMMANDS:
             raise ValueError(f"Unsupported serial command: {cmd}")
 
         if self.dry_run:
             serial_msg = f"MOVE:{cmd}:{val}" if val else f"MOVE:{cmd}"
-            fake_ack = f"ACK:MOVE:{cmd}"
             print(f"[SERIAL][DRY RUN] would send -> {serial_msg}")
-            print(f"[SERIAL][DRY RUN] returning -> {fake_ack}")
-            return fake_ack
+            return f"SENT:{serial_msg}"
 
-        if not self.connect():
-            raise RuntimeError("ESP serial is not connected")
+        self._ensure_live_connection()
 
         serial_msg = f"MOVE:{cmd}:{val}\n" if val else f"MOVE:{cmd}\n"
-        expected_ack = f"ACK:MOVE:{cmd}"
 
-        self.esp_serial.reset_input_buffer()
-        self.esp_serial.write(serial_msg.encode("utf-8"))
-        self.esp_serial.flush()
+        try:
+            try:
+                self.esp_serial.reset_input_buffer()
+            except Exception:
+                pass
 
-        deadline = time.time() + SERIAL_ACK_TIMEOUT
-        while time.time() < deadline:
-            line = self.esp_serial.readline().decode("utf-8", errors="ignore").strip()
+            self.esp_serial.write(serial_msg.encode("utf-8"))
+            self.esp_serial.flush()
+            print(f"[SERIAL] sent -> {serial_msg.strip()}")
 
-            if line == expected_ack:
-                return line
+            # Debug-read only. We no longer require a strict legacy ACK line.
+            # The ESP firmware now emits sequence/status messages like:
+            # ACK:SEQ:FORWARD:START, ACK:SEQ:DONE, ACK:STOP:HOME, etc.
+            deadline = time.time() + 0.25
+            debug_lines = []
 
-            if line.startswith("ERR:"):
-                raise RuntimeError(line)
+            while time.time() < deadline:
+                try:
+                    raw = self.esp_serial.readline()
+                except Exception as read_err:
+                    raise RuntimeError(f"ESP serial read failed: {read_err}")
 
-        raise RuntimeError(f"No ACK from ESP for {cmd}")
+                if not raw:
+                    continue
+
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+
+                debug_lines.append(line)
+                print(f"[SERIAL][ESP] {line}")
+
+                if line.startswith("ERR:"):
+                    raise RuntimeError(line)
+
+            return f"SENT:{cmd}"
+
+        except Exception:
+            self.disconnect()
+            raise
 
 
 serial_link = SerialLink()

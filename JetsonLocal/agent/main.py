@@ -310,15 +310,35 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
             return
 
         if movement and movement in MOVEMENT_COMMANDS:
-            serial_link.send_command(movement, "")
-            set_ui_state("COMMAND", movement)
-            quiet_print("voice_move", f"[VOICE] movement command: {movement}")
-            send_or_queue_log(
-                "info",
-                "voice_movement",
-                f"Voice movement command: {movement}",
-                {"text": text, "intent": intent, "movement": movement},
-            )
+            try:
+                serial_link.send_command(movement, "")
+                set_ui_state("COMMAND", movement)
+                quiet_print("voice_move", f"[VOICE] movement command: {movement}")
+
+                send_or_queue_log(
+                    "info",
+                    "voice_movement",
+                    f"Voice movement command: {movement}",
+                    {"text": text, "intent": intent, "movement": movement},
+                )
+
+                await speak_with_timeout(f"Moving {movement}", f"Moving {movement}")
+
+            except Exception as e:
+                set_ui_state("ERROR", truncate_for_ui(str(e)))
+                quiet_print("voice_move_fail", f"[VOICE] movement failed: {e}")
+
+                send_or_queue_log(
+                    "warning",
+                    "voice_movement_failed",
+                    f"Voice movement failed: {e}",
+                    {"text": text, "intent": intent, "movement": movement},
+                )
+
+                await speak_with_timeout(
+                    "I could not send the movement command.",
+                    "Movement failed",
+                )
             return
 
         chat_manager.add_message("user", text, api, DEVICE_ID)
@@ -366,17 +386,17 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
 def build_stt_service() -> STTService:
     return STTService(
         callback=handle_voice_text,
-        model_size="tiny.en",
+        model_size="base.en",
         input_device=None,
         device_sample_rate=None,
         target_sample_rate=16000,
         channels=None,
-        device="cpu",
-        compute_type="int8",
+        device="cuda",
+        compute_type="float16",
         language="en",
         task="transcribe",
         log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
-        unload_after_idle_seconds=60.0,
+        unload_after_idle_seconds=300.0,
         auto_reload_model=True,
     )
 
