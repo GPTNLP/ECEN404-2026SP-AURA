@@ -16,19 +16,19 @@ from faster_whisper import WhisperModel
 # ============================================================
 # TUNING
 # ============================================================
-WAKE_AUDIO_THRESHOLD = 0.018
-COMMAND_AUDIO_THRESHOLD = 0.010
-END_SILENCE_SECONDS = 0.55
-WAKE_CHUNK_SECONDS = 1.0
-COMMAND_CHUNK_SECONDS = 0.16
-COMMAND_TIMEOUT_SECONDS = 6.0
-NEAR_FIELD_BOOST = 1.35
+WAKE_AUDIO_THRESHOLD = 0.012
+COMMAND_AUDIO_THRESHOLD = 0.006
+END_SILENCE_SECONDS = 1.00
+WAKE_CHUNK_SECONDS = 1.20
+COMMAND_CHUNK_SECONDS = 0.25
+COMMAND_TIMEOUT_SECONDS = 7.0
+NEAR_FIELD_BOOST = 1.15
 USE_ONLY_LEFT_CHANNEL = False
 WAKE_MATCH_MODE = 1
 
-NOISE_FLOOR_SAMPLES = 6
-NOISE_FLOOR_MULTIPLIER = 1.7
-MIN_DYNAMIC_THRESHOLD = 0.008
+NOISE_FLOOR_SAMPLES = 10
+NOISE_FLOOR_MULTIPLIER = 1.45
+MIN_DYNAMIC_THRESHOLD = 0.0045
 
 DEFAULT_MODEL_SIZE = "base.en"
 DEFAULT_DEVICE = "cuda"
@@ -37,6 +37,26 @@ DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
 
 WAKE_COOLDOWN_SECONDS = 0.8
+
+# Optional: manually force a specific mic by index.
+# Set to an integer like 1, 2, 3 if you know the correct input device.
+MANUAL_INPUT_DEVICE = None
+
+# Optional: only choose devices whose name contains one of these.
+PREFERRED_INPUT_KEYWORDS = [
+    "usb",
+    "microphone",
+    "mic",
+    "headset",
+    "webcam",
+]
+
+# Extra accuracy behavior
+ENABLE_SECOND_PASS_FOR_WEAK_TEXT = True
+SECOND_PASS_MIN_WORDS = 3
+
+# If True, short transcripts are not discarded as aggressively
+RELAX_WEAK_TRANSCRIPT_FILTER = True
 
 
 # ============================================================
@@ -298,6 +318,11 @@ def looks_like_weak_transcript(text: str) -> bool:
     if norm in weak_two_word_phrases:
         return True
 
+    if RELAX_WEAK_TRANSCRIPT_FILTER:
+        if len(words) == 1:
+            return True
+        return False
+
     if len(words) == 1:
         return True
 
@@ -315,7 +340,7 @@ class STTService:
         self,
         callback: Callable[[str, str, Optional[str]], Awaitable[None]],
         model_size: str = DEFAULT_MODEL_SIZE,
-        input_device: Optional[int] = None,
+        input_device: Optional[int] = MANUAL_INPUT_DEVICE,
         device_sample_rate: Optional[int] = None,
         target_sample_rate: int = 16000,
         channels: Optional[int] = None,
@@ -354,6 +379,16 @@ class STTService:
     def _resolve_input_device(self) -> None:
         devices = sd.query_devices()
 
+        print("\n[STT] Available input devices:")
+        for idx, dev in enumerate(devices):
+            max_in = int(dev.get("max_input_channels", 0))
+            if max_in > 0:
+                print(
+                    f"  #{idx}: {dev['name']} | "
+                    f"inputs={max_in} | "
+                    f"default_sr={int(dev.get('default_samplerate', 0))}"
+                )
+
         if self.input_device is not None:
             info = sd.query_devices(self.input_device, "input")
             if self.device_sample_rate is None:
@@ -364,7 +399,7 @@ class STTService:
             return
 
         best_index = None
-        best_score = -1
+        best_score = -10_000
 
         for idx, dev in enumerate(devices):
             max_in = int(dev.get("max_input_channels", 0))
@@ -374,14 +409,28 @@ class STTService:
             name = str(dev.get("name", "")).lower()
             score = 0
 
-            if "usb" in name:
-                score += 5
-            if "mic" in name or "microphone" in name:
-                score += 4
-            if "nano" in name:
-                score += 2
+            for keyword in PREFERRED_INPUT_KEYWORDS:
+                if keyword in name:
+                    score += 8
+
             if "default" in name:
-                score += 1
+                score += 4
+            if "pulse" in name:
+                score += 2
+            if "sysdefault" in name:
+                score += 2
+            if "hdmi" in name:
+                score -= 10
+            if "monitor" in name:
+                score -= 10
+            if "output" in name:
+                score -= 8
+            if "stereo mix" in name:
+                score -= 20
+
+            # Prefer devices with 1-2 channels for microphone-like inputs
+            if max_in in (1, 2):
+                score += 3
 
             if score > best_score:
                 best_score = score
@@ -505,7 +554,14 @@ class STTService:
             else:
                 mono = np.mean(audio, axis=1).astype(np.float32)
 
+        # smaller boost than before to avoid clipping
         mono = mono * NEAR_FIELD_BOOST
+
+        # light normalization for quiet inputs
+        peak = np.max(np.abs(mono)) if len(mono) else 0.0
+        if peak > 0 and peak < 0.25:
+            mono = mono / peak * min(0.55, peak * 2.2)
+
         mono = np.clip(mono, -1.0, 1.0)
         return mono
 
@@ -551,12 +607,39 @@ class STTService:
         samples = []
 
         for _ in range(NOISE_FLOOR_SAMPLES):
-            audio = self.record_fixed(0.20)
+            audio = self.record_fixed(0.25)
             _, mean = self.analyze_level(audio)
             samples.append(mean)
+            time.sleep(0.03)
 
         self.noise_floor = float(np.median(samples)) if samples else 0.0
         print(f"[STT] Noise floor: {self.noise_floor:.6f}")
+
+    def _run_transcribe(
+        self,
+        audio_16k: np.ndarray,
+        beam_size: int,
+        best_of: int,
+        vad_min_silence_ms: int,
+        speech_pad_ms: int,
+        condition_on_previous_text: bool,
+    ) -> str:
+        segments, _ = self.model.transcribe(
+            audio_16k,
+            task=self.task,
+            language=self.language,
+            vad_filter=True,
+            vad_parameters={
+                "min_silence_duration_ms": vad_min_silence_ms,
+                "speech_pad_ms": speech_pad_ms,
+            },
+            beam_size=beam_size,
+            best_of=best_of,
+            temperature=0.0,
+            condition_on_previous_text=condition_on_previous_text,
+            without_timestamps=True,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
 
     def _transcribe_audio_array(self, audio: np.ndarray) -> str:
         if audio is None or len(audio) == 0:
@@ -578,32 +661,40 @@ class STTService:
         self.last_audio_activity_ts = time.time()
         self.last_transcribe_ts = self.last_audio_activity_ts
 
-        segments, _ = self.model.transcribe(
-            audio_16k,
-            task=self.task,
-            language=self.language,
-            vad_filter=True,
-            vad_parameters={
-                "min_silence_duration_ms": 250,
-                "speech_pad_ms": 120,
-            },
-            beam_size=2,
-            best_of=2,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            without_timestamps=True,
+        # First pass: balanced accuracy
+        text = self._run_transcribe(
+            audio_16k=audio_16k,
+            beam_size=5,
+            best_of=5,
+            vad_min_silence_ms=400,
+            speech_pad_ms=220,
+            condition_on_previous_text=True,
         )
 
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # Optional second pass if result looks too weak
+        if ENABLE_SECOND_PASS_FOR_WEAK_TEXT:
+            word_count = len(normalize_text(text).split())
+            if word_count < SECOND_PASS_MIN_WORDS:
+                retry_text = self._run_transcribe(
+                    audio_16k=audio_16k,
+                    beam_size=7,
+                    best_of=7,
+                    vad_min_silence_ms=550,
+                    speech_pad_ms=300,
+                    condition_on_previous_text=True,
+                )
+                if len(normalize_text(retry_text)) > len(normalize_text(text)):
+                    text = retry_text
+
         return text
 
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
         audio = self.record_fixed(chunk_seconds)
-        peak, _ = self.analyze_level(audio)
+        peak, mean = self.analyze_level(audio)
 
         threshold = self._dynamic_threshold(WAKE_AUDIO_THRESHOLD)
-        if peak < threshold:
-            return False, "", "", f"too_quiet peak={peak:.4f} threshold={threshold:.4f}"
+        if peak < threshold and mean < (threshold * 0.30):
+            return False, "", "", f"too_quiet peak={peak:.4f} mean={mean:.4f} threshold={threshold:.4f}"
 
         self.last_audio_activity_ts = time.time()
 
@@ -612,7 +703,10 @@ class STTService:
             return False, "", "", "no_text"
 
         matched, leftover, reason = wake_score(text)
-        print(f"[WAKE CHECK] {text} | reason={reason} | peak={peak:.4f} | thr={threshold:.4f}")
+        print(
+            f"[WAKE CHECK] {text} | reason={reason} | "
+            f"peak={peak:.4f} | mean={mean:.4f} | thr={threshold:.4f}"
+        )
         return matched, text, leftover, reason
 
     def listen_until_done(
@@ -636,7 +730,7 @@ class STTService:
 
             peak, mean = self.analyze_level(audio)
 
-            if peak >= threshold or mean >= (threshold * 0.38):
+            if peak >= threshold or mean >= (threshold * 0.28):
                 self.last_audio_activity_ts = time.time()
                 speech_started = True
                 silence_after_speech = 0.0
@@ -656,6 +750,8 @@ class STTService:
         print(f"[AURA] Peak level: {peak:.6f}")
         print(f"[AURA] Mean level: {mean:.6f}")
         print(f"[AURA] Command threshold: {threshold:.6f}")
+        print(f"[AURA] Speech started: {speech_started}")
+        print(f"[AURA] Captured seconds: {len(full_audio) / self.device_sample_rate:.2f}")
 
         if not speech_started:
             return ""
@@ -713,11 +809,16 @@ class STTService:
                     continue
 
                 if looks_like_weak_transcript(final_text):
-                    print(f"[AURA] Ignoring weak transcript: {final_text}")
-                    print("[AURA] Waiting for wake word...")
-                    print("-" * 60)
-                    await asyncio.sleep(0.03)
-                    continue
+                    print(f"[AURA] Weak transcript detected: {final_text}")
+
+                    # Do not discard too aggressively anymore.
+                    # Only ignore obvious wake-only fragments.
+                    if final_text in WAKE_ONLY_PHRASES:
+                        print("[AURA] Ignoring wake-only transcript.")
+                        print("[AURA] Waiting for wake word...")
+                        print("-" * 60)
+                        await asyncio.sleep(0.03)
+                        continue
 
                 movement = detect_last_movement_command(final_text)
                 intent = classify_intent(final_text)
