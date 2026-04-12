@@ -12,29 +12,31 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-WAKE_AUDIO_THRESHOLD = 0.030
-COMMAND_AUDIO_THRESHOLD = 0.018
-END_SILENCE_SECONDS = 1.0
-WAKE_CHUNK_SECONDS = 1.8
-COMMAND_CHUNK_SECONDS = 0.30
-COMMAND_TIMEOUT_SECONDS = 8.0
-NEAR_FIELD_BOOST = 1.15
+
+# ============================================================
+# TUNING
+# ============================================================
+WAKE_AUDIO_THRESHOLD = 0.018
+COMMAND_AUDIO_THRESHOLD = 0.010
+END_SILENCE_SECONDS = 0.55
+WAKE_CHUNK_SECONDS = 1.0
+COMMAND_CHUNK_SECONDS = 0.16
+COMMAND_TIMEOUT_SECONDS = 6.0
+NEAR_FIELD_BOOST = 1.35
 USE_ONLY_LEFT_CHANNEL = False
 WAKE_MATCH_MODE = 1
 
-NOISE_FLOOR_SAMPLES = 5
-NOISE_FLOOR_MULTIPLIER = 2.2
-MIN_DYNAMIC_THRESHOLD = 0.012
+NOISE_FLOOR_SAMPLES = 6
+NOISE_FLOOR_MULTIPLIER = 1.7
+MIN_DYNAMIC_THRESHOLD = 0.008
 
-# 🔥 UPDATED HERE
 DEFAULT_MODEL_SIZE = "base.en"
-DEFAULT_DEVICE = "cuda"          # ← GPU enabled
-DEFAULT_COMPUTE_TYPE = "float16" # ← optimal for Jetson
-
+DEFAULT_DEVICE = "cuda"
+DEFAULT_COMPUTE_TYPE = "float16"
 DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
 
-WAKE_COOLDOWN_SECONDS = 1.0
+WAKE_COOLDOWN_SECONDS = 0.8
 
 
 # ============================================================
@@ -46,6 +48,9 @@ MOVEMENT_PATTERNS = {
         "go forward",
         "drive forward",
         "forward",
+        "forwards",
+        "go straight",
+        "straight",
     ],
     "backward": [
         "move backward",
@@ -55,6 +60,7 @@ MOVEMENT_PATTERNS = {
         "drive backward",
         "backward",
         "back",
+        "reverse",
     ],
     "left": [
         "turn left",
@@ -238,9 +244,10 @@ def detect_last_movement_command(text: str) -> Optional[str]:
                 "back",
                 "backward",
                 "stop",
+                "straight",
             }
 
-            if is_single_word_direction and word_count > 2 and not has_action_word:
+            if is_single_word_direction and word_count > 3 and not has_action_word:
                 continue
 
             pattern = rf"\b{re.escape(phrase_norm)}\b"
@@ -271,13 +278,14 @@ def looks_like_weak_transcript(text: str) -> bool:
     if not norm:
         return True
 
+    movement = detect_last_movement_command(norm)
+    if movement is not None:
+        return False
+
     if norm in WAKE_ONLY_PHRASES:
         return True
 
     words = norm.split()
-
-    if len(words) == 1 and norm not in {"forward", "backward", "back", "left", "right", "stop"}:
-        return True
 
     weak_two_word_phrases = {
         "speed food",
@@ -290,10 +298,11 @@ def looks_like_weak_transcript(text: str) -> bool:
     if norm in weak_two_word_phrases:
         return True
 
-    if len(words) <= 2:
-        movement = detect_last_movement_command(norm)
-        if movement is None and "speak" not in words:
-            return True
+    if len(words) == 1:
+        return True
+
+    if len(words) <= 2 and "speak" not in words:
+        return True
 
     return False
 
@@ -315,7 +324,7 @@ class STTService:
         language: str = DEFAULT_LANGUAGE,
         task: str = DEFAULT_TASK,
         log_path: str = "~/SDP/AURA/JetsonLocal/storage/transcriptions.log",
-        unload_after_idle_seconds: float = 60.0,
+        unload_after_idle_seconds: float = 300.0,
         auto_reload_model: bool = True,
     ):
         self.callback = callback
@@ -369,9 +378,9 @@ class STTService:
             score = 0
 
             if "usb" in name:
-                score += 4
+                score += 5
             if "mic" in name or "microphone" in name:
-                score += 3
+                score += 4
             if "nano" in name:
                 score += 2
             if "default" in name:
@@ -407,13 +416,35 @@ class STTService:
         if self.model is not None:
             return
 
-        print(f"[STT] Loading faster-whisper model '{self.model_size}'...")
+        actual_device = self.device
+        actual_compute = self.compute_type
+
+        try:
+            import torch
+            cuda_ok = torch.cuda.is_available()
+        except Exception:
+            cuda_ok = False
+
+        if actual_device == "cuda" and not cuda_ok:
+            print("[STT] CUDA not available, falling back to CPU int8")
+            actual_device = "cpu"
+            actual_compute = "int8"
+
+        print(
+            f"[STT] Loading faster-whisper model "
+            f"'{self.model_size}' on device={actual_device} compute_type={actual_compute}..."
+        )
+
         self.model = WhisperModel(
             self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-            cpu_threads=4,
+            device=actual_device,
+            compute_type=actual_compute,
+            cpu_threads=2 if actual_device == "cuda" else 4,
+            num_workers=1,
         )
+
+        self.device = actual_device
+        self.compute_type = actual_compute
         print("[STT] Model loaded successfully!")
 
     def unload_model(self) -> None:
@@ -468,14 +499,15 @@ class STTService:
 
         duration = len(audio) / orig_sr
         old_times = np.linspace(0, duration, num=len(audio), endpoint=False)
-        new_length = int(duration * target_sr)
+        new_length = max(1, int(duration * target_sr))
         new_times = np.linspace(0, duration, num=new_length, endpoint=False)
 
         return np.interp(new_times, old_times, audio).astype(np.float32)
 
     def record_fixed(self, seconds: float) -> np.ndarray:
+        frames = max(1, int(seconds * self.device_sample_rate))
         audio = sd.rec(
-            int(seconds * self.device_sample_rate),
+            frames,
             samplerate=self.device_sample_rate,
             channels=self.channels,
             dtype="float32",
@@ -503,7 +535,7 @@ class STTService:
         samples = []
 
         for _ in range(NOISE_FLOOR_SAMPLES):
-            audio = self.record_fixed(0.25)
+            audio = self.record_fixed(0.20)
             _, mean = self.analyze_level(audio)
             samples.append(mean)
 
@@ -535,10 +567,15 @@ class STTService:
             task=self.task,
             language=self.language,
             vad_filter=True,
-            beam_size=1,
-            best_of=1,
+            vad_parameters={
+                "min_silence_duration_ms": 250,
+                "speech_pad_ms": 120,
+            },
+            beam_size=2,
+            best_of=2,
             temperature=0.0,
             condition_on_previous_text=False,
+            without_timestamps=True,
         )
 
         text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -549,7 +586,7 @@ class STTService:
     # --------------------------------------------------------
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
         audio = self.record_fixed(chunk_seconds)
-        peak, mean = self.analyze_level(audio)
+        peak, _ = self.analyze_level(audio)
 
         threshold = self._dynamic_threshold(WAKE_AUDIO_THRESHOLD)
         if peak < threshold:
@@ -584,9 +621,9 @@ class STTService:
             audio = self.record_fixed(chunk_seconds)
             collected.append(audio)
 
-            peak, _ = self.analyze_level(audio)
+            peak, mean = self.analyze_level(audio)
 
-            if peak >= threshold:
+            if peak >= threshold or mean >= (threshold * 0.38):
                 self.last_audio_activity_ts = time.time()
                 speech_started = True
                 silence_after_speech = 0.0
@@ -642,12 +679,12 @@ class STTService:
                 )
 
                 if not woke:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.03)
                     continue
 
                 now = time.time()
                 if now - self.last_wake_time < WAKE_COOLDOWN_SECONDS:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.03)
                     continue
 
                 self.last_wake_time = now
@@ -665,14 +702,14 @@ class STTService:
                     print("[AURA] No speech heard. Returning to wake mode.")
                     print("[AURA] Waiting for wake word...")
                     print("-" * 60)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.03)
                     continue
 
                 if looks_like_weak_transcript(final_text):
                     print(f"[AURA] Ignoring weak transcript: {final_text}")
                     print("[AURA] Waiting for wake word...")
                     print("-" * 60)
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.03)
                     continue
 
                 movement = detect_last_movement_command(final_text)
@@ -696,11 +733,11 @@ class STTService:
                 print("[AURA] Returning to wake mode.")
                 print("[AURA] Waiting for wake word...")
                 print("-" * 60)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.03)
 
             except Exception as e:
                 print(f"[STT] Loop error: {e}")
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
 
         self.unload_model()
         print("[STT] Voice loop stopped.")
