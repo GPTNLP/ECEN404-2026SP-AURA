@@ -577,6 +577,9 @@ class STTService:
         return np.interp(new_times, old_times, audio).astype(np.float32)
 
     def record_fixed(self, seconds: float) -> np.ndarray:
+        if not self.is_running:
+            raise RuntimeError("STT recording stopped")
+
         frames = max(1, int(seconds * self.device_sample_rate))
         audio = sd.rec(
             frames,
@@ -585,7 +588,34 @@ class STTService:
             dtype="float32",
             device=self.input_device,
         )
-        sd.wait()
+
+        deadline = time.time() + seconds + 1.0
+        while True:
+            if not self.is_running:
+                try:
+                    sd.stop()
+                except Exception:
+                    pass
+                raise RuntimeError("STT recording stopped")
+
+            try:
+                status = sd.get_status()
+            except Exception:
+                status = None
+
+            # If no status flags are being reported anymore, assume recording finished.
+            if not status:
+                break
+
+            if time.time() > deadline:
+                try:
+                    sd.stop()
+                except Exception:
+                    pass
+                raise RuntimeError("STT recording timeout")
+
+            time.sleep(0.01)
+
         return audio
 
     def analyze_level(self, audio: np.ndarray) -> Tuple[float, float]:
@@ -607,6 +637,9 @@ class STTService:
         samples = []
 
         for _ in range(NOISE_FLOOR_SAMPLES):
+            if not self.is_running:
+                return
+            audio = self.record_fixed(0.20)
             audio = self.record_fixed(0.25)
             _, mean = self.analyze_level(audio)
             samples.append(mean)
@@ -689,6 +722,9 @@ class STTService:
         return text
 
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
+        if not self.is_running:
+            return False, "", "", "stopped"
+
         audio = self.record_fixed(chunk_seconds)
         peak, mean = self.analyze_level(audio)
 
@@ -724,7 +760,7 @@ class STTService:
 
         threshold = self._dynamic_threshold(COMMAND_AUDIO_THRESHOLD)
 
-        while time.time() - start_time < timeout_seconds:
+        while self.is_running and (time.time() - start_time < timeout_seconds):
             audio = self.record_fixed(chunk_seconds)
             collected.append(audio)
 
@@ -740,6 +776,9 @@ class STTService:
 
             if speech_started and silence_after_speech >= end_silence_seconds:
                 break
+
+        if not self.is_running:
+            return ""
 
         if not collected:
             return ""
@@ -765,13 +804,12 @@ class STTService:
             f.write(f"[{timestamp}] {text}\n")
 
     async def continuous_stt_loop(self) -> None:
+        self.is_running = True
         self._ensure_model_loaded()
         self.calibrate_noise_floor()
 
         print("[STT] Voice loop active. Say 'Hey AURA' to activate.")
         print("[AURA] Waiting for wake word...")
-
-        self.is_running = True
 
         while self.is_running:
             try:
@@ -780,6 +818,9 @@ class STTService:
                 woke, wake_text, leftover, reason = await asyncio.to_thread(
                     self.listen_for_wake_word
                 )
+
+                if not self.is_running:
+                    break
 
                 if not woke:
                     await asyncio.sleep(0.03)
@@ -798,6 +839,9 @@ class STTService:
                     final_text = leftover
                 else:
                     final_text = await asyncio.to_thread(self.listen_until_done)
+
+                if not self.is_running:
+                    break
 
                 final_text = normalize_text(final_text)
 
@@ -843,6 +887,11 @@ class STTService:
                 print("-" * 60)
                 await asyncio.sleep(0.03)
 
+            except RuntimeError as e:
+                if "stopped" in str(e).lower():
+                    break
+                print(f"[STT] Loop error: {e}")
+                await asyncio.sleep(0.25)
             except Exception as e:
                 print(f"[STT] Loop error: {e}")
                 await asyncio.sleep(0.25)
@@ -852,3 +901,7 @@ class STTService:
 
     def stop(self) -> None:
         self.is_running = False
+        try:
+            sd.stop()
+        except Exception:
+            pass

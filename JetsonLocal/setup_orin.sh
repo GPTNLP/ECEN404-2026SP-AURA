@@ -43,8 +43,21 @@ fi
 sudo systemctl enable ollama
 sudo systemctl start ollama
 
+# Force Ollama to expose all GPU layers on the Jetson.
+# JetPack 6.2 exposes CUDA automatically, but OLLAMA_NUM_GPU ensures
+# the scheduler doesn't cap the GPU allocation.
+OLLAMA_SVC="/etc/systemd/system/ollama.service"
+if [ -f "$OLLAMA_SVC" ] && ! grep -q "OLLAMA_NUM_GPU" "$OLLAMA_SVC"; then
+    sudo sed -i '/\[Service\]/a Environment="OLLAMA_NUM_GPU=999"' "$OLLAMA_SVC"
+    sudo systemctl daemon-reload
+    sudo systemctl restart ollama
+    sleep 3
+    echo "Ollama GPU environment configured"
+fi
+
 echo "Downloading models..."
 ollama pull llama3.2
+ollama pull llama3.2:1b        # lightweight intent-classification model (~2x faster)
 ollama pull nomic-embed-text
 
 # -----------------------------
@@ -107,6 +120,10 @@ ExecStart=$PROJECT_DIR/start_aura.sh
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=AURA_NUM_GPU=99
+Environment=AURA_INTENT_MODEL=llama3.2:1b
+Environment=AURA_GRAPH_EXTRACT=true
+Environment=AURA_KEEP_ALIVE=30m
 
 [Install]
 WantedBy=multi-user.target
