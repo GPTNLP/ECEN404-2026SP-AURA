@@ -307,35 +307,6 @@ export default function DashboardPage() {
           />
 
           <FiloCard
-            label="Active DB"
-            value={dbValue}
-            sub={isOnline ? "Loaded on Jetson" : "No recent data"}
-            status={isOnline ? "BAD" : "WARN"}
-            autoStatus={false}
-          />
-
-          <FiloCard
-            label="Camera"
-            value={cameraValue}
-            sub="Camera service"
-            status={isOnline ? healthFromBool(s?.camera_ready) : "WARN"}
-          />
-
-          <FiloCard
-            label="Mic"
-            value={micValue}
-            sub="Microphone status"
-            status={isOnline ? healthFromBool(s?.mic_ready) : "WARN"}
-          />
-
-          <FiloCard
-            label="Speaker"
-            value={speakerValue}
-            sub="Speaker status"
-            status={isOnline ? healthFromBool(s?.speaker_ready) : "WARN"}
-          />
-
-          <FiloCard
             label="ESP32 Connection"
             value={esp32Value}
             sub="Controller link"
