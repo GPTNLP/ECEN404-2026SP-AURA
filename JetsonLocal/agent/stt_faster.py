@@ -12,10 +12,6 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-
-# ============================================================
-# TUNING
-# ============================================================
 WAKE_AUDIO_THRESHOLD = 0.030
 COMMAND_AUDIO_THRESHOLD = 0.018
 END_SILENCE_SECONDS = 1.0
@@ -30,9 +26,11 @@ NOISE_FLOOR_SAMPLES = 5
 NOISE_FLOOR_MULTIPLIER = 2.2
 MIN_DYNAMIC_THRESHOLD = 0.012
 
+# 🔥 UPDATED HERE
 DEFAULT_MODEL_SIZE = "base.en"
-DEFAULT_DEVICE = "cpu"
-DEFAULT_COMPUTE_TYPE = "int8"
+DEFAULT_DEVICE = "cuda"          # ← GPU enabled
+DEFAULT_COMPUTE_TYPE = "float16" # ← optimal for Jetson
+
 DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
 
