@@ -31,6 +31,13 @@ type DeviceRecord = {
       uptime_seconds?: number;
       gpu_percent?: number;
       db_name?: string;
+      esp32?: {
+        port?: string;
+        port_exists?: boolean;
+        connected?: boolean;
+        last_connect_ok?: boolean;
+        last_error?: string;
+      };
     };
   };
 };
@@ -50,6 +57,7 @@ const DEVICE_ID =
   "jetson-001";
 
 const LS_TOKEN = "aura-auth-token";
+const STALE_AFTER_SECONDS = 15;
 
 function dotColor(status: HealthStatus) {
   if (status === "OK") return "var(--status-good)";
@@ -71,7 +79,7 @@ function thermalStatus(tempC?: number | null): HealthStatus {
 }
 
 function formatUptime(sec?: number) {
-  if (sec == null) return "—";
+  if (sec == null) return "Unknown";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
@@ -84,7 +92,7 @@ function formatUpdated(unixSeconds?: number) {
 }
 
 function fmt(value?: number | null, suffix = "", digits = 1) {
-  if (value == null || Number.isNaN(value)) return "—";
+  if (value == null || Number.isNaN(value)) return "Unknown";
   return `${value.toFixed(digits)}${suffix}`;
 }
 
@@ -94,15 +102,14 @@ function statusTextFromBool(value?: boolean | null) {
   return "Unknown";
 }
 
-function healthFromReadyText(value: string): HealthStatus {
-  if (value === "Ready") return "OK";
-  if (value === "Not Ready") return "BAD";
+function staleHealth(): HealthStatus {
   return "WARN";
 }
 
 export default function DashboardPage() {
   const [device, setDevice] = useState<DeviceRecord | null>(null);
   const [error, setError] = useState("");
+  const [nowMs, setNowMs] = useState(Date.now());
 
   useEffect(() => {
     let alive = true;
@@ -134,55 +141,123 @@ export default function DashboardPage() {
         if (alive) {
           setDevice(found);
           setError("");
+          setNowMs(Date.now());
         }
       } catch (err) {
         if (alive) {
           setError(err instanceof Error ? err.message : "Failed to load dashboard");
+          setNowMs(Date.now());
         }
       }
     }
 
     load();
     const id = setInterval(load, 2000);
+    const clock = setInterval(() => setNowMs(Date.now()), 1000);
 
     return () => {
       alive = false;
       clearInterval(id);
+      clearInterval(clock);
     };
   }, []);
 
-  const updatedLabel = useMemo(() => {
-    if (!device?.last_seen_at) return "";
-    return formatUpdated(device.last_seen_at);
-  }, [device?.last_seen_at]);
-
-  const status = device?.online ? "ONLINE" : "OFFLINE";
   const s = device?.status;
   const extra = s?.extra;
 
-  const motorsHealth: HealthStatus = "OK";
-  const sensorsHealth: HealthStatus =
-    healthFromBool(s?.camera_ready) === "BAD" ||
-    healthFromBool(s?.mic_ready) === "BAD" ||
-    healthFromBool(s?.speaker_ready) === "BAD"
-      ? "BAD"
-      : "OK";
+  const freshestTimestampSeconds = useMemo(() => {
+    const candidates = [
+      device?.last_seen_at,
+      s?.updated_at,
+    ].filter((v): v is number => typeof v === "number" && v > 0);
 
-  const thermalsHealth = thermalStatus(s?.temperature_c);
+    if (!candidates.length) return 0;
+    return Math.max(...candidates);
+  }, [device?.last_seen_at, s?.updated_at]);
 
-  const aiReadyText = statusTextFromBool(s?.ollama_ready);
-  const vectorReadyText = statusTextFromBool(s?.vector_db_ready);
+  const ageSeconds = freshestTimestampSeconds
+    ? Math.max(0, Math.floor(nowMs / 1000 - freshestTimestampSeconds))
+    : Number.POSITIVE_INFINITY;
+
+  const isFresh = freshestTimestampSeconds > 0 && ageSeconds <= STALE_AFTER_SECONDS;
+  const isOnline = Boolean(device?.online) && isFresh;
+
+  const updatedLabel = useMemo(() => {
+    if (!isFresh || !device?.last_seen_at) return "";
+    return formatUpdated(device.last_seen_at);
+  }, [device?.last_seen_at, isFresh]);
+
+  const status = isOnline ? "ONLINE" : "OFFLINE";
+
+  const ramValue = isOnline ? fmt(s?.ram_percent, "%", 1) : "Unknown";
+  const cpuValue = isOnline ? fmt(s?.cpu_percent, "%", 1) : "Unknown";
+  const gpuValue = isOnline ? fmt(extra?.gpu_percent, "%", 1) : "Unknown";
+  const uptimeValue = isOnline ? formatUptime(extra?.uptime_seconds) : "Unknown";
+  const dbValue = isOnline ? extra?.db_name || "None" : "Unknown";
+
+  const cameraValue = isOnline ? statusTextFromBool(s?.camera_ready) : "Unknown";
+  const micValue = isOnline ? statusTextFromBool(s?.mic_ready) : "Unknown";
+  const speakerValue = isOnline ? statusTextFromBool(s?.speaker_ready) : "Unknown";
+
+  const esp32 = extra?.esp32;
+
+  const esp32Value = !isOnline
+    ? "Unknown"
+    : esp32?.connected
+    ? "Connected"
+    : esp32?.port_exists
+    ? "Detected"
+    : "Disconnected";
+
+  const esp32Health: HealthStatus = !isOnline
+    ? "WARN"
+    : esp32?.connected
+    ? "OK"
+    : esp32?.port_exists
+    ? "WARN"
+    : "BAD";
+
+  const thermalsValue = isOnline ? (s?.temperature_c != null ? fmt(s.temperature_c, "°C", 1) : "Unknown") : "Unknown";
+  const thermalsHealth = isOnline ? thermalStatus(s?.temperature_c) : staleHealth();
 
   return (
     <div className="dashboard-page">
       <div className="aura-header">
         <div className="aura-panel">
-          <img src={robotImage} alt="AURA" className="aura-img" />
+          <div
+            className="aura-img-wrap"
+            style={{
+              width: 88,
+              height: 88,
+              borderRadius: 20,
+              overflow: "hidden",
+              flexShrink: 0,
+              background: "rgba(0,0,0,0.06)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <img
+              src={robotImage}
+              alt="AURA"
+              className="aura-img"
+              style={{
+                width: "100%",
+                height: "100%",
+                objectFit: "cover",
+                objectPosition: "center top",
+                display: "block",
+              }}
+            />
+          </div>
+
           <div className="aura-text">
             <h1 className="aura-title">{device?.device_name || "AURA"}</h1>
             <div className="aura-sub">
               Status: <b>{status}</b>
-              {updatedLabel ? <> • Updated {updatedLabel}</> : null}
+              {isOnline && updatedLabel ? <> • Updated {updatedLabel}</> : null}
+              {!isOnline && freshestTimestampSeconds > 0 ? <> • No fresh Jetson data</> : null}
             </div>
           </div>
         </div>
@@ -192,61 +267,87 @@ export default function DashboardPage() {
 
       <section className="dashboard-section">
         <div className="dash-title-row">
-          <h2 className="dash-title">Filometrics</h2>
-          <div className="dash-subtitle">Live Jetson values</div>
+          <h2 className="dash-title">System Overview</h2>
+          <div className="dash-subtitle">
+            {isOnline ? "Live Jetson values" : "Waiting for fresh Jetson data"}
+          </div>
         </div>
 
         <div className="filo-grid">
           <FiloCard
             label="RAM Usage"
-            value={fmt(s?.ram_percent, "%", 1)}
-            sub="Memory load"
+            value={ramValue}
+            sub={isOnline ? "Memory load" : "No recent data"}
+            status={isOnline ? "BAD" : "WARN"}
+            autoStatus={false}
           />
+
           <FiloCard
             label="CPU Usage"
-            value={fmt(s?.cpu_percent, "%", 1)}
-            sub="Processor load"
+            value={cpuValue}
+            sub={isOnline ? "Processor load" : "No recent data"}
+            status={isOnline ? "BAD" : "WARN"}
+            autoStatus={false}
           />
+
           <FiloCard
             label="GPU Usage"
-            value={fmt(extra?.gpu_percent, "%", 1)}
-            sub="GPU load"
+            value={gpuValue}
+            sub={isOnline ? "GPU load" : "No recent data"}
+            status={isOnline ? "BAD" : "WARN"}
+            autoStatus={false}
           />
+
           <FiloCard
             label="Uptime"
-            value={formatUptime(extra?.uptime_seconds)}
-            sub="Since boot"
+            value={uptimeValue}
+            sub={isOnline ? "Since boot" : "No recent data"}
+            status={isOnline ? "BAD" : "WARN"}
+            autoStatus={false}
           />
+
           <FiloCard
             label="Active DB"
-            value={extra?.db_name || "None"}
-            sub="Loaded on Jetson"
+            value={dbValue}
+            sub={isOnline ? "Loaded on Jetson" : "No recent data"}
+            status={isOnline ? "BAD" : "WARN"}
+            autoStatus={false}
           />
-          <FiloCard
-            label="AI (LLM)"
-            value={aiReadyText}
-            sub="Ollama status"
-            status={healthFromReadyText(aiReadyText)}
-          />
-          <FiloCard
-            label="Vector DB"
-            value={vectorReadyText}
-            sub="RAG system"
-            status={healthFromReadyText(vectorReadyText)}
-          />
-        </div>
-      </section>
 
-      <section className="dashboard-section">
-        <div className="dash-title-row">
-          <h2 className="dash-title">System Health</h2>
-          <div className="dash-subtitle">Quick status checks</div>
-        </div>
+          <FiloCard
+            label="Camera"
+            value={cameraValue}
+            sub="Camera service"
+            status={isOnline ? healthFromBool(s?.camera_ready) : "WARN"}
+          />
 
-        <div className="filo-grid">
-          <HealthCard label="Motors" status={motorsHealth} />
-          <HealthCard label="Sensors" status={sensorsHealth} />
-          <HealthCard label="Thermals" status={thermalsHealth} />
+          <FiloCard
+            label="Mic"
+            value={micValue}
+            sub="Microphone status"
+            status={isOnline ? healthFromBool(s?.mic_ready) : "WARN"}
+          />
+
+          <FiloCard
+            label="Speaker"
+            value={speakerValue}
+            sub="Speaker status"
+            status={isOnline ? healthFromBool(s?.speaker_ready) : "WARN"}
+          />
+
+          <FiloCard
+            label="ESP32 Connection"
+            value={esp32Value}
+            sub="Controller link"
+            status={esp32Health}
+          />
+
+          <FiloCard
+            label="Thermals"
+            value={thermalsValue}
+            sub="Overall thermal condition"
+            status={thermalsHealth}
+          />
         </div>
       </section>
     </div>
@@ -258,37 +359,30 @@ function FiloCard({
   value,
   sub,
   status,
+  autoStatus = true,
 }: {
   label: string;
   value: string;
   sub: string;
   status?: HealthStatus;
+  autoStatus?: boolean;
 }) {
-  const dot =
-    status != null ? dotColor(status) : "var(--accent)";
+  let resolvedStatus: HealthStatus;
+
+  if (!autoStatus) {
+    resolvedStatus = status ?? "WARN";
+  } else {
+    resolvedStatus = status ?? "WARN";
+  }
 
   return (
     <div className="filo-item">
       <div className="filo-top">
         <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: dot }} />
+        <div className="filo-dot" style={{ background: dotColor(resolvedStatus) }} />
       </div>
       <div className="filo-value">{value}</div>
       <div className="filo-sub">{sub}</div>
-    </div>
-  );
-}
-
-function HealthCard({ label, status }: { label: string; status?: HealthStatus }) {
-  const s = status ?? "WARN";
-  return (
-    <div className="filo-item">
-      <div className="filo-top">
-        <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: dotColor(s) }} />
-      </div>
-      <div className="filo-value">{s}</div>
-      <div className="filo-sub">Overall condition</div>
     </div>
   );
 }

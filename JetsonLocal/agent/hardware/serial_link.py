@@ -1,6 +1,7 @@
 import time
 from typing import Optional
 
+import os
 import serial
 
 from core.config import (
@@ -15,6 +16,8 @@ class SerialLink:
     def __init__(self):
         self.esp_serial: Optional[serial.Serial] = None
         self.dry_run = SERIAL_DRY_RUN
+        self.last_connect_ok = False
+        self.last_error = ""
         self.MOVEMENT_COMMANDS = {
             "forward",
             "backward",
@@ -27,11 +30,15 @@ class SerialLink:
 
     def connect(self) -> bool:
         if self.dry_run:
+            self.last_connect_ok = True
+            self.last_error = ""
             print("[SERIAL] DRY RUN enabled - skipping real ESP32 connection")
             return True
 
         try:
             if self.esp_serial and self.esp_serial.is_open:
+                self.last_connect_ok = True
+                self.last_error = ""
                 return True
 
             self.esp_serial = serial.Serial(
@@ -41,17 +48,18 @@ class SerialLink:
             )
             time.sleep(2.0)
 
-            try:
-                self.esp_serial.reset_input_buffer()
-                self.esp_serial.reset_output_buffer()
-            except Exception:
-                pass
+            self.esp_serial.reset_input_buffer()
+            self.esp_serial.reset_output_buffer()
 
+            self.last_connect_ok = True
+            self.last_error = ""
             print(f"[SERIAL] Connected to {SERIAL_PORT}")
             return True
 
         except Exception as e:
             self.esp_serial = None
+            self.last_connect_ok = False
+            self.last_error = str(e)
             print(f"[SERIAL] Connect failed: {e}")
             return False
 
@@ -134,5 +142,16 @@ class SerialLink:
             self.disconnect()
             raise
 
+    def get_health(self) -> dict:
+        port_exists = os.path.exists(SERIAL_PORT)
+        is_open = bool(self.esp_serial and self.esp_serial.is_open)
+
+        return {
+            "port": SERIAL_PORT,
+            "port_exists": port_exists,
+            "connected": is_open,
+            "last_connect_ok": self.last_connect_ok,
+            "last_error": self.last_error or "",
+        }    
 
 serial_link = SerialLink()

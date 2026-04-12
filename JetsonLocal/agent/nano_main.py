@@ -81,7 +81,6 @@ class AuraConsoleApp:
         self.status_text = tk.StringVar(value="BOOTING")
         self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
         self.banner_text = tk.StringVar(value="AURA")
-        self.clock_text = tk.StringVar(value="")
         self.vision_title_text = tk.StringVar(value="")
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
@@ -89,7 +88,6 @@ class AuraConsoleApp:
 
         self._build_ui()
         self._start_reader()
-        self._tick_clock()
         self._poll_logs()
         self._poll_vision()
 
@@ -167,19 +165,6 @@ class AuraConsoleApp:
             pady=6,
         )
         self.sub_label.pack(fill="x", pady=(0, 12))
-
-        meta_row = tk.Frame(parent, bg="#05070a")
-        meta_row.pack(fill="x", pady=(0, 10))
-
-        self.clock_card = self._make_meta_card(meta_row, "TIME", self.clock_text, sub_font)
-        self.clock_card.pack(side="left", fill="x", expand=True, padx=(0, 5))
-
-        self.source_card = self._make_meta_card(meta_row, "SOURCE", tk.StringVar(value=SERVICE_NAME), sub_font)
-        self.source_card.pack(side="left", fill="x", expand=True, padx=5)
-
-        self.mode_card = self._make_meta_card(meta_row, "UI", tk.StringVar(value="HOME"), sub_font)
-        self.mode_card.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        self.mode_value_label = self.mode_card.winfo_children()[1]
 
         vision_card = tk.Frame(
             parent,
@@ -376,46 +361,15 @@ class AuraConsoleApp:
             pady=6,
         ).pack(fill="x", pady=(0, 12))
 
-    def _make_meta_card(self, parent, title, variable, info_font):
-        frame = tk.Frame(
-            parent,
-            bg="#0b0f14",
-            highlightbackground="#14f195",
-            highlightthickness=1,
-        )
-        tk.Label(
-            frame,
-            text=title,
-            fg="#14f195",
-            bg="#0b0f14",
-            font=info_font,
-            anchor="w",
-            padx=10,
-            pady=4,
-        ).pack(fill="x", pady=(8, 2))
-        tk.Label(
-            frame,
-            textvariable=variable,
-            fg="#e2e8f0",
-            bg="#0b0f14",
-            font=info_font,
-            anchor="w",
-            padx=10,
-            pady=4,
-        ).pack(fill="x", pady=(0, 8))
-        return frame
-
     def _show_home(self):
         self.ui_mode = "home"
         self.vision_frame.pack_forget()
         self.home_frame.pack(fill="both", expand=True)
-        self.mode_value_label.configure(text="HOME")
 
     def _show_vision(self):
         self.ui_mode = "vision"
         self.home_frame.pack_forget()
         self.vision_frame.pack(fill="both", expand=True)
-        self.mode_value_label.configure(text="VISION")
 
     def _start_reader(self):
         thread = threading.Thread(target=self._reader_worker, daemon=True)
@@ -445,11 +399,6 @@ class AuraConsoleApp:
             line = raw_line.rstrip("\n")
             if line.strip():
                 self.log_queue.put(line)
-
-    def _tick_clock(self):
-        self.clock_text.set(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        if self.running:
-            self.root.after(500, self._tick_clock)
 
     def _poll_logs(self):
         processed = 0

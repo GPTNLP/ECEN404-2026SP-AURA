@@ -505,6 +505,7 @@ async def status_loop():
             "tts_ready": True,
             "tts_device": tts_service.device,
         }
+        payload["extra"]["esp32"] = serial_link.get_health()
 
         try:
             await asyncio.to_thread(api.status, payload)
