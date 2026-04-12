@@ -65,12 +65,6 @@ function dotColor(status: HealthStatus) {
   return "var(--status-bad)";
 }
 
-function healthFromBool(value?: boolean | null): HealthStatus {
-  if (value === true) return "OK";
-  if (value === false) return "BAD";
-  return "WARN";
-}
-
 function thermalStatus(tempC?: number | null): HealthStatus {
   if (tempC == null) return "WARN";
   if (tempC < 70) return "OK";
@@ -96,11 +90,6 @@ function fmt(value?: number | null, suffix = "", digits = 1) {
   return `${value.toFixed(digits)}${suffix}`;
 }
 
-function statusTextFromBool(value?: boolean | null) {
-  if (value === true) return "Ready";
-  if (value === false) return "Not Ready";
-  return "Unknown";
-}
 
 function staleHealth(): HealthStatus {
   return "WARN";
@@ -193,11 +182,6 @@ export default function DashboardPage() {
   const cpuValue = isOnline ? fmt(s?.cpu_percent, "%", 1) : "Unknown";
   const gpuValue = isOnline ? fmt(extra?.gpu_percent, "%", 1) : "Unknown";
   const uptimeValue = isOnline ? formatUptime(extra?.uptime_seconds) : "Unknown";
-  const dbValue = isOnline ? extra?.db_name || "None" : "Unknown";
-
-  const cameraValue = isOnline ? statusTextFromBool(s?.camera_ready) : "Unknown";
-  const micValue = isOnline ? statusTextFromBool(s?.mic_ready) : "Unknown";
-  const speakerValue = isOnline ? statusTextFromBool(s?.speaker_ready) : "Unknown";
 
   const esp32 = extra?.esp32;
 
