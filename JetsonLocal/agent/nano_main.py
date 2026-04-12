@@ -164,9 +164,9 @@ class AuraConsoleApp:
             fg="#94a3b8",
             bg="#0b0f14",
             font=sub_font,
-            pady=(0, 12),
+            pady=6,
         )
-        self.sub_label.pack(fill="x")
+        self.sub_label.pack(fill="x", pady=(0, 12))
 
         meta_row = tk.Frame(parent, bg="#05070a")
         meta_row.pack(fill="x", pady=(0, 10))
@@ -348,8 +348,8 @@ class AuraConsoleApp:
             anchor="w",
             justify="left",
             padx=14,
-            pady=(12, 4),
-        ).pack(fill="x")
+            pady=4,
+        ).pack(fill="x", pady=(12, 4))
 
         tk.Label(
             info_card,
@@ -360,8 +360,8 @@ class AuraConsoleApp:
             anchor="w",
             justify="left",
             padx=14,
-            pady=(0, 6),
-        ).pack(fill="x")
+            pady=3,
+        ).pack(fill="x", pady=(0, 6))
 
         tk.Label(
             info_card,
@@ -373,8 +373,8 @@ class AuraConsoleApp:
             justify="left",
             wraplength=max(600, int(self.root.winfo_screenwidth() * 0.9)),
             padx=14,
-            pady=(0, 12),
-        ).pack(fill="x")
+            pady=6,
+        ).pack(fill="x", pady=(0, 12))
 
     def _make_meta_card(self, parent, title, variable, info_font):
         frame = tk.Frame(
@@ -391,8 +391,8 @@ class AuraConsoleApp:
             font=info_font,
             anchor="w",
             padx=10,
-            pady=(8, 2),
-        ).pack(fill="x")
+            pady=4,
+        ).pack(fill="x", pady=(8, 2))
         tk.Label(
             frame,
             textvariable=variable,
@@ -401,8 +401,8 @@ class AuraConsoleApp:
             font=info_font,
             anchor="w",
             padx=10,
-            pady=(0, 8),
-        ).pack(fill="x")
+            pady=4,
+        ).pack(fill="x", pady=(0, 8))
         return frame
 
     def _show_home(self):
@@ -606,7 +606,10 @@ class AuraConsoleApp:
         if not self.active_vision_mode:
             return
         try:
-            frame_bytes = self._http_bytes(f"/camera/frame.jpg?ts={int(datetime.now().timestamp() * 1000)}", timeout=2.0)
+            frame_bytes = self._http_bytes(
+                f"/camera/frame.jpg?ts={int(datetime.now().timestamp() * 1000)}",
+                timeout=2.0,
+            )
             image = Image.open(io.BytesIO(frame_bytes))
 
             max_w = max(640, int(self.root.winfo_screenwidth() * 0.94))

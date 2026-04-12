@@ -26,15 +26,13 @@ NEAR_FIELD_BOOST = 1.35
 USE_ONLY_LEFT_CHANNEL = False
 WAKE_MATCH_MODE = 1
 
-NOISE_FLOOR_SAMPLES = 5
-NOISE_FLOOR_MULTIPLIER = 2.2
-MIN_DYNAMIC_THRESHOLD = 0.012
+NOISE_FLOOR_SAMPLES = 6
+NOISE_FLOOR_MULTIPLIER = 1.7
+MIN_DYNAMIC_THRESHOLD = 0.008
 
-# 🔥 UPDATED HERE
 DEFAULT_MODEL_SIZE = "base.en"
-DEFAULT_DEVICE = "cuda"          # ← GPU enabled
-DEFAULT_COMPUTE_TYPE = "float16" # ← optimal for Jetson
-
+DEFAULT_DEVICE = "cuda"
+DEFAULT_COMPUTE_TYPE = "float16"
 DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
 
@@ -353,9 +351,6 @@ class STTService:
 
         self._resolve_input_device()
 
-    # --------------------------------------------------------
-    # DEVICE SETUP
-    # --------------------------------------------------------
     def _resolve_input_device(self) -> None:
         devices = sd.query_devices()
 
@@ -411,15 +406,12 @@ class STTService:
         print(f"[STT] Device sample rate: {self.device_sample_rate}")
         print(f"[STT] Channels: {self.channels}")
 
-    # --------------------------------------------------------
-    # MODEL LIFECYCLE
-    # --------------------------------------------------------
     def _ensure_model_loaded(self) -> None:
         if self.model is not None:
             return
 
-        actual_device = self.device
-        actual_compute = self.compute_type
+        requested_device = self.device
+        requested_compute = self.compute_type
 
         try:
             import torch
@@ -427,27 +419,52 @@ class STTService:
         except Exception:
             cuda_ok = False
 
-        if actual_device == "cuda" and not cuda_ok:
-            print("[STT] CUDA not available, falling back to CPU int8")
-            actual_device = "cpu"
-            actual_compute = "int8"
+        if requested_device == "cuda" and not cuda_ok:
+            print("[STT] CUDA runtime not available, falling back to CPU int8")
+            requested_device = "cpu"
+            requested_compute = "int8"
 
         print(
             f"[STT] Loading faster-whisper model "
-            f"'{self.model_size}' on device={actual_device} compute_type={actual_compute}..."
+            f"'{self.model_size}' on device={requested_device} compute_type={requested_compute}..."
         )
 
-        self.model = WhisperModel(
-            self.model_size,
-            device=actual_device,
-            compute_type=actual_compute,
-            cpu_threads=2 if actual_device == "cuda" else 4,
-            num_workers=1,
-        )
+        try:
+            self.model = WhisperModel(
+                self.model_size,
+                device=requested_device,
+                compute_type=requested_compute,
+                cpu_threads=2 if requested_device == "cuda" else 4,
+                num_workers=1,
+            )
+            self.device = requested_device
+            self.compute_type = requested_compute
+            print("[STT] Model loaded successfully!")
+            return
 
-        self.device = actual_device
-        self.compute_type = actual_compute
-        print("[STT] Model loaded successfully!")
+        except Exception as e:
+            msg = str(e).lower()
+            cuda_related = (
+                "cuda support" in msg
+                or "compiled with cuda" in msg
+                or "cuda" in msg
+            )
+
+            if requested_device == "cuda" and cuda_related:
+                print("[STT] CUDA-backed CTranslate2 is unavailable. Falling back to CPU int8...")
+                self.model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8",
+                    cpu_threads=4,
+                    num_workers=1,
+                )
+                self.device = "cpu"
+                self.compute_type = "int8"
+                print("[STT] Model loaded successfully on CPU fallback!")
+                return
+
+            raise
 
     def unload_model(self) -> None:
         if self.model is None:
@@ -479,9 +496,6 @@ class STTService:
         if idle_for >= self.unload_after_idle_seconds:
             self.unload_model()
 
-    # --------------------------------------------------------
-    # AUDIO HELPERS
-    # --------------------------------------------------------
     def _prepare_audio(self, audio: np.ndarray) -> np.ndarray:
         if audio.ndim == 1:
             mono = audio.astype(np.float32)
@@ -569,8 +583,12 @@ class STTService:
             task=self.task,
             language=self.language,
             vad_filter=True,
-            beam_size=1,
-            best_of=1,
+            vad_parameters={
+                "min_silence_duration_ms": 250,
+                "speech_pad_ms": 120,
+            },
+            beam_size=2,
+            best_of=2,
             temperature=0.0,
             condition_on_previous_text=False,
             without_timestamps=True,
@@ -579,9 +597,6 @@ class STTService:
         text = " ".join(seg.text.strip() for seg in segments).strip()
         return text
 
-    # --------------------------------------------------------
-    # LISTENING
-    # --------------------------------------------------------
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
         audio = self.record_fixed(chunk_seconds)
         peak, _ = self.analyze_level(audio)
@@ -647,18 +662,12 @@ class STTService:
 
         return self._transcribe_audio_array(full_audio)
 
-    # --------------------------------------------------------
-    # LOGGING
-    # --------------------------------------------------------
     def log_transcript(self, text: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         with open(self.log_path, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {text}\n")
 
-    # --------------------------------------------------------
-    # MAIN LOOP
-    # --------------------------------------------------------
     async def continuous_stt_loop(self) -> None:
         self._ensure_model_loaded()
         self.calibrate_noise_floor()
