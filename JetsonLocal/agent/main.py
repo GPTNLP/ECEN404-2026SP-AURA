@@ -404,37 +404,57 @@ def build_stt_service() -> STTService:
 async def start_voice_loop():
     global stt_task, stt_service, voice_running, voice_loaded
 
+    # Prevent duplicate loops
     if stt_task and not stt_task.done():
-        quiet_print("voice_already_running", "[VOICE] already running")
+        print("[VOICE] already running")
         set_ui_state("LISTENING", "Wake word active")
         return
 
-    stt_service = build_stt_service()
-    voice_loaded = True
+    print("[VOICE] initializing STT service...")
+
+    try:
+        stt_service = build_stt_service()
+        voice_loaded = True
+    except Exception as e:
+        print(f"[VOICE ERROR] failed to build STT service: {e}")
+        raise
 
     async def _runner():
         global voice_running, voice_loaded
+
         try:
             voice_running = True
-            quiet_print("voice_start", "[VOICE] started")
+            print("[VOICE] started successfully")
             set_ui_state("LISTENING", "Wake word active")
-            quiet_print("voice_listening", "[VOICE] listening")
+
             await stt_service.continuous_stt_loop()
+
         except asyncio.CancelledError:
+            print("[VOICE] cancelled")
             raise
+
         except Exception as e:
-            set_ui_state("ERROR", truncate_for_ui(str(e)))
-            quiet_print("voice_loop_error", f"[VOICE] loop failed: {e}")
-            raise
+            print(f"[VOICE ERROR] loop crashed: {e}")
+            set_ui_state("ERROR", str(e))
+
         finally:
             voice_running = False
             voice_loaded = False
-            quiet_print("voice_stop", "[VOICE] stopped")
+            print("[VOICE] stopped")
             set_ui_state("READY", "Voice stopped")
 
-    stt_task = asyncio.create_task(_runner())
+    # 🔥 CRITICAL FIX: ensure task is created properly
+    loop = asyncio.get_running_loop()
+    stt_task = loop.create_task(_runner())
 
+    # 🔥 DEBUG: confirm it actually started
+    await asyncio.sleep(0.2)
 
+    if stt_task.done():
+        raise RuntimeError("STT task died immediately after starting")
+
+    print("[VOICE] STT task running ✔")
+    
 async def stop_voice_loop():
     global stt_task, stt_service, voice_running, voice_loaded
 
@@ -1165,7 +1185,7 @@ async def lifespan(app_instance: FastAPI):
 
     if voice_enabled:
         try:
-            await start_voice_loop()
+            asyncio.create_task(start_voice_loop())
         except Exception as e:
             send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
             quiet_print("voice", f"[VOICE] failed to start: {e}")
