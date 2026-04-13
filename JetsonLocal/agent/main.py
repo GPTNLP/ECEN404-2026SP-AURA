@@ -404,57 +404,47 @@ def build_stt_service() -> STTService:
 async def start_voice_loop():
     global stt_task, stt_service, voice_running, voice_loaded
 
-    # Prevent duplicate loops
     if stt_task and not stt_task.done():
-        print("[VOICE] already running")
+        quiet_print("voice_already_running", "[VOICE] already running")
         set_ui_state("LISTENING", "Wake word active")
         return
 
-    print("[VOICE] initializing STT service...")
+    quiet_print("voice_init", "[VOICE] initializing STT service...")
 
-    try:
-        stt_service = build_stt_service()
-        voice_loaded = True
-    except Exception as e:
-        print(f"[VOICE ERROR] failed to build STT service: {e}")
-        raise
+    stt_service = build_stt_service()
+    voice_loaded = True
 
     async def _runner():
         global voice_running, voice_loaded
-
         try:
             voice_running = True
-            print("[VOICE] started successfully")
+            quiet_print("voice_start", "[VOICE] started")
             set_ui_state("LISTENING", "Wake word active")
-
+            quiet_print("voice_listening", "[VOICE] listening")
             await stt_service.continuous_stt_loop()
-
         except asyncio.CancelledError:
-            print("[VOICE] cancelled")
+            quiet_print("voice_cancelled", "[VOICE] cancelled")
             raise
-
         except Exception as e:
-            print(f"[VOICE ERROR] loop crashed: {e}")
-            set_ui_state("ERROR", str(e))
-
+            set_ui_state("ERROR", truncate_for_ui(str(e)))
+            quiet_print("voice_loop_error", f"[VOICE] loop failed: {e}")
+            raise
         finally:
             voice_running = False
             voice_loaded = False
-            print("[VOICE] stopped")
+            quiet_print("voice_stop", "[VOICE] stopped")
             set_ui_state("READY", "Voice stopped")
 
-    # 🔥 CRITICAL FIX: ensure task is created properly
     loop = asyncio.get_running_loop()
     stt_task = loop.create_task(_runner())
 
-    # 🔥 DEBUG: confirm it actually started
     await asyncio.sleep(0.2)
-
     if stt_task.done():
         raise RuntimeError("STT task died immediately after starting")
 
-    print("[VOICE] STT task running ✔")
-    
+    quiet_print("voice_task_ok", "[VOICE] STT task running")
+
+
 async def stop_voice_loop():
     global stt_task, stt_service, voice_running, voice_loaded
 
@@ -483,6 +473,38 @@ async def stop_voice_loop():
     voice_loaded = False
     quiet_print("voice_stop", "[VOICE] stopped")
     set_ui_state("READY", "Voice stopped")
+
+
+async def voice_watchdog_loop():
+    while True:
+        try:
+            if voice_enabled:
+                if stt_task is None:
+                    quiet_print("voice_watchdog_start", "[VOICE WATCHDOG] no STT task, starting")
+                    await start_voice_loop()
+                elif stt_task.done():
+                    err = None
+                    try:
+                        err = stt_task.exception()
+                    except Exception:
+                        err = None
+
+                    if err:
+                        quiet_print("voice_watchdog_restart", f"[VOICE WATCHDOG] restarting after crash: {err}")
+                    else:
+                        quiet_print("voice_watchdog_restart", "[VOICE WATCHDOG] restarting stopped STT task")
+
+                    try:
+                        await stop_voice_loop()
+                    except Exception:
+                        pass
+
+                    await asyncio.sleep(1.0)
+                    await start_voice_loop()
+        except Exception as e:
+            quiet_print("voice_watchdog_error", f"[VOICE WATCHDOG] error: {e}")
+
+        await asyncio.sleep(2.0)
 
 
 # -------------------------------------------------------------------
@@ -1182,13 +1204,10 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
+    asyncio.create_task(voice_watchdog_loop())
 
     if voice_enabled:
-        try:
-            asyncio.create_task(start_voice_loop())
-        except Exception as e:
-            send_or_queue_log("warning", "voice_start_failed", f"Voice loop failed to start: {e}")
-            quiet_print("voice", f"[VOICE] failed to start: {e}")
+        asyncio.create_task(start_voice_loop())
 
     set_ui_state("READY", "AURA online")
     quiet_print("startup", "[STARTUP] telemetry agent running")
