@@ -68,3 +68,12 @@ AGENT_LOG_FILE = LOGS_DIR / "agent.jsonl"
 PENDING_LOGS_FILE = QUEUE_DIR / "pending_logs.jsonl"
 PENDING_STATUS_FILE = QUEUE_DIR / "pending_status.jsonl"
 RUNTIME_FILE = STATE_DIR / "runtime.json"
+
+# ─── LangSmith observability (optional) ──────────────────────────────────────
+# Add these to JetsonLocal/.env to enable tracing:
+#   LANGCHAIN_TRACING_V2=true
+#   LANGSMITH_API_KEY=<key from smith.langchain.com>
+#   LANGCHAIN_PROJECT=AURA        # optional — groups runs in the UI
+#
+# When not set, tracing is a complete no-op (zero overhead).
+LANGSMITH_TRACING = os.getenv("LANGCHAIN_TRACING_V2", "").lower() == "true"

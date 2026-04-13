@@ -32,6 +32,8 @@ import urllib.request
 import faiss
 from rank_bm25 import BM25Okapi
 
+from core.tracing import OllamaTrace
+
 # ─── Tunables ────────────────────────────────────────────────────────────────
 
 # Ollama connectivity
@@ -256,40 +258,52 @@ class OllamaClient:
         if not texts:
             return []
 
-        # Try new batch endpoint
-        try:
-            payload = {"model": self.embed_model, "input": texts}
-            out = await asyncio.to_thread(
-                self._post_json, "/api/embed", payload, timeout_s
-            )
-            embeddings = out.get("embeddings")
-            if isinstance(embeddings, list) and len(embeddings) == len(texts):
-                return [np.array(e, dtype=np.float32) for e in embeddings]
-        except Exception:
-            pass
+        trace = OllamaTrace.start_embed(model=self.embed_model, batch_size=len(texts))
+        t0 = time.monotonic()
 
-        # Fallback: one call per text
-        results: List[np.ndarray] = []
-        per_call = max(10.0, timeout_s / len(texts))
-        for text in texts:
+        try:
+            # Try new batch endpoint
             try:
+                payload = {"model": self.embed_model, "input": texts}
                 out = await asyncio.to_thread(
-                    self._post_json,
-                    "/api/embeddings",
-                    {"model": self.embed_model, "prompt": text},
-                    per_call,
+                    self._post_json, "/api/embed", payload, timeout_s
                 )
-                emb = out.get("embedding")
-                if isinstance(emb, list) and emb:
-                    results.append(np.array(emb, dtype=np.float32))
-                    continue
-            except Exception as e:
-                raise RuntimeError(
-                    f"Ollama embed failed at {self.base_url}. "
-                    f"Is Ollama running? ({e})"
-                )
-            raise RuntimeError(f"Ollama embed returned empty for: {text[:60]!r}")
-        return results
+                embeddings = out.get("embeddings")
+                if isinstance(embeddings, list) and len(embeddings) == len(texts):
+                    trace.finish_embed(len(texts), time.monotonic() - t0)
+                    return [np.array(e, dtype=np.float32) for e in embeddings]
+            except Exception:
+                pass
+
+            # Fallback: one call per text
+            results: List[np.ndarray] = []
+            per_call = max(10.0, timeout_s / len(texts))
+            for text in texts:
+                try:
+                    out = await asyncio.to_thread(
+                        self._post_json,
+                        "/api/embeddings",
+                        {"model": self.embed_model, "prompt": text},
+                        per_call,
+                    )
+                    emb = out.get("embedding")
+                    if isinstance(emb, list) and emb:
+                        results.append(np.array(emb, dtype=np.float32))
+                        continue
+                except Exception as e:
+                    trace.error(e)
+                    raise RuntimeError(
+                        f"Ollama embed failed at {self.base_url}. "
+                        f"Is Ollama running? ({e})"
+                    )
+                raise RuntimeError(f"Ollama embed returned empty for: {text[:60]!r}")
+
+            trace.finish_embed(len(results), time.monotonic() - t0)
+            return results
+
+        except Exception as exc:
+            trace.error(exc)
+            raise
 
     async def embed(self, text: str, timeout_s: float = 60.0) -> np.ndarray:
         results = await self.embed_batch([text], timeout_s=timeout_s)
@@ -323,6 +337,7 @@ class OllamaClient:
         num_ctx: int = AURA_NUM_CTX,
         temperature: float = AURA_TEMPERATURE,
         fast: bool = False,
+        call_type: str = "answer",   # passed to LangSmith for grouping: answer|extract|keywords|intent
     ) -> str:
         payload: Dict[str, Any] = {
             "model": self.llm_model,
@@ -332,19 +347,34 @@ class OllamaClient:
             "keep_alive": AURA_KEEP_ALIVE,
             "options": self._make_options(num_predict, num_ctx, temperature, fast),
         }
+
+        trace = OllamaTrace.start_llm(
+            model=self.llm_model,
+            prompt=prompt,
+            system=system,
+            call_type=call_type,
+        )
+
         try:
             out = await asyncio.to_thread(
                 self._post_json, "/api/generate", payload, timeout_s
             )
         except Exception as e:
+            trace.error(e)
             raise RuntimeError(
                 f"Ollama generate failed at {self.base_url}. "
                 f"Is Ollama running? ({e})"
             )
+
         txt = out.get("response")
         if not isinstance(txt, str):
-            raise RuntimeError("Ollama generate returned no response text.")
-        return txt.strip()
+            err = RuntimeError("Ollama generate returned no response text.")
+            trace.error(err)
+            raise err
+
+        txt = txt.strip()
+        trace.finish(out, response_text=txt)   # captures token counts + tokens/sec
+        return txt
 
 
 # ─── LightRAG ────────────────────────────────────────────────────────────────
@@ -617,6 +647,7 @@ class LightRAG:
                 num_ctx=AURA_GRAPH_NUM_CTX,
                 temperature=0.0,   # deterministic extraction
                 fast=True,
+                call_type="extract",
             )
             return _parse_json_from_llm(raw)
         except Exception as e:
@@ -838,6 +869,7 @@ class LightRAG:
                 num_ctx=512,
                 temperature=0.0,
                 fast=True,
+                call_type="keywords",
             )
             parsed = _parse_json_from_llm(raw)
             return {
@@ -986,7 +1018,8 @@ class LightRAG:
         )
         prompt  = f"CONTEXT:\n{context}\n\nQUESTION:\n{query}\n\nANSWER:"
         answer  = await self.client.generate(
-            prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S
+            prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S,
+            call_type="answer",
         )
 
         return {

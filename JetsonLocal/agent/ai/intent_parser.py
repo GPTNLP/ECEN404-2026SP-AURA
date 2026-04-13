@@ -29,6 +29,7 @@ async def parse_intent(user_msg: str) -> str:
             num_ctx=256,      # short context = fast prefill
             temperature=0.0,  # deterministic
             fast=True,
+            call_type="intent",
         )
         return "MOVEMENT" if "MOVEMENT" in res.upper() else "QUESTION"
     except Exception as e:
