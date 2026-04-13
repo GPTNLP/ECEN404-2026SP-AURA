@@ -428,7 +428,6 @@ class STTService:
             if "stereo mix" in name:
                 score -= 20
 
-            # Prefer devices with 1-2 channels for microphone-like inputs
             if max_in in (1, 2):
                 score += 3
 
@@ -546,6 +545,16 @@ class STTService:
             self.unload_model()
 
     def _prepare_audio(self, audio: np.ndarray) -> np.ndarray:
+        if audio is None:
+            return np.zeros(1, dtype=np.float32)
+
+        audio = np.asarray(audio, dtype=np.float32)
+
+        if audio.size == 0:
+            return np.zeros(1, dtype=np.float32)
+
+        audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+
         if audio.ndim == 1:
             mono = audio.astype(np.float32)
         else:
@@ -554,27 +563,43 @@ class STTService:
             else:
                 mono = np.mean(audio, axis=1).astype(np.float32)
 
-        # smaller boost than before to avoid clipping
+        mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
+
         mono = mono * NEAR_FIELD_BOOST
 
-        # light normalization for quiet inputs
-        peak = np.max(np.abs(mono)) if len(mono) else 0.0
+        peak = np.max(np.abs(mono)) if mono.size else 0.0
+        if np.isnan(peak) or np.isinf(peak):
+            peak = 0.0
+
         if peak > 0 and peak < 0.25:
             mono = mono / peak * min(0.55, peak * 2.2)
 
+        mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
         mono = np.clip(mono, -1.0, 1.0)
-        return mono
+
+        return mono.astype(np.float32)
 
     def _resample_audio(self, audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        if audio is None:
+            return np.zeros(1, dtype=np.float32)
+
+        audio = np.asarray(audio, dtype=np.float32)
+        audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+
         if orig_sr == target_sr:
             return audio.astype(np.float32)
+
+        if len(audio) == 0 or orig_sr <= 0 or target_sr <= 0:
+            return np.zeros(1, dtype=np.float32)
 
         duration = len(audio) / orig_sr
         old_times = np.linspace(0, duration, num=len(audio), endpoint=False)
         new_length = max(1, int(duration * target_sr))
         new_times = np.linspace(0, duration, num=new_length, endpoint=False)
 
-        return np.interp(new_times, old_times, audio).astype(np.float32)
+        resampled = np.interp(new_times, old_times, audio).astype(np.float32)
+        resampled = np.nan_to_num(resampled, nan=0.0, posinf=0.0, neginf=0.0)
+        return resampled
 
     def record_fixed(self, seconds: float) -> np.ndarray:
         if not self.is_running:
@@ -589,39 +614,53 @@ class STTService:
             device=self.input_device,
         )
 
-        deadline = time.time() + seconds + 1.0
-        while True:
-            if not self.is_running:
-                try:
-                    sd.stop()
-                except Exception:
-                    pass
-                raise RuntimeError("STT recording stopped")
+        try:
+            sd.wait()
+        except Exception:
+            deadline = time.time() + seconds + 1.0
+            while True:
+                if not self.is_running:
+                    try:
+                        sd.stop()
+                    except Exception:
+                        pass
+                    raise RuntimeError("STT recording stopped")
 
-            try:
-                status = sd.get_status()
-            except Exception:
-                status = None
+                if time.time() > deadline:
+                    try:
+                        sd.stop()
+                    except Exception:
+                        pass
+                    raise RuntimeError("STT recording timeout")
 
-            # If no status flags are being reported anymore, assume recording finished.
-            if not status:
+                time.sleep(0.01)
                 break
 
-            if time.time() > deadline:
-                try:
-                    sd.stop()
-                except Exception:
-                    pass
-                raise RuntimeError("STT recording timeout")
+        audio = np.asarray(audio, dtype=np.float32)
+        audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
 
-            time.sleep(0.01)
+        if audio.size == 0:
+            return np.zeros((1, max(1, self.channels or 1)), dtype=np.float32)
 
         return audio
 
     def analyze_level(self, audio: np.ndarray) -> Tuple[float, float]:
         mono = self._prepare_audio(audio)
-        peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
-        mean = float(np.mean(np.abs(mono))) if len(mono) else 0.0
+
+        if mono is None or mono.size == 0:
+            return 0.0, 0.0
+
+        abs_mono = np.abs(mono)
+        abs_mono = np.nan_to_num(abs_mono, nan=0.0, posinf=0.0, neginf=0.0)
+
+        peak = float(np.max(abs_mono)) if abs_mono.size else 0.0
+        mean = float(np.mean(abs_mono)) if abs_mono.size else 0.0
+
+        if np.isnan(peak) or np.isinf(peak):
+            peak = 0.0
+        if np.isnan(mean) or np.isinf(mean):
+            mean = 0.0
+
         return peak, mean
 
     def _dynamic_threshold(self, base_threshold: float) -> float:
@@ -639,13 +678,19 @@ class STTService:
         for _ in range(NOISE_FLOOR_SAMPLES):
             if not self.is_running:
                 return
-            audio = self.record_fixed(0.20)
+
             audio = self.record_fixed(0.25)
             _, mean = self.analyze_level(audio)
-            samples.append(mean)
+
+            if not np.isnan(mean) and not np.isinf(mean):
+                samples.append(mean)
+
             time.sleep(0.03)
 
         self.noise_floor = float(np.median(samples)) if samples else 0.0
+        if np.isnan(self.noise_floor) or np.isinf(self.noise_floor):
+            self.noise_floor = 0.0
+
         print(f"[STT] Noise floor: {self.noise_floor:.6f}")
 
     def _run_transcribe(
@@ -691,10 +736,14 @@ class STTService:
             target_sr=self.target_sample_rate,
         )
 
+        if audio_16k is None or len(audio_16k) == 0:
+            return ""
+
+        audio_16k = np.nan_to_num(audio_16k, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
         self.last_audio_activity_ts = time.time()
         self.last_transcribe_ts = self.last_audio_activity_ts
 
-        # First pass: balanced accuracy
         text = self._run_transcribe(
             audio_16k=audio_16k,
             beam_size=5,
@@ -704,7 +753,6 @@ class STTService:
             condition_on_previous_text=True,
         )
 
-        # Optional second pass if result looks too weak
         if ENABLE_SECOND_PASS_FOR_WEAK_TEXT:
             word_count = len(normalize_text(text).split())
             if word_count < SECOND_PASS_MIN_WORDS:
@@ -784,6 +832,8 @@ class STTService:
             return ""
 
         full_audio = np.concatenate(collected, axis=0)
+        full_audio = np.nan_to_num(full_audio, nan=0.0, posinf=0.0, neginf=0.0)
+
         peak, mean = self.analyze_level(full_audio)
 
         print(f"[AURA] Peak level: {peak:.6f}")
@@ -855,8 +905,6 @@ class STTService:
                 if looks_like_weak_transcript(final_text):
                     print(f"[AURA] Weak transcript detected: {final_text}")
 
-                    # Do not discard too aggressively anymore.
-                    # Only ignore obvious wake-only fragments.
                     if final_text in WAKE_ONLY_PHRASES:
                         print("[AURA] Ignoring wake-only transcript.")
                         print("[AURA] Waiting for wake word...")
