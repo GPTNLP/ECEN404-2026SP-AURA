@@ -59,6 +59,16 @@ os.makedirs(BUILD_JOBS_DIR, exist_ok=True)
 
 ACTIVE_BUILD_STATUSES = {"pending", "claimed", "running"}
 
+# Seconds of inactivity before a job in each status is auto-expired.
+# "pending"  — Jetson never polled for the job (offline at queue time)
+# "claimed"  — Jetson claimed but never sent the "running" ACK
+# "running"  — Jetson started then powered off mid-build (most common failure)
+JOB_STALE_SECONDS: Dict[str, int] = {
+    "pending": 600,   # 10 min
+    "claimed": 300,   # 5 min
+    "running": 3600,  # 60 min (large PDF sets can take a while)
+}
+
 
 # ---------------------------
 # Auth helpers
@@ -221,7 +231,15 @@ def _collect_pdf_files(folders: List[str]) -> List[str]:
 
 
 def _get_active_build_job() -> Optional[Dict[str, Any]]:
+    """Return the oldest active build job, auto-expiring stale ones along the way.
+
+    A job is considered stale when it has been in an active status
+    (pending / claimed / running) for longer than JOB_STALE_SECONDS[status]
+    with no update from the Jetson.  Stale jobs are rewritten to status
+    "timed_out" so they stop blocking further database operations.
+    """
     jobs: List[Dict[str, Any]] = []
+    now = time.time()
 
     for name in os.listdir(BUILD_JOBS_DIR):
         if not name.endswith(".json"):
@@ -235,8 +253,59 @@ def _get_active_build_job() -> Optional[Dict[str, Any]]:
             continue
 
         status = str(job.get("status") or "").lower()
-        if status in ACTIVE_BUILD_STATUSES:
-            jobs.append(job)
+        if status not in ACTIVE_BUILD_STATUSES:
+            continue
+
+        # Check whether this job has gone stale.
+        timeout = JOB_STALE_SECONDS.get(status)
+        if timeout is not None:
+            last_activity = float(
+                job.get("updated_at")
+                or job.get("claimed_at")
+                or job.get("created_at")
+                or 0.0
+            )
+            age = now - last_activity
+            if age > timeout:
+                # Auto-expire: rewrite job file and build_status.json.
+                job["status"] = "timed_out"
+                job["updated_at"] = now
+                job["updated_at_readable"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(now)
+                )
+                job["note"] = (
+                    f"Auto-expired after {int(age)}s with no update "
+                    f"(was '{status}' — Jetson may have gone offline)"
+                )
+                try:
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(job, f, indent=2)
+                except Exception:
+                    pass
+
+                db_name = str(job.get("db_name") or "")
+                if db_name:
+                    _save_build_status(
+                        db_name,
+                        {
+                            **_load_build_status(db_name),
+                            "job_id": job.get("job_id", ""),
+                            "db_name": db_name,
+                            "status": "timed_out",
+                            "updated_at": now,
+                            "updated_at_readable": time.strftime(
+                                "%Y-%m-%d %H:%M:%S", time.localtime(now)
+                            ),
+                            "message": (
+                                f"Build timed out after {int(age // 60)}m — "
+                                "Jetson may have gone offline. "
+                                "Use 'Force Reset' on the Databases page to unblock."
+                            ),
+                        },
+                    )
+                continue  # No longer active; skip.
+
+        jobs.append(job)
 
     if not jobs:
         return None
@@ -297,6 +366,10 @@ class RagBuildJobAckRequest(BaseModel):
     status: str
     note: Optional[str] = None
     extra: Optional[Dict[str, Any]] = None
+
+
+class CancelBuildRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 # ---------------------------
@@ -483,6 +556,10 @@ def database_stats(db_name: str, request: Request):
     require_any_user(request)
 
     cfg = _load_db_config(db_name)
+
+    # Side-effect: auto-expire any stale jobs so the status below reflects reality.
+    _get_active_build_job()
+
     build_status = _load_build_status(db_name)
 
     existing_files = []
@@ -666,6 +743,81 @@ def ack_build_job(
     )
 
     return {"ok": True, "job_id": req.job_id, "status": req.status}
+
+
+@router.post("/api/databases/build_jobs/cancel")
+def cancel_active_build(req: CancelBuildRequest, request: Request):
+    """Force-cancel or reset any active / stuck build job.  Admin only.
+
+    Works on jobs in status: pending, claimed, running, or timed_out.
+    After this call the job is marked "cancelled" so all database actions
+    are unblocked immediately.
+    """
+    require_admin(request)
+
+    # Find the oldest job that is blocking operations (active or already timed_out).
+    stuck_job: Optional[Dict[str, Any]] = None
+    for name in os.listdir(BUILD_JOBS_DIR):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(BUILD_JOBS_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        status = str(job.get("status") or "").lower()
+        if status not in ACTIVE_BUILD_STATUSES and status != "timed_out":
+            continue
+
+        job_age = float(job.get("created_at") or 0.0)
+        if stuck_job is None or job_age < float(stuck_job.get("created_at") or 0.0):
+            stuck_job = job
+
+    if not stuck_job:
+        raise HTTPException(
+            status_code=404,
+            detail="No active or stuck build job found. Nothing to cancel.",
+        )
+
+    now = time.time()
+    reason = req.reason or "Manually force-reset by admin"
+
+    stuck_job["status"] = "cancelled"
+    stuck_job["updated_at"] = now
+    stuck_job["updated_at_readable"] = time.strftime(
+        "%Y-%m-%d %H:%M:%S", time.localtime(now)
+    )
+    stuck_job["note"] = reason
+
+    job_path = _job_path(stuck_job["job_id"])
+    with open(job_path, "w", encoding="utf-8") as f:
+        json.dump(stuck_job, f, indent=2)
+
+    db_name = str(stuck_job.get("db_name") or "")
+    if db_name:
+        _save_build_status(
+            db_name,
+            {
+                **_load_build_status(db_name),
+                "job_id": stuck_job["job_id"],
+                "db_name": db_name,
+                "status": "cancelled",
+                "updated_at": now,
+                "updated_at_readable": time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(now)
+                ),
+                "message": reason,
+            },
+        )
+
+    return {
+        "ok": True,
+        "cancelled_job_id": stuck_job["job_id"],
+        "db_name": db_name,
+        "previous_status": str(stuck_job.get("note") or ""),
+    }
 
 
 @router.post("/api/databases/{db_name}/sync_up")

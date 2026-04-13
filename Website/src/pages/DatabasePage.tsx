@@ -42,6 +42,8 @@ type BuildStatus =
   | "completed"
   | "synced"
   | "failed"
+  | "timed_out"
+  | "cancelled"
   | "";
 
 function joinPath(parent: string, name: string) {
@@ -90,6 +92,10 @@ function prettyBuildStatus(status: BuildStatus) {
       return "Synced back to website";
     case "failed":
       return "Build failed";
+    case "timed_out":
+      return "Timed out (Jetson offline?)";
+    case "cancelled":
+      return "Cancelled";
     case "idle":
       return "Idle";
     default:
@@ -97,8 +103,18 @@ function prettyBuildStatus(status: BuildStatus) {
   }
 }
 
+function isActiveBuildStatus(status: BuildStatus) {
+  return status === "pending" || status === "claimed" || status === "running";
+}
+
 function isTerminalBuildStatus(status: BuildStatus) {
-  return status === "completed" || status === "synced" || status === "failed";
+  return (
+    status === "completed" ||
+    status === "synced" ||
+    status === "failed" ||
+    status === "timed_out" ||
+    status === "cancelled"
+  );
 }
 
 export default function DatabasePage() {
@@ -118,6 +134,7 @@ export default function DatabasePage() {
     | "db-build"
     | "db-delete"
     | "db-load"
+    | "db-cancel"
   >("");
 
   const [tree, setTree] = useState<TreeNode | null>(null);
@@ -237,9 +254,19 @@ export default function DatabasePage() {
         setStatus(`❌ ${msg || "Jetson build failed."}`);
         return true;
       }
-
       if (nextStatus === "synced") {
         setStatus(`✅ Jetson synced "${name}" back to website.`);
+        return true;
+      }
+      if (nextStatus === "timed_out") {
+        setStatus(
+          `⚠️ Build timed out — Jetson stopped responding. ` +
+          `Click "Force Reset" below to unblock.`
+        );
+        return true;
+      }
+      if (nextStatus === "cancelled") {
+        setStatus(`✅ Build cancelled. Ready for new builds.`);
         return true;
       }
 
@@ -305,6 +332,40 @@ export default function DatabasePage() {
       if (timer) window.clearTimeout(timer);
     };
   }, [buildMonitorActive, activeDb, authHeaders]);
+
+  // On page load (and whenever activeDb changes), fetch the real build status.
+  // If a build is already active we resume monitoring automatically — this means
+  // a stuck "running" job is visible as soon as the admin opens the page, even
+  // after a browser refresh, so they can hit "Force Reset" without guessing.
+  useEffect(() => {
+    if (!activeDb || !token) return;
+    if (buildMonitorActive) return; // monitor loop already running
+
+    let cancelled = false;
+    fetch(
+      `${API_BASE}/api/databases/${encodeURIComponent(activeDb)}/stats`,
+      { headers: authHeaders }
+    )
+      .then((r) => r.json().catch(() => null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const status = String(data?.build?.status || "") as BuildStatus;
+        if (!status) return;
+        setBuildStatus(status);
+        if (isActiveBuildStatus(status)) {
+          // Resume the polling loop so the admin sees live progress/timeout.
+          setBuildMonitorActive(true);
+        } else if (status === "timed_out") {
+          setStatus(
+            `⚠️ Build timed out — Jetson stopped responding. ` +
+            `Click "Force Reset" below to unblock.`
+          );
+        }
+      })
+      .catch(() => { /* silently ignore initial fetch errors */ });
+
+    return () => { cancelled = true; };
+  }, [activeDb, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getDirNode = (dirPath: string) => {
     if (!tree || tree.type !== "dir") return null;
@@ -681,6 +742,31 @@ export default function DatabasePage() {
       setBuildStatus("pending");
       setStatus(`⏳ Queued "${activeDb}" on Jetson…`);
       setBuildMonitorActive(true);
+    } catch (e: any) {
+      setStatus(`❌ ${e?.message || String(e)}`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const doCancelBuild = async () => {
+    setBusy("db-cancel");
+    setStatus("Cancelling / resetting stuck build…");
+    try {
+      const headers = new Headers(authHeaders);
+      headers.set("Content-Type", "application/json");
+
+      const res = await fetch(`${API_BASE}/api/databases/build_jobs/cancel`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ reason: "Manually force-reset by admin" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || "Cancel failed");
+
+      setBuildMonitorActive(false);
+      setBuildStatus("cancelled");
+      setStatus(`✅ Build reset. Database actions are now unblocked.`);
     } catch (e: any) {
       setStatus(`❌ ${e?.message || String(e)}`);
     } finally {
@@ -1214,16 +1300,32 @@ export default function DatabasePage() {
               <div className="db-box-title">Build / Rebuild</div>
               <button
                 className="btn btn-primary"
-                disabled={busy !== "" || !activeDb || buildMonitorActive}
+                disabled={busy !== "" || !activeDb || buildMonitorActive || isActiveBuildStatus(buildStatus)}
                 onClick={doBuildDb}
                 style={{ width: "100%" }}
               >
                 {busy === "db-build"
                   ? "Queueing…"
-                  : buildMonitorActive
+                  : buildMonitorActive || isActiveBuildStatus(buildStatus)
                   ? "Build Running…"
                   : `Build "${activeDb || "DB"}"`}
               </button>
+
+              {isAdmin && (buildMonitorActive || isActiveBuildStatus(buildStatus) || buildStatus === "timed_out") && (
+                <button
+                  className="btn"
+                  disabled={busy !== ""}
+                  onClick={doCancelBuild}
+                  style={{ width: "100%", marginTop: 6, color: "#dc3545", borderColor: "#dc3545" }}
+                  title="Force-cancel the current build and unblock all database actions"
+                >
+                  {busy === "db-cancel"
+                    ? "Resetting…"
+                    : buildStatus === "timed_out"
+                    ? `Force Reset "${activeDb || "DB"}"`
+                    : `Cancel Build "${activeDb || "DB"}"`}
+                </button>
+              )}
             </div>
 
             <div className="db-box">
