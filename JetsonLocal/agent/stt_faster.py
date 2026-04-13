@@ -963,3 +963,4 @@ class STTService:
             sd.stop()
         except Exception:
             pass
+    
