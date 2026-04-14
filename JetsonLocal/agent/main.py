@@ -922,8 +922,16 @@ async def command_loop():
 
                         if db_name:
                             if rag_manager.active_db_name != db_name or rag_manager.rag_system is None:
-                                print(f"[CHAT] loading DB: {db_name}")
-                                ok = await rag_manager.load_remote_db(db_name, api)
+                                local_db_dir = rag_manager.get_db_dir(db_name)
+                                local_meta   = local_db_dir / "meta.json"
+                                if local_db_dir.exists() and local_meta.exists():
+                                    # DB already on Jetson disk — load without downloading
+                                    print(f"[CHAT] loading DB '{db_name}' from local disk")
+                                    ok = rag_manager.initialize_db(db_name, reset=False)
+                                else:
+                                    # Not on disk — download from cloud
+                                    print(f"[CHAT] downloading DB '{db_name}' from cloud (not found locally)")
+                                    ok = await rag_manager.load_remote_db(db_name, api)
                                 if not ok:
                                     raise RuntimeError(f"Failed to load DB '{db_name}'")
                             else:

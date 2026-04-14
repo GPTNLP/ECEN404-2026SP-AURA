@@ -45,16 +45,16 @@ VISION_MODES = {
 }
 
 STATUS_STYLES = {
-    "BOOTING": {"fg": "#7dd3fc", "sub": "Starting services"},
-    "READY": {"fg": "#a7f3d0", "sub": "Ready"},
-    "LISTENING": {"fg": "#67e8f9", "sub": "Listening for wake word"},
-    "THINKING": {"fg": "#fcd34d", "sub": "Thinking"},
-    "SPEAKING": {"fg": "#c4b5fd", "sub": "Speaking"},
-    "VISION": {"fg": "#f9a8d4", "sub": "Vision mode active"},
-    "VECTORIZING": {"fg": "#f9a8d4", "sub": "Vectorizing PDFs"},
-    "COMMAND": {"fg": "#fdba74", "sub": "Running command"},
-    "ERROR": {"fg": "#fca5a5", "sub": "Check live console"},
-    "OFFLINE": {"fg": "#94a3b8", "sub": "Waiting for agent"},
+    "BOOTING":    {"fg": "#7dd3fc", "sub": "Starting services"},
+    "READY":      {"fg": "#a7f3d0", "sub": "Ready"},
+    "LISTENING":  {"fg": "#67e8f9", "sub": "Listening for wake word"},
+    "THINKING":   {"fg": "#fcd34d", "sub": "Thinking"},
+    "SPEAKING":   {"fg": "#c4b5fd", "sub": "Speaking"},
+    "VISION":     {"fg": "#f9a8d4", "sub": "Vision mode active"},
+    "VECTORIZING":{"fg": "#f9a8d4", "sub": "Vectorizing PDFs"},
+    "COMMAND":    {"fg": "#fdba74", "sub": "Running command"},
+    "ERROR":      {"fg": "#fca5a5", "sub": "Check live console"},
+    "OFFLINE":    {"fg": "#94a3b8", "sub": "Waiting for agent"},
 }
 
 
@@ -73,6 +73,7 @@ class AuraConsoleApp:
         self.log_queue: queue.Queue[str] = queue.Queue()
 
         self.ui_mode = "home"
+        self.view_mode = "console"       # "console" or "llm"
         self.active_vision_mode = None
         self.voice_should_resume = False
         self.current_frame_image = None
@@ -86,22 +87,27 @@ class AuraConsoleApp:
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
 
+        # LLM chat state
+        self._llm_thinking = False
+        self._llm_history = []   # list of (role, text) — role: "user"|"assistant"|"error"
+
         self._build_ui()
         self._start_reader()
         self._poll_logs()
         self._poll_vision()
 
+    # ── UI construction ───────────────────────────────────────────────────────
+
     def _build_ui(self):
         sw = self.root.winfo_screenwidth()
 
-        title_font = tkfont.Font(family="Courier", size=max(22, int(sw * 0.030)), weight="bold")
-        status_font = tkfont.Font(family="Courier", size=max(28, int(sw * 0.050)), weight="bold")
-        sub_font = tkfont.Font(family="Courier", size=max(11, int(sw * 0.016)))
-        section_font = tkfont.Font(family="Courier", size=max(17, int(sw * 0.024)), weight="bold")
-        log_font = tkfont.Font(family="Courier", size=max(9, int(sw * 0.013)))
-        button_font = tkfont.Font(family="Courier", size=max(14, int(sw * 0.018)), weight="bold")
+        title_font       = tkfont.Font(family="Courier", size=max(22, int(sw * 0.030)), weight="bold")
+        sub_font         = tkfont.Font(family="Courier", size=max(11, int(sw * 0.016)))
+        section_font     = tkfont.Font(family="Courier", size=max(17, int(sw * 0.024)), weight="bold")
+        log_font         = tkfont.Font(family="Courier", size=max(9,  int(sw * 0.013)))
+        button_font      = tkfont.Font(family="Courier", size=max(14, int(sw * 0.018)), weight="bold")
         vision_title_font = tkfont.Font(family="Courier", size=max(18, int(sw * 0.024)), weight="bold")
-        vision_info_font = tkfont.Font(family="Courier", size=max(12, int(sw * 0.015)))
+        vision_info_font  = tkfont.Font(family="Courier", size=max(12, int(sw * 0.015)))
 
         outer = tk.Frame(self.root, bg="#05070a")
         outer.pack(fill="both", expand=True, padx=12, pady=12)
@@ -129,43 +135,74 @@ class AuraConsoleApp:
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
-        self.home_frame = tk.Frame(self.content, bg="#05070a")
+        self.home_frame   = tk.Frame(self.content, bg="#05070a")
         self.vision_frame = tk.Frame(self.content, bg="#05070a")
 
-        self._build_home_ui(self.home_frame, status_font, sub_font, section_font, log_font, button_font)
+        self._build_home_ui(self.home_frame, sub_font, section_font, log_font, button_font)
         self._build_vision_ui(self.vision_frame, button_font, vision_title_font, vision_info_font)
 
         self._show_home()
 
-    def _build_home_ui(self, parent, status_font, sub_font, section_font, log_font, button_font):
-        self.status_card = tk.Frame(
+    def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
+        # ── Mode toggle row (replaces old READY status card) ─────────────────
+        mode_card = tk.Frame(
             parent,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        self.status_card.pack(fill="x", pady=(0, 10))
+        mode_card.pack(fill="x", pady=(0, 10))
 
-        self.status_label = tk.Label(
-            self.status_card,
+        btn_row = tk.Frame(mode_card, bg="#0b0f14")
+        btn_row.pack(side="left", padx=12, pady=10)
+
+        self.console_btn = tk.Button(
+            btn_row,
+            text="CONSOLE",
+            command=lambda: self._switch_view("console"),
+            font=button_font,
+            bg="#1d4ed8",
+            fg="#ffffff",
+            activebackground="#2563eb",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=12,
+        )
+        self.console_btn.pack(side="left", padx=(0, 8))
+
+        self.llm_btn = tk.Button(
+            btn_row,
+            text="LLM CHAT",
+            command=lambda: self._switch_view("llm"),
+            font=button_font,
+            bg="#111827",
+            fg="#ecfeff",
+            activebackground="#1d4ed8",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=12,
+        )
+        self.llm_btn.pack(side="left")
+
+        # Mini status indicator on the right of the mode card
+        self.status_mini_label = tk.Label(
+            mode_card,
             textvariable=self.status_text,
             fg=STATUS_STYLES["BOOTING"]["fg"],
             bg="#0b0f14",
-            font=status_font,
-            pady=12,
-        )
-        self.status_label.pack(fill="x")
-
-        self.sub_label = tk.Label(
-            self.status_card,
-            textvariable=self.sub_text,
-            fg="#94a3b8",
-            bg="#0b0f14",
             font=sub_font,
-            pady=6,
+            anchor="e",
+            padx=16,
         )
-        self.sub_label.pack(fill="x", pady=(0, 12))
+        self.status_mini_label.pack(side="right", fill="y")
 
+        # ── Vision modes ─────────────────────────────────────────────────────
         vision_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -208,6 +245,19 @@ class AuraConsoleApp:
             btn.grid(row=0, column=idx, sticky="nsew", padx=6)
             buttons_wrap.grid_columnconfigure(idx, weight=1)
 
+        # ── Content stack (Console / LLM) ─────────────────────────────────
+        self.content_stack = tk.Frame(parent, bg="#05070a")
+        self.content_stack.pack(fill="both", expand=True)
+
+        self.console_panel = tk.Frame(self.content_stack, bg="#05070a")
+        self.llm_panel     = tk.Frame(self.content_stack, bg="#05070a")
+
+        self._build_console_panel(self.console_panel, section_font, log_font)
+        self._build_llm_panel(self.llm_panel, section_font, log_font, button_font)
+
+        self._switch_view("console")
+
+    def _build_console_panel(self, parent, section_font, log_font):
         logs_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -240,6 +290,82 @@ class AuraConsoleApp:
             state="disabled",
         )
         self.log_text.pack(fill="both", expand=True)
+
+    def _build_llm_panel(self, parent, section_font, log_font, button_font):
+        chat_card = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        chat_card.pack(fill="both", expand=True)
+
+        tk.Label(
+            chat_card,
+            text="LLM CHAT",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+            padx=14,
+            pady=10,
+        ).pack(fill="x")
+
+        self.llm_chat_text = tk.Text(
+            chat_card,
+            bg="#05070a",
+            fg="#e2e8f0",
+            insertbackground="#e2e8f0",
+            relief="flat",
+            wrap="word",
+            font=log_font,
+            padx=12,
+            pady=12,
+            state="disabled",
+        )
+        self.llm_chat_text.pack(fill="both", expand=True)
+
+        # Colour tags
+        bold_log = tkfont.Font(family="Courier", size=max(9, int(log_font.cget("size"))), weight="bold")
+        self.llm_chat_text.tag_configure("user_label",  fg="#14f195",  font=bold_log)
+        self.llm_chat_text.tag_configure("user_text",   fg="#ffffff")
+        self.llm_chat_text.tag_configure("aura_label",  fg="#fcd34d",  font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text",   fg="#cbd5e1")
+        self.llm_chat_text.tag_configure("thinking",    fg="#64748b")
+        self.llm_chat_text.tag_configure("error_label", fg="#fca5a5",  font=bold_log)
+        self.llm_chat_text.tag_configure("error_text",  fg="#fca5a5")
+
+        # Input row
+        input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=8, padx=8)
+        input_frame.pack(fill="x")
+
+        self.llm_entry = tk.Entry(
+            input_frame,
+            bg="#111827",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=button_font,
+        )
+        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=10)
+        self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
+
+        self.llm_send_btn = tk.Button(
+            input_frame,
+            text="Ask",
+            command=self._llm_submit,
+            font=button_font,
+            bg="#1d4ed8",
+            fg="#ffffff",
+            activebackground="#2563eb",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=10,
+        )
+        self.llm_send_btn.pack(side="right")
 
     def _build_vision_ui(self, parent, button_font, title_font, info_font):
         topbar = tk.Frame(parent, bg="#05070a")
@@ -361,6 +487,8 @@ class AuraConsoleApp:
             pady=6,
         ).pack(fill="x", pady=(0, 12))
 
+    # ── View switching ────────────────────────────────────────────────────────
+
     def _show_home(self):
         self.ui_mode = "home"
         self.vision_frame.pack_forget()
@@ -370,6 +498,81 @@ class AuraConsoleApp:
         self.ui_mode = "vision"
         self.home_frame.pack_forget()
         self.vision_frame.pack(fill="both", expand=True)
+
+    def _switch_view(self, mode: str):
+        """Toggle between console and LLM chat panels."""
+        self.view_mode = mode
+        if mode == "llm":
+            self.console_panel.pack_forget()
+            self.llm_panel.pack(fill="both", expand=True)
+            self.console_btn.configure(bg="#111827", fg="#ecfeff")
+            self.llm_btn.configure(bg="#1d4ed8",  fg="#ffffff")
+            self.llm_entry.focus_set()
+        else:
+            self.llm_panel.pack_forget()
+            self.console_panel.pack(fill="both", expand=True)
+            self.console_btn.configure(bg="#1d4ed8",  fg="#ffffff")
+            self.llm_btn.configure(bg="#111827", fg="#ecfeff")
+
+    # ── LLM chat helpers ──────────────────────────────────────────────────────
+
+    def _llm_submit(self):
+        query = self.llm_entry.get().strip()
+        if not query or self._llm_thinking:
+            return
+
+        self.llm_entry.delete(0, "end")
+        self._llm_thinking = True
+        self.llm_send_btn.configure(state="disabled", bg="#374151")
+        self.llm_entry.configure(state="disabled")
+
+        self._llm_history.append(("user", query))
+        self._llm_redraw()
+
+        def _call():
+            try:
+                result = self._http_json_post("/rag/chat", {"query": query}, timeout=120.0)
+                answer = result.get("answer") or "(no response from model)"
+                self.root.after(0, lambda: self._llm_got_response(answer, None))
+            except Exception as exc:
+                self.root.after(0, lambda: self._llm_got_response(None, str(exc)))
+
+        threading.Thread(target=_call, daemon=True).start()
+
+    def _llm_got_response(self, answer, error):
+        self._llm_thinking = False
+        if error:
+            self._llm_history.append(("error", error))
+        else:
+            self._llm_history.append(("assistant", answer))
+        self._llm_redraw()
+        self.llm_send_btn.configure(state="normal", bg="#1d4ed8")
+        self.llm_entry.configure(state="normal")
+        self.llm_entry.focus_set()
+
+    def _llm_redraw(self):
+        """Rebuild the chat Text widget from history + optional thinking indicator."""
+        self.llm_chat_text.configure(state="normal")
+        self.llm_chat_text.delete("1.0", "end")
+
+        for role, text in self._llm_history:
+            if role == "user":
+                self.llm_chat_text.insert("end", "\nYOU:  ", "user_label")
+                self.llm_chat_text.insert("end", text + "\n", "user_text")
+            elif role == "error":
+                self.llm_chat_text.insert("end", "\nERROR: ", "error_label")
+                self.llm_chat_text.insert("end", text + "\n", "error_text")
+            else:  # assistant
+                self.llm_chat_text.insert("end", "\nAURA: ", "aura_label")
+                self.llm_chat_text.insert("end", text + "\n", "aura_text")
+
+        if self._llm_thinking:
+            self.llm_chat_text.insert("end", "\nAURA: thinking...\n", "thinking")
+
+        self.llm_chat_text.see("end")
+        self.llm_chat_text.configure(state="disabled")
+
+    # ── Journal reader ────────────────────────────────────────────────────────
 
     def _start_reader(self):
         thread = threading.Thread(target=self._reader_worker, daemon=True)
@@ -425,11 +628,14 @@ class AuraConsoleApp:
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
+    # ── Status helpers ────────────────────────────────────────────────────────
+
     def _set_status(self, status: str, substatus: str):
         style = STATUS_STYLES.get(status, STATUS_STYLES["READY"])
         self.status_text.set(status)
         self.sub_text.set(substatus or style["sub"])
-        self.status_label.configure(fg=style["fg"])
+        if hasattr(self, "status_mini_label"):
+            self.status_mini_label.configure(fg=style["fg"])
 
     def _clean_event(self, line: str) -> str:
         line = re.sub(r"\s+", " ", line).strip()
@@ -465,6 +671,8 @@ class AuraConsoleApp:
             self._set_status("ERROR", clean)
             return
 
+    # ── HTTP helpers ──────────────────────────────────────────────────────────
+
     def _http_json(self, method: str, path: str, timeout: float = 2.0):
         req = request.Request(f"{API_BASE}{path}", method=method.upper())
         req.add_header("Accept", "application/json")
@@ -472,17 +680,28 @@ class AuraConsoleApp:
             data = resp.read().decode("utf-8", errors="replace")
         return json.loads(data) if data else {}
 
+    def _http_json_post(self, path: str, data: dict, timeout: float = 90.0) -> dict:
+        body = json.dumps(data).encode("utf-8")
+        req = request.Request(f"{API_BASE}{path}", data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "application/json")
+        with request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return json.loads(raw) if raw else {}
+
     def _http_bytes(self, path: str, timeout: float = 2.0) -> bytes:
         req = request.Request(f"{API_BASE}{path}", method="GET")
         with request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
+
+    # ── Vision mode helpers ───────────────────────────────────────────────────
 
     def _set_mode_button_styles(self):
         for mode, btn in self.mode_buttons.items():
             active = mode == self.active_vision_mode
             btn.configure(
                 bg="#1d4ed8" if active else "#111827",
-                fg="#ffffff" if active else "#ecfeff",
+                fg="#ffffff"  if active else "#ecfeff",
             )
 
     def enter_vision_mode(self, mode: str):
@@ -544,6 +763,8 @@ class AuraConsoleApp:
         self._show_home()
         self._set_status("READY", "Returned to home screen")
 
+    # ── Vision polling ────────────────────────────────────────────────────────
+
     def _poll_vision(self):
         if self.running and self.ui_mode == "vision" and self.active_vision_mode:
             self._refresh_vision_frame()
@@ -580,19 +801,19 @@ class AuraConsoleApp:
             return
 
         try:
-            status = self._http_json("GET", "/camera/status")
+            status     = self._http_json("GET", "/camera/status")
             detections = self._http_json("GET", "/camera/detections")
         except Exception as exc:
             self.vision_meta_text.set(f"Status unavailable: {exc}")
             return
 
         model_loaded = status.get("models_loaded", {}).get(self.active_vision_mode)
-        count = int(status.get("detection_count") or 0)
-        fps = status.get("actual_fps") or status.get("fps") or 0
+        count      = int(status.get("detection_count") or 0)
+        fps        = status.get("actual_fps") or status.get("fps") or 0
         resolution = status.get("actual_resolution") or {}
-        w = resolution.get("width") or status.get("resolution", {}).get("width") or "?"
+        w = resolution.get("width")  or status.get("resolution", {}).get("width")  or "?"
         h = resolution.get("height") or status.get("resolution", {}).get("height") or "?"
-        backend = status.get("capture_backend") or "unknown"
+        backend    = status.get("capture_backend") or "unknown"
         last_error = status.get("last_error")
 
         self.vision_meta_text.set(
@@ -602,7 +823,7 @@ class AuraConsoleApp:
 
         items = detections.get("detections", []) or []
         if not model_loaded:
-            path_map = status.get("model_paths", {})
+            path_map   = status.get("model_paths", {})
             model_path = path_map.get(self.active_vision_mode, "model file missing")
             self.detection_text.set(
                 f"Model for {self.active_vision_mode} is not loaded. Expected path: {model_path}."
@@ -620,11 +841,11 @@ class AuraConsoleApp:
             return
 
         counts = Counter(item.get("label", "unknown") for item in items)
-        lines = []
+        lines  = []
         for idx, item in enumerate(items[:8], start=1):
-            label = item.get("label", "unknown")
-            conf = item.get("confidence")
-            bbox = item.get("bbox") or []
+            label    = item.get("label", "unknown")
+            conf     = item.get("confidence")
+            bbox     = item.get("bbox") or []
             bbox_text = f" bbox={bbox}" if bbox else ""
             conf_text = f" ({conf:.2f})" if isinstance(conf, (float, int)) else ""
             lines.append(f"{idx}. {label}{conf_text}{bbox_text}")
@@ -632,6 +853,8 @@ class AuraConsoleApp:
         summary = ", ".join(f"{label}: {qty}" for label, qty in counts.most_common())
         self.detection_text.set("Summary: " + summary + "\n\n" + "\n".join(lines))
         self.vision_status_text.set(f"{len(items)} detection(s) in current frame.")
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
 
     def on_close(self, event=None):
         self.running = False
