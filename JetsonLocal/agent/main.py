@@ -1174,6 +1174,57 @@ def mjpeg_generator() -> Iterator[bytes]:
 
 
 # -------------------------------------------------------------------
+# LLM WARMUP
+# -------------------------------------------------------------------
+async def _warmup_llm():
+    """
+    Fire-and-forget background task: loads the main LLM into GPU VRAM on startup.
+
+    Why this matters on Jetson:
+    - The first real student query would otherwise pay the model-load penalty
+      (10-30 s) AND let Ollama re-decide CPU vs GPU based on instantaneous
+      memory pressure.
+    - By warming up during the quieter startup window we pin the model in VRAM
+      and shorten the first-response latency to pure inference time.
+    """
+    import urllib.request as _ur
+    import json as _json
+
+    await asyncio.sleep(8.0)   # let other startup tasks settle first
+
+    ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
+    num_gpu    = int(os.getenv("AURA_NUM_GPU", "99"))
+    keep_alive = os.getenv("AURA_KEEP_ALIVE", "2h")
+
+    from core.config import DEFAULT_MODEL as _model
+    payload = _json.dumps({
+        "model":      _model,
+        "prompt":     "Hi",
+        "stream":     False,
+        "keep_alive": keep_alive,
+        "options": {
+            "num_predict": 1,
+            "num_ctx":     128,
+            "num_gpu":     num_gpu,
+            "temperature": 0.0,
+            "mirostat":    0,
+        },
+    }).encode()
+
+    req = _ur.Request(
+        f"{ollama_url}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        await asyncio.to_thread(_ur.urlopen, req, 60.0)
+        quiet_print("llm_warmup", f"[STARTUP] LLM '{_model}' loaded into GPU VRAM (keep_alive={keep_alive})")
+    except Exception as exc:
+        quiet_print("llm_warmup", f"[STARTUP] LLM warmup skipped (non-fatal): {exc}")
+
+
+# -------------------------------------------------------------------
 # LIFESPAN
 # -------------------------------------------------------------------
 @asynccontextmanager
@@ -1213,6 +1264,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
     asyncio.create_task(voice_watchdog_loop())
+    asyncio.create_task(_warmup_llm())
 
     if voice_enabled:
         asyncio.create_task(start_voice_loop())

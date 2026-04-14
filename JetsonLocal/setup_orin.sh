@@ -43,16 +43,35 @@ fi
 sudo systemctl enable ollama
 sudo systemctl start ollama
 
-# Force Ollama to expose all GPU layers on the Jetson.
-# JetPack 6.2 exposes CUDA automatically, but OLLAMA_NUM_GPU ensures
-# the scheduler doesn't cap the GPU allocation.
+# Force Ollama to use all GPU layers and enable performance features.
+#
+# OLLAMA_NUM_GPU=999          — offload all model layers to the Jetson GPU
+# OLLAMA_FLASH_ATTENTION=1    — use flash attention (reduces VRAM usage per call,
+#                               keeps model in GPU when camera/YOLO also run)
+# OLLAMA_KV_CACHE_TYPE=q8_0  — quantise KV cache fp16→int8 (halves KV VRAM;
+#                               the single biggest reason Ollama falls back to
+#                               CPU on unified-memory Jetsons)
 OLLAMA_SVC="/etc/systemd/system/ollama.service"
-if [ -f "$OLLAMA_SVC" ] && ! grep -q "OLLAMA_NUM_GPU" "$OLLAMA_SVC"; then
-    sudo sed -i '/\[Service\]/a Environment="OLLAMA_NUM_GPU=999"' "$OLLAMA_SVC"
-    sudo systemctl daemon-reload
-    sudo systemctl restart ollama
-    sleep 3
-    echo "Ollama GPU environment configured"
+if [ -f "$OLLAMA_SVC" ]; then
+    CHANGED=0
+    if ! grep -q "OLLAMA_NUM_GPU" "$OLLAMA_SVC"; then
+        sudo sed -i '/\[Service\]/a Environment="OLLAMA_NUM_GPU=999"' "$OLLAMA_SVC"
+        CHANGED=1
+    fi
+    if ! grep -q "OLLAMA_FLASH_ATTENTION" "$OLLAMA_SVC"; then
+        sudo sed -i '/\[Service\]/a Environment="OLLAMA_FLASH_ATTENTION=1"' "$OLLAMA_SVC"
+        CHANGED=1
+    fi
+    if ! grep -q "OLLAMA_KV_CACHE_TYPE" "$OLLAMA_SVC"; then
+        sudo sed -i '/\[Service\]/a Environment="OLLAMA_KV_CACHE_TYPE=q8_0"' "$OLLAMA_SVC"
+        CHANGED=1
+    fi
+    if [ "$CHANGED" -eq 1 ]; then
+        sudo systemctl daemon-reload
+        sudo systemctl restart ollama
+        sleep 3
+        echo "Ollama GPU environment configured (flash attention + q8_0 KV cache)"
+    fi
 fi
 
 echo "Downloading models..."
@@ -123,7 +142,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=AURA_NUM_GPU=99
 Environment=AURA_INTENT_MODEL=llama3.2:1b
 Environment=AURA_GRAPH_EXTRACT=true
-Environment=AURA_KEEP_ALIVE=30m
+Environment=AURA_KEEP_ALIVE=2h
+Environment=AURA_NUM_CTX=2048
+Environment=AURA_MAX_CTX_CHARS=4000
+Environment=AURA_TOP_K=4
 
 [Install]
 WantedBy=multi-user.target
