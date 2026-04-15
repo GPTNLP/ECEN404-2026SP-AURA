@@ -142,7 +142,7 @@ echo "Installing Python requirements..."
 python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 
 echo "Installing Jetson-specific Python libraries..."
-python -m pip install --no-user jetson-stats SpeechRecognition Pillow
+python -m pip install --no-user jetson-stats SpeechRecognition Pillow sounddevice
 
 # -----------------------------
 # Create startup launcher

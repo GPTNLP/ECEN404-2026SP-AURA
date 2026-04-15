@@ -9,7 +9,14 @@ from datetime import datetime
 from typing import Awaitable, Callable, Optional, Tuple
 
 import numpy as np
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+    _SOUNDDEVICE_IMPORT_ERROR = None
+except Exception as exc:
+    sd = None
+    _SOUNDDEVICE_IMPORT_ERROR = exc
+
 from faster_whisper import WhisperModel
 
 
@@ -335,6 +342,17 @@ def looks_like_weak_transcript(text: str) -> bool:
     return False
 
 
+
+
+def _require_sounddevice() -> None:
+    if sd is None:
+        detail = str(_SOUNDDEVICE_IMPORT_ERROR) if _SOUNDDEVICE_IMPORT_ERROR else "unknown error"
+        raise RuntimeError(
+            "sounddevice is not installed or could not be loaded. "
+            "Install it in the JetsonLocal venv with: pip install sounddevice. "
+            f"Original error: {detail}"
+        )
+
 # ============================================================
 # STT SERVICE
 # ============================================================
@@ -378,6 +396,7 @@ class STTService:
         self.last_transcribe_ts = 0.0
         self.consecutive_record_errors = 0
 
+        _require_sounddevice()
         self._resolve_input_device()
 
     def _resolve_input_device(self) -> None:
