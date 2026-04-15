@@ -483,13 +483,85 @@ class AuraConsoleApp:
             size=max(9, int(log_font.cget("size"))),
             weight="bold",
         )
-        self.llm_chat_text.tag_configure("user_label", fg="#14f195", font=bold_log)
-        self.llm_chat_text.tag_configure("user_text", fg="#ffffff")
-        self.llm_chat_text.tag_configure("aura_label", fg="#fcd34d", font=bold_log)
-        self.llm_chat_text.tag_configure("aura_text", fg="#cbd5e1")
-        self.llm_chat_text.tag_configure("thinking", fg="#64748b")
-        self.llm_chat_text.tag_configure("error_label", fg="#fca5a5", font=bold_log)
-        self.llm_chat_text.tag_configure("error_text", fg="#fca5a5")
+
+        self.llm_chat_text.tag_configure("user_label", foreground="#14f195", font=bold_log)
+        self.llm_chat_text.tag_configure("user_text", foreground="#ffffff")
+        self.llm_chat_text.tag_configure("aura_label", foreground="#fcd34d", font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text", foreground="#cbd5e1")
+        self.llm_chat_text.tag_configure("thinking", foreground="#64748b")
+        self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
+        self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
+
+        input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=8, padx=8)
+        input_frame.pack(fill="x")
+
+        self.llm_entry = tk.Entry(
+            input_frame,
+            bg="#111827",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=button_font,
+        )
+        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=10)
+        self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
+
+        self.llm_send_btn = tk.Button(
+            input_frame,
+            text="Ask",
+            command=self._llm_submit,
+            font=button_font,
+            bg="#1d4ed8",
+            fg="#ffffff",
+            activebackground="#2563eb",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=10,
+        )
+        self.llm_send_btn.pack(side="right")
+        chat_card.pack(fill="both", expand=True)
+
+        tk.Label(
+            chat_card,
+            text="LLM CHAT",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+            padx=14,
+            pady=10,
+        ).pack(fill="x")
+
+        self.llm_chat_text = tk.Text(
+            chat_card,
+            bg="#05070a",
+            fg="#e2e8f0",
+            insertbackground="#e2e8f0",
+            relief="flat",
+            wrap="word",
+            font=log_font,
+            padx=12,
+            pady=12,
+            state="disabled",
+        )
+        self.llm_chat_text.pack(fill="both", expand=True)
+
+        bold_log = tkfont.Font(
+            family="Courier",
+            size=max(9, int(log_font.cget("size"))),
+            weight="bold",
+        )
+
+        self.llm_chat_text.tag_configure("user_label", foreground="#14f195", font=bold_log)
+        self.llm_chat_text.tag_configure("user_text", foreground="#ffffff")
+        self.llm_chat_text.tag_configure("aura_label", foreground="#fcd34d", font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text", foreground="#cbd5e1")
+        self.llm_chat_text.tag_configure("thinking", foreground="#64748b")
+        self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
+        self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
 
         input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=8, padx=8)
         input_frame.pack(fill="x")
