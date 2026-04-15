@@ -103,8 +103,6 @@ class AuraConsoleApp:
         self._poll_logs()
         self._poll_vision()
 
-    # ── UI construction ───────────────────────────────────────────────────────
-
     def _build_ui(self):
         sw = self.root.winfo_screenwidth()
 
@@ -313,8 +311,8 @@ class AuraConsoleApp:
             font=section_font,
             anchor="w",
             padx=14,
-            pady=12,
-        ).pack(fill="x")
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
 
         buttons_wrap = tk.Frame(vision_card, bg="#0b0f14")
         buttons_wrap.pack(fill="x", padx=12, pady=(0, 12))
@@ -398,8 +396,8 @@ class AuraConsoleApp:
             justify="left",
             wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
             padx=14,
-            pady=(0, 12),
-        ).pack(fill="x")
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
 
         self.content_stack = tk.Frame(parent, bg="#05070a")
         self.content_stack.pack(fill="both", expand=True)
@@ -644,8 +642,6 @@ class AuraConsoleApp:
             pady=6,
         ).pack(fill="x", pady=(0, 12))
 
-    # ── View switching ────────────────────────────────────────────────────────
-
     def _show_home(self):
         self.ui_mode = "home"
         self.vision_frame.pack_forget()
@@ -669,8 +665,6 @@ class AuraConsoleApp:
             self.console_panel.pack(fill="both", expand=True)
             self.console_btn.configure(bg="#1d4ed8", fg="#ffffff")
             self.llm_btn.configure(bg="#111827", fg="#ecfeff")
-
-    # ── LLM chat helpers ──────────────────────────────────────────────────────
 
     def _llm_submit(self):
         query = self.llm_entry.get().strip()
@@ -771,8 +765,6 @@ class AuraConsoleApp:
                 response_text or "Try again and speak a little closer to the mic."
             )
 
-    # ── Journal reader ────────────────────────────────────────────────────────
-
     def _start_reader(self):
         thread = threading.Thread(target=self._reader_worker, daemon=True)
         thread.start()
@@ -834,8 +826,6 @@ class AuraConsoleApp:
             self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
-    # ── Status helpers ────────────────────────────────────────────────────────
-
     def _set_status(self, status: str, substatus: str):
         style = STATUS_STYLES.get(status, STATUS_STYLES["READY"])
         self.status_text.set(status)
@@ -881,8 +871,6 @@ class AuraConsoleApp:
             self._set_status("ERROR", clean)
             return
 
-    # ── HTTP helpers ──────────────────────────────────────────────────────────
-
     def _http_json(self, method: str, path: str, timeout: float = 2.0):
         req = request.Request(f"{API_BASE}{path}", method=method.upper())
         req.add_header("Accept", "application/json")
@@ -903,8 +891,6 @@ class AuraConsoleApp:
         req = request.Request(f"{API_BASE}{path}", method="GET")
         with request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
-
-    # ── Vision mode helpers ───────────────────────────────────────────────────
 
     def _set_mode_button_styles(self):
         for mode, btn in self.mode_buttons.items():
@@ -972,8 +958,6 @@ class AuraConsoleApp:
         self._set_mode_button_styles()
         self._show_home()
         self._set_status("READY", "Returned to home screen")
-
-    # ── Vision polling ────────────────────────────────────────────────────────
 
     def _poll_vision(self):
         if self.running and self.ui_mode == "vision" and self.active_vision_mode:
@@ -1065,8 +1049,6 @@ class AuraConsoleApp:
         summary = ", ".join(f"{label}: {qty}" for label, qty in counts.most_common())
         self.detection_text.set("Summary: " + summary + "\n\n" + "\n".join(lines))
         self.vision_status_text.set(f"{len(items)} detection(s) in current frame.")
-
-    # ── Shutdown ──────────────────────────────────────────────────────────────
 
     def on_close(self, event=None):
         self.running = False
