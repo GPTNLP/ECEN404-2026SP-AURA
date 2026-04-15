@@ -220,10 +220,10 @@ export default function SimulatorPage() {
       setHistory(normalizeHistory(session.history));
       localStorage.setItem("aura_active_session_id", session.session_id);
 
-      // IMPORTANT:
-      // Do not overwrite the current Jetson-loaded DB from an old saved session.
-      // The Database page is the source of truth for aura_loaded_db.
-      refreshLoadedDb();
+      if (session.db_name) {
+        localStorage.setItem("aura_loaded_db", session.db_name);
+        window.dispatchEvent(new Event("aura:loaded-db"));
+      }
 
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("session_id", session.session_id);
@@ -297,7 +297,6 @@ export default function SimulatorPage() {
     setHistory([]);
     setStatusText("");
     setQuery("");
-    refreshLoadedDb();
     localStorage.removeItem("aura_active_session_id");
 
     const nextUrl = new URL(window.location.href);
@@ -548,23 +547,9 @@ export default function SimulatorPage() {
               {apiOnline === null ? "Checking..." : apiOnline ? "Backend online" : "Backend offline"}
             </div>
 
-            <div className="simulator-action-group">
-              <button
-                className="btn simulator-action-btn"
-                type="button"
-                onClick={startNewChat}
-              >
-                New Chat
-              </button>
-
-              <button
-                className="btn simulator-action-btn"
-                type="button"
-                onClick={() => void fetchMySessions()}
-              >
-                Refresh
-              </button>
-            </div>
+            <button className="btn" type="button" onClick={startNewChat}>
+              New Chat
+            </button>
           </div>
         </div>
 
@@ -577,6 +562,10 @@ export default function SimulatorPage() {
                   {sessionsLoading ? "Loading..." : `${sessions.length} saved`}
                 </div>
               </div>
+
+              <button className="btn" type="button" onClick={() => void fetchMySessions()}>
+                Refresh
+              </button>
             </div>
 
             <div className="simulator-sidebar-info">

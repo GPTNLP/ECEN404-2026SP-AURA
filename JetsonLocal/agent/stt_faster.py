@@ -9,26 +9,33 @@ from datetime import datetime
 from typing import Awaitable, Callable, Optional, Tuple
 
 import numpy as np
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+    _SOUNDDEVICE_IMPORT_ERROR = None
+except Exception as exc:
+    sd = None
+    _SOUNDDEVICE_IMPORT_ERROR = exc
+
 from faster_whisper import WhisperModel
 
 
 # ============================================================
 # TUNING
 # ============================================================
-WAKE_AUDIO_THRESHOLD = 0.009
-COMMAND_AUDIO_THRESHOLD = 0.0045
-END_SILENCE_SECONDS = 1.10
-WAKE_CHUNK_SECONDS = 1.00
-COMMAND_CHUNK_SECONDS = 0.30
-COMMAND_TIMEOUT_SECONDS = 8.0
+WAKE_AUDIO_THRESHOLD = 0.018
+COMMAND_AUDIO_THRESHOLD = 0.010
+END_SILENCE_SECONDS = 0.55
+WAKE_CHUNK_SECONDS = 1.0
+COMMAND_CHUNK_SECONDS = 0.16
+COMMAND_TIMEOUT_SECONDS = 6.0
 NEAR_FIELD_BOOST = 1.35
 USE_ONLY_LEFT_CHANNEL = False
 WAKE_MATCH_MODE = 1
 
-NOISE_FLOOR_SAMPLES = 12
-NOISE_FLOOR_MULTIPLIER = 1.35
-MIN_DYNAMIC_THRESHOLD = 0.0035
+NOISE_FLOOR_SAMPLES = 6
+NOISE_FLOOR_MULTIPLIER = 1.7
+MIN_DYNAMIC_THRESHOLD = 0.008
 
 DEFAULT_MODEL_SIZE = "base.en"
 DEFAULT_DEVICE = "cuda"
@@ -36,26 +43,30 @@ DEFAULT_COMPUTE_TYPE = "float16"
 DEFAULT_LANGUAGE = "en"
 DEFAULT_TASK = "transcribe"
 
-WAKE_COOLDOWN_SECONDS = 1.0
+WAKE_COOLDOWN_SECONDS = 0.8
 
 # Optional: manually force a specific mic by index.
+# Set to an integer like 1, 2, 3 if you know the correct input device.
 MANUAL_INPUT_DEVICE = None
 
+# Optional: only choose devices whose name contains one of these.
 PREFERRED_INPUT_KEYWORDS = [
-    "nanomic",
     "usb",
     "microphone",
     "mic",
     "headset",
     "webcam",
+    "nano",
 ]
 
+# Extra accuracy behavior
 ENABLE_SECOND_PASS_FOR_WEAK_TEXT = True
 SECOND_PASS_MIN_WORDS = 3
+
+# If True, short transcripts are not discarded as aggressively
 RELAX_WEAK_TRANSCRIPT_FILTER = True
 
-MAX_CONSECUTIVE_RECORD_ERRORS = 8
-RECALIBRATE_EVERY_SECONDS = 90
+MAX_CONSECUTIVE_RECORD_ERRORS = 6
 
 
 # ============================================================
@@ -235,6 +246,13 @@ def wake_score(text: str) -> Tuple[bool, str, str]:
     return False, "", "no_match"
 
 
+def remove_wake_phrase(text: str) -> str:
+    matched, leftover, _ = wake_score(text)
+    if matched:
+        return leftover
+    return normalize_text(text)
+
+
 def detect_last_movement_command(text: str) -> Optional[str]:
     norm = normalize_text(text)
     if not norm:
@@ -324,6 +342,17 @@ def looks_like_weak_transcript(text: str) -> bool:
     return False
 
 
+
+
+def _require_sounddevice() -> None:
+    if sd is None:
+        detail = str(_SOUNDDEVICE_IMPORT_ERROR) if _SOUNDDEVICE_IMPORT_ERROR else "unknown error"
+        raise RuntimeError(
+            "sounddevice is not installed or could not be loaded. "
+            "Install it in the JetsonLocal venv with: pip install sounddevice. "
+            f"Original error: {detail}"
+        )
+
 # ============================================================
 # STT SERVICE
 # ============================================================
@@ -365,9 +394,9 @@ class STTService:
         self.last_wake_time = 0.0
         self.last_audio_activity_ts = time.time()
         self.last_transcribe_ts = 0.0
-        self.last_noise_calibration_ts = 0.0
         self.consecutive_record_errors = 0
 
+        _require_sounddevice()
         self._resolve_input_device()
 
     def _resolve_input_device(self) -> None:
@@ -393,7 +422,7 @@ class STTService:
             return
 
         best_index = None
-        best_score = -10_000
+        best_score = -1
 
         for idx, dev in enumerate(devices):
             max_in = int(dev.get("max_input_channels", 0))
@@ -403,27 +432,23 @@ class STTService:
             name = str(dev.get("name", "")).lower()
             score = 0
 
-            for keyword in PREFERRED_INPUT_KEYWORDS:
-                if keyword in name:
-                    score += 10
-
+            if "usb" in name:
+                score += 5
+            if "mic" in name or "microphone" in name:
+                score += 5
+            if "nano" in name:
+                score += 3
             if "default" in name:
-                score += 4
-            if "pulse" in name:
-                score += 2
-            if "sysdefault" in name:
-                score += 2
+                score += 1
             if "hdmi" in name:
                 score -= 10
             if "monitor" in name:
                 score -= 10
             if "output" in name:
                 score -= 8
-            if "stereo mix" in name:
-                score -= 20
 
             if max_in in (1, 2):
-                score += 4
+                score += 2
 
             if score > best_score:
                 best_score = score
@@ -449,17 +474,11 @@ class STTService:
         print(f"[STT] Channels: {self.channels}")
 
     def reinitialize_audio_input(self) -> None:
-        print("[STT] Reinitializing audio input...")
         try:
             sd.stop()
         except Exception:
             pass
-
-        try:
-            self._resolve_input_device()
-        except Exception as e:
-            print(f"[STT] Audio reinit failed: {e}")
-            raise
+        self._resolve_input_device()
 
     def _ensure_model_loaded(self) -> None:
         if self.model is not None:
@@ -551,11 +570,6 @@ class STTService:
         if idle_for >= self.unload_after_idle_seconds:
             self.unload_model()
 
-    def maybe_recalibrate_noise_floor(self) -> None:
-        now = time.time()
-        if now - self.last_noise_calibration_ts >= RECALIBRATE_EVERY_SECONDS:
-            self.calibrate_noise_floor()
-
     def _prepare_audio(self, audio: np.ndarray) -> np.ndarray:
         if audio is None:
             return np.zeros(1, dtype=np.float32)
@@ -579,17 +593,13 @@ class STTService:
 
         mono = mono * NEAR_FIELD_BOOST
 
-        peak = np.max(np.abs(mono)) if mono.size else 0.0
-        if np.isnan(peak) or np.isinf(peak):
-            peak = 0.0
-
-        if 0 < peak < 0.25:
-            mono = mono / peak * min(0.75, peak * 2.8)
+        peak = np.max(np.abs(mono)) if len(mono) else 0.0
+        if peak > 0 and peak < 0.25:
+            mono = mono / peak * min(0.55, peak * 2.2)
 
         mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
         mono = np.clip(mono, -1.0, 1.0)
-
-        return mono.astype(np.float32)
+        return mono
 
     def _resample_audio(self, audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
         if audio is None:
@@ -601,7 +611,7 @@ class STTService:
         if orig_sr == target_sr:
             return audio.astype(np.float32)
 
-        if len(audio) == 0 or orig_sr <= 0 or target_sr <= 0:
+        if len(audio) == 0:
             return np.zeros(1, dtype=np.float32)
 
         duration = len(audio) / orig_sr
@@ -609,9 +619,9 @@ class STTService:
         new_length = max(1, int(duration * target_sr))
         new_times = np.linspace(0, duration, num=new_length, endpoint=False)
 
-        resampled = np.interp(new_times, old_times, audio).astype(np.float32)
-        resampled = np.nan_to_num(resampled, nan=0.0, posinf=0.0, neginf=0.0)
-        return resampled
+        out = np.interp(new_times, old_times, audio).astype(np.float32)
+        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+        return out
 
     def record_fixed(self, seconds: float) -> np.ndarray:
         if not self.is_running:
@@ -626,23 +636,22 @@ class STTService:
                 channels=self.channels,
                 dtype="float32",
                 device=self.input_device,
-                blocking=True,
             )
+            sd.wait()
         except Exception as e:
             self.consecutive_record_errors += 1
-            print(f"[STT] record error ({self.consecutive_record_errors}): {e}")
-
             if self.consecutive_record_errors >= MAX_CONSECUTIVE_RECORD_ERRORS:
-                self.reinitialize_audio_input()
+                try:
+                    self.reinitialize_audio_input()
+                except Exception:
+                    pass
                 self.consecutive_record_errors = 0
-
             raise RuntimeError(f"Audio capture failed: {e}")
 
         audio = np.asarray(audio, dtype=np.float32)
         audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
 
         if audio.size == 0:
-            self.consecutive_record_errors += 1
             raise RuntimeError("Audio capture returned empty buffer")
 
         self.consecutive_record_errors = 0
@@ -650,15 +659,8 @@ class STTService:
 
     def analyze_level(self, audio: np.ndarray) -> Tuple[float, float]:
         mono = self._prepare_audio(audio)
-
-        if mono is None or mono.size == 0:
-            return 0.0, 0.0
-
-        abs_mono = np.abs(mono)
-        abs_mono = np.nan_to_num(abs_mono, nan=0.0, posinf=0.0, neginf=0.0)
-
-        peak = float(np.max(abs_mono)) if abs_mono.size else 0.0
-        mean = float(np.mean(abs_mono)) if abs_mono.size else 0.0
+        peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
+        mean = float(np.mean(np.abs(mono))) if len(mono) else 0.0
 
         if np.isnan(peak) or np.isinf(peak):
             peak = 0.0
@@ -676,31 +678,21 @@ class STTService:
         return float(dynamic)
 
     def calibrate_noise_floor(self) -> None:
-        if not self.is_running:
-            return
-
         print("[STT] Calibrating noise floor...")
         samples = []
 
         for _ in range(NOISE_FLOOR_SAMPLES):
             if not self.is_running:
                 return
-
             try:
                 audio = self.record_fixed(0.20)
                 _, mean = self.analyze_level(audio)
-                if not np.isnan(mean) and not np.isinf(mean):
-                    samples.append(mean)
+                samples.append(mean)
+                time.sleep(0.03)
             except Exception as e:
-                print(f"[STT] Noise calibration sample failed: {e}")
-
-            time.sleep(0.02)
+                print(f"[STT] Noise floor sample failed: {e}")
 
         self.noise_floor = float(np.median(samples)) if samples else 0.0
-        if np.isnan(self.noise_floor) or np.isinf(self.noise_floor):
-            self.noise_floor = 0.0
-
-        self.last_noise_calibration_ts = time.time()
         print(f"[STT] Noise floor: {self.noise_floor:.6f}")
 
     def _run_transcribe(
@@ -746,36 +738,25 @@ class STTService:
             target_sr=self.target_sample_rate,
         )
 
-        if audio_16k is None or len(audio_16k) == 0:
-            return ""
-
-        audio_16k = np.nan_to_num(audio_16k, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-
         self.last_audio_activity_ts = time.time()
         self.last_transcribe_ts = self.last_audio_activity_ts
 
-        text = self._run_transcribe(
-            audio_16k=audio_16k,
-            beam_size=5,
-            best_of=5,
-            vad_min_silence_ms=350,
-            speech_pad_ms=250,
+        segments, _ = self.model.transcribe(
+            audio_16k,
+            task=self.task,
+            language=self.language,
+            vad_filter=True,
+            vad_parameters={
+                "min_silence_duration_ms": 250,
+                "speech_pad_ms": 120,
+            },
+            beam_size=2,
+            best_of=2,
+            temperature=0.0,
             condition_on_previous_text=False,
+            without_timestamps=True,
         )
-
-        if ENABLE_SECOND_PASS_FOR_WEAK_TEXT:
-            word_count = len(normalize_text(text).split())
-            if word_count < SECOND_PASS_MIN_WORDS:
-                retry_text = self._run_transcribe(
-                    audio_16k=audio_16k,
-                    beam_size=7,
-                    best_of=7,
-                    vad_min_silence_ms=500,
-                    speech_pad_ms=320,
-                    condition_on_previous_text=False,
-                )
-                if len(normalize_text(retry_text)) > len(normalize_text(text)):
-                    text = retry_text
+        text = " ".join(seg.text.strip() for seg in segments).strip()
 
         return text
 
@@ -787,8 +768,8 @@ class STTService:
         peak, mean = self.analyze_level(audio)
 
         threshold = self._dynamic_threshold(WAKE_AUDIO_THRESHOLD)
-        if peak < threshold and mean < (threshold * 0.22):
-            return False, "", "", f"too_quiet peak={peak:.4f} mean={mean:.4f} threshold={threshold:.4f}"
+        if peak < threshold:
+            return False, "", "", f"too_quiet peak={peak:.4f} threshold={threshold:.4f}"
 
         self.last_audio_activity_ts = time.time()
 
@@ -797,10 +778,7 @@ class STTService:
             return False, "", "", "no_text"
 
         matched, leftover, reason = wake_score(text)
-        print(
-            f"[WAKE CHECK] {text} | reason={reason} | "
-            f"peak={peak:.4f} | mean={mean:.4f} | thr={threshold:.4f}"
-        )
+        print(f"[WAKE CHECK] {text} | reason={reason} | peak={peak:.4f} | thr={threshold:.4f}")
         return matched, text, leftover, reason
 
     def listen_until_done(
@@ -824,7 +802,7 @@ class STTService:
 
             peak, mean = self.analyze_level(audio)
 
-            if peak >= threshold or mean >= (threshold * 0.22):
+            if peak >= threshold or mean >= (threshold * 0.38):
                 self.last_audio_activity_ts = time.time()
                 speech_started = True
                 silence_after_speech = 0.0
@@ -842,8 +820,6 @@ class STTService:
             return ""
 
         full_audio = np.concatenate(collected, axis=0)
-        full_audio = np.nan_to_num(full_audio, nan=0.0, posinf=0.0, neginf=0.0)
-
         peak, mean = self.analyze_level(full_audio)
 
         print(f"[AURA] Peak level: {peak:.6f}")
@@ -874,7 +850,6 @@ class STTService:
         while self.is_running:
             try:
                 self.maybe_unload_model_for_idle()
-                self.maybe_recalibrate_noise_floor()
 
                 woke, wake_text, leftover, reason = await asyncio.to_thread(
                     self.listen_for_wake_word
@@ -884,12 +859,12 @@ class STTService:
                     break
 
                 if not woke:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.03)
                     continue
 
                 now = time.time()
                 if now - self.last_wake_time < WAKE_COOLDOWN_SECONDS:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.03)
                     continue
 
                 self.last_wake_time = now
@@ -910,17 +885,15 @@ class STTService:
                     print("[AURA] No speech heard. Returning to wake mode.")
                     print("[AURA] Waiting for wake word...")
                     print("-" * 60)
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.03)
                     continue
 
                 if looks_like_weak_transcript(final_text):
-                    print(f"[AURA] Weak transcript detected: {final_text}")
-                    if final_text in WAKE_ONLY_PHRASES:
-                        print("[AURA] Ignoring wake-only transcript.")
-                        print("[AURA] Waiting for wake word...")
-                        print("-" * 60)
-                        await asyncio.sleep(0.02)
-                        continue
+                    print(f"[AURA] Ignoring weak transcript: {final_text}")
+                    print("[AURA] Waiting for wake word...")
+                    print("-" * 60)
+                    await asyncio.sleep(0.03)
+                    continue
 
                 movement = detect_last_movement_command(final_text)
                 intent = classify_intent(final_text)
@@ -943,16 +916,16 @@ class STTService:
                 print("[AURA] Returning to wake mode.")
                 print("[AURA] Waiting for wake word...")
                 print("-" * 60)
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.03)
 
             except RuntimeError as e:
                 if "stopped" in str(e).lower():
                     break
-                print(f"[STT] Loop runtime error: {e}")
-                await asyncio.sleep(0.20)
+                print(f"[STT] Loop error: {e}")
+                await asyncio.sleep(0.25)
             except Exception as e:
                 print(f"[STT] Loop error: {e}")
-                await asyncio.sleep(0.20)
+                await asyncio.sleep(0.25)
 
         self.unload_model()
         print("[STT] Voice loop stopped.")
@@ -963,4 +936,3 @@ class STTService:
             sd.stop()
         except Exception:
             pass
-    
