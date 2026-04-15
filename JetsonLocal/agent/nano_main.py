@@ -92,6 +92,7 @@ class AuraConsoleApp:
         self.status_text = tk.StringVar(value="BOOTING")
         self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
         self.banner_text = tk.StringVar(value="AURA")
+        self.quick_info_text = tk.StringVar(value="DB: none loaded   |   Last cmd: idle")
         self.vision_title_text = tk.StringVar(value="")
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
@@ -104,6 +105,10 @@ class AuraConsoleApp:
             value="Last voice result will appear here."
         )
         self.voice_busy = False
+
+        self.current_loaded_db = ""
+        self.current_build_db = ""
+        self.last_command_name = "idle"
 
         self._llm_thinking = False
         self._llm_history = []
@@ -168,6 +173,18 @@ class AuraConsoleApp:
         )
         self.header_label.pack(fill="x")
 
+        self.header_sub_label = tk.Label(
+            self.header,
+            textvariable=self.quick_info_text,
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=sub_font,
+            anchor="center",
+            padx=10,
+            pady=(0, 10),
+        )
+        self.header_sub_label.pack(fill="x")
+
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
@@ -189,7 +206,7 @@ class AuraConsoleApp:
             return bottom >= (1.0 - threshold)
         except Exception:
             return True
-    
+
     def _outline_button(
         self,
         parent,
@@ -754,13 +771,64 @@ class AuraConsoleApp:
             )
 
     # =========================
-    # Live feed formatting
+    # Live feed helpers
     # =========================
+
+    def _extract_db_name(self, line: str) -> str:
+        patterns = [
+            r'db_name["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+            r'database["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+            r'\bdb\s+["\']([^"\']+)["\']',
+            r'\bdb\s+([a-zA-Z0-9._-]+)',
+            r'\bdatabase\s+([a-zA-Z0-9._-]+)',
+            r'\"([a-zA-Z0-9._-]+)\"\s+on\s+Jetson',
+        ]
+        for pat in patterns:
+            m = re.search(pat, line, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    def _extract_movement(self, line: str) -> str:
+        m = re.search(r'\b(forward|backward|left|right|stop|pitch|yaw|lift|down|up)\b', line, flags=re.IGNORECASE)
+        return m.group(1).lower() if m else ""
+
+    def _friendly_command_name(self, line: str) -> str:
+        lower = line.lower()
+        if "sync_vectors" in lower:
+            return "sync_vectors"
+        if "delete_vectors" in lower:
+            return "delete_vectors"
+        if "build_rag" in lower or "/api/databases/build" in lower:
+            return "build_rag"
+        if "chat_prompt" in lower:
+            return "chat_prompt"
+        mv = self._extract_movement(lower)
+        if mv:
+            return mv
+        return ""
+
+    def _remember_db_and_command(self, line: str):
+        db = self._extract_db_name(line)
+        cmd = self._friendly_command_name(line)
+        if db:
+            if "sync_vectors" in line.lower():
+                self.current_loaded_db = db
+            if any(x in line.lower() for x in ("build", "vector", "embed", "index")):
+                self.current_build_db = db
+        if cmd:
+            self.last_command_name = cmd
+        loaded = self.current_loaded_db or "none loaded"
+        last_cmd = self.last_command_name or "idle"
+        self.quick_info_text.set(f"DB: {loaded}   |   Last cmd: {last_cmd}")
 
     def _format_live_line(self, line: str):
         line = (line or "").strip()
         if not line:
             return None
+
+        self._remember_db_and_command(line)
+        lower = line.lower()
 
         if line.startswith("[UI_STATE]"):
             return None
@@ -825,24 +893,59 @@ class AuraConsoleApp:
         if "[SERIAL] Connect failed:" in line:
             return "ESP32 not connected"
 
-        if "[UI]" in line or "[UI ERROR]" in line:
-            return line
+        if "sync_vectors" in lower:
+            db = self._extract_db_name(line) or self.current_loaded_db or "unknown"
+            return f'DB pushed to Jetson: {db}'
 
-        if "error" in line.lower() or "failed" in line.lower():
+        if "delete_vectors" in lower:
+            db = self._extract_db_name(line) or "unknown"
+            return f'DB delete queued: {db}'
+
+        if "build_rag" in lower or "/api/databases/build" in lower:
+            db = self._extract_db_name(line) or self.current_build_db or self.current_loaded_db or "unknown"
+            return f'Build queued: {db}'
+
+        if any(k in lower for k in ("vectorizing", "embedding", "embeddings", "indexed", "indexing", "building vectors", "build complete", "synced back", "build failed")):
+            db = self._extract_db_name(line) or self.current_build_db or self.current_loaded_db or "current DB"
+            if "build complete" in lower or "completed" in lower:
+                return f'Build complete: {db}'
+            if "synced back" in lower or "synced" in lower:
+                return f'Synced to website: {db}'
+            if "failed" in lower:
+                return f'Build failed: {db}'
+            return f'Vectorizing: {db}'
+
+        if "[command]" in lower or "command:" in lower or "movement" in lower:
+            move = self._extract_movement(line)
+            if move:
+                return f"Move command: {move.upper()}"
+            cmd = self._friendly_command_name(line)
+            if cmd:
+                return f"Command: {cmd}"
+
+        if "[chat]" in lower and "chat_prompt" in lower:
+            return "Chat prompt sent"
+
+        if "[ui]" in lower or "[ui error]" in lower:
+            return line[:120]
+
+        if "error" in lower or "failed" in lower:
             return line[:120]
 
         if (
-            "[STARTUP]" in line
-            or "[RAG]" in line
-            or "[TTS]" in line
-            or "[CAMERA]" in line
-            or "[COMMAND]" in line
-            or "[CHAT]" in line
-            or "[VOICE]" in line
+            "[startup]" in lower
+            or "[rag]" in lower
+            or "[tts]" in lower
+            or "[camera]" in lower
+            or "[command]" in lower
+            or "[chat]" in lower
+            or "[voice]" in lower
+            or "[jetson db]" in lower
         ):
             return line[:120]
 
         return None
+
     # =========================
     # Journal reader
     # =========================
@@ -891,7 +994,6 @@ class AuraConsoleApp:
                 "[UI ERROR] Could not attach to journalctl. "
                 "If you launched agent/main.py manually, the UI will not see those logs here."
             )
-            
 
     def _poll_logs(self):
         processed = 0
@@ -945,6 +1047,8 @@ class AuraConsoleApp:
     def _update_state_from_line(self, line: str):
         lower = line.lower()
         clean = self._clean_event(line)
+        db = self._extract_db_name(line)
+        move = self._extract_movement(line)
 
         if "[startup]" in lower or "telemetry agent running" in lower:
             self._set_status("READY", "AURA services are up")
@@ -958,16 +1062,42 @@ class AuraConsoleApp:
         if "[chat]" in lower and ("running rag query" in lower or "received command" in lower):
             self._set_status("THINKING", clean)
             return
-        if "[jetson db]" in lower and ("loading" in lower or "loaded" in lower or "vector" in lower or "build" in lower):
-            self._set_status("VECTORIZING", clean)
+
+        if any(k in lower for k in ("vectorizing", "embedding", "embeddings", "indexing", "indexed", "build complete", "synced back")) or (
+            "[jetson db]" in lower and any(k in lower for k in ("loading", "loaded", "vector", "build"))
+        ):
+            label = db or self.current_build_db or self.current_loaded_db or "database"
+            if "build complete" in lower or "completed" in lower:
+                self._set_status("READY", f'Build complete: {label}')
+            elif "synced back" in lower or "synced" in lower:
+                self._set_status("READY", f'Synced to website: {label}')
+            else:
+                self._set_status("VECTORIZING", f'Vectorizing: {label}')
             return
+
+        if "sync_vectors" in lower:
+            label = db or self.current_loaded_db or "database"
+            self._set_status("COMMAND", f'Pushed DB: {label}')
+            return
+
+        if "delete_vectors" in lower:
+            label = db or "database"
+            self._set_status("COMMAND", f'Deleting DB: {label}')
+            return
+
+        if move:
+            self._set_status("COMMAND", f'Movement: {move.upper()}')
+            return
+
         if "[command]" in lower:
             self._set_status("COMMAND", clean)
             return
+
         if "[status] ok" in lower:
             if self.ui_mode != "vision":
                 self._set_status("READY", "Systems nominal")
             return
+
         if "error" in lower or "failed" in lower or "traceback" in lower:
             self._set_status("ERROR", clean)
             return
@@ -1129,7 +1259,6 @@ class AuraConsoleApp:
                 )
                 self.current_frame_image = None
             else:
-                # keep last good frame instead of blanking immediately
                 self.vision_status_text.set("Camera reconnecting...")
 
     def _refresh_detections(self):
