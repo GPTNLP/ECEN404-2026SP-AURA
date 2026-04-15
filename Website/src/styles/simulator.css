@@ -15,6 +15,55 @@
   flex-wrap: wrap;
 }
 
+.simulator-action-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.simulator-action-btn {
+  background: linear-gradient(180deg, #8f1111 0%, #6f0000 100%);
+  border: 1px solid #5a0000;
+  color: #ffffff;
+  font-weight: 800;
+  border-radius: 12px;
+  min-height: 42px;
+  padding: 0 16px;
+  cursor: pointer;
+  box-shadow:
+    0 8px 18px rgba(90, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.simulator-action-btn:hover {
+  background: linear-gradient(180deg, #a31515 0%, #7d0000 100%);
+  border-color: #730000;
+  transform: translateY(-1px);
+  box-shadow:
+    0 10px 22px rgba(90, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10);
+}
+
+.simulator-action-btn:active {
+  transform: translateY(0);
+  box-shadow:
+    0 6px 14px rgba(90, 0, 0, 0.20),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.simulator-action-btn:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 3px rgba(143, 17, 17, 0.18),
+    0 8px 18px rgba(90, 0, 0, 0.22);
+}
+
 .simulator-status-pill {
   display: inline-flex;
   align-items: center;

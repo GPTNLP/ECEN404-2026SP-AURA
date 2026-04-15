@@ -547,13 +547,23 @@ export default function SimulatorPage() {
               {apiOnline === null ? "Checking..." : apiOnline ? "Backend online" : "Backend offline"}
             </div>
 
-            <button
-              className="btn simulator-action-btn"
-              type="button"
-              onClick={() => void fetchMySessions()}
-            >
-              Refresh
-            </button>
+            <div className="simulator-action-group">
+              <button
+                className="btn simulator-action-btn"
+                type="button"
+                onClick={startNewChat}
+              >
+                New Chat
+              </button>
+
+              <button
+                className="btn simulator-action-btn"
+                type="button"
+                onClick={() => void fetchMySessions()}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
         </div>
 
