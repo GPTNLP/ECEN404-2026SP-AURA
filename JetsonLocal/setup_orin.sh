@@ -209,7 +209,7 @@ cat > "$USER_HOME/.config/autostart/aura-rotate.desktop" <<'EOF'
 [Desktop Entry]
 Type=Application
 Name=AURA Rotate Display
-Exec=/bin/bash -lc 'sleep 3; OUTPUT=$(xrandr --query | awk "/ connected/{print \$1; exit}"); if [ -n "$OUTPUT" ]; then xrandr --output "$OUTPUT" --rotate right; fi'
+Exec=/bin/bash -lc 'sleep 3; OUTPUT=$(xrandr --query | awk "/ connected/{print \$1; exit}"); if [ -n "$OUTPUT" ]; then xrandr --output "$OUTPUT" --rotate left; fi'
 X-GNOME-Autostart-enabled=true
 EOF
 
