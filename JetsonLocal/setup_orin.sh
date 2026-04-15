@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
 echo "===================================="
 echo " AURA Setup for Jetson Orin Nano"
@@ -16,6 +16,13 @@ echo "User: $USER_NAME"
 echo "Home: $USER_HOME"
 echo ""
 
+if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    echo "[ERROR] Do not run this script with sudo."
+    echo "Run it as your normal user:"
+    echo "  bash setup_orin.sh"
+    exit 1
+fi
+
 # -----------------------------
 # System packages
 # -----------------------------
@@ -24,9 +31,13 @@ sudo apt-get update
 sudo apt-get install -y \
   python3-pip \
   python3-venv \
+  python3-dev \
+  build-essential \
+  pkg-config \
   curl \
   portaudio19-dev \
   python3-pyaudio \
+  libasound2-dev \
   flac \
   x11-xserver-utils
 
@@ -44,13 +55,6 @@ sudo systemctl enable ollama
 sudo systemctl start ollama
 
 # Force Ollama to use all GPU layers and enable performance features.
-#
-# OLLAMA_NUM_GPU=999          — offload all model layers to the Jetson GPU
-# OLLAMA_FLASH_ATTENTION=1    — use flash attention (reduces VRAM usage per call,
-#                               keeps model in GPU when camera/YOLO also run)
-# OLLAMA_KV_CACHE_TYPE=q8_0  — quantise KV cache fp16→int8 (halves KV VRAM;
-#                               the single biggest reason Ollama falls back to
-#                               CPU on unified-memory Jetsons)
 OLLAMA_SVC="/etc/systemd/system/ollama.service"
 if [ -f "$OLLAMA_SVC" ]; then
     CHANGED=0
@@ -76,23 +80,29 @@ fi
 
 echo "Downloading models..."
 ollama pull llama3.2
-ollama pull llama3.2:1b        # lightweight intent-classification model (~2x faster)
+ollama pull llama3.2:1b
 ollama pull nomic-embed-text
 
 # -----------------------------
-# Create venv
+# Create clean venv
 # -----------------------------
-if [ ! -d "$PROJECT_DIR/aura_env" ]; then
-    python3 -m venv "$PROJECT_DIR/aura_env" --system-site-packages
+if [ -d "$PROJECT_DIR/aura_env" ]; then
+    echo "Removing existing aura_env to fix broken pip/venv state..."
+    rm -rf "$PROJECT_DIR/aura_env"
 fi
 
+python3 -m venv "$PROJECT_DIR/aura_env"
 source "$PROJECT_DIR/aura_env/bin/activate"
 
-pip install --upgrade pip
-pip install -r "$PROJECT_DIR/requirements.txt"
+export PIP_REQUIRE_VIRTUALENV=true
+unset PIP_USER
+unset PYTHONUSERBASE
+
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 
 echo "Installing Jetson specific libraries"
-pip install jetson-stats pyserial SpeechRecognition faster-whisper
+python -m pip install --no-user jetson-stats SpeechRecognition
 
 # -----------------------------
 # Create startup launcher
@@ -100,7 +110,7 @@ pip install jetson-stats pyserial SpeechRecognition faster-whisper
 echo "Creating startup launcher..."
 cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 #!/usr/bin/env bash
-set -e
+set -Eeuo pipefail
 
 cd "$PROJECT_DIR"
 source "$PROJECT_DIR/aura_env/bin/activate"
@@ -128,8 +138,9 @@ echo "Creating systemd service..."
 sudo tee "/etc/systemd/system/$SERVICE_NAME" > /dev/null <<EOF
 [Unit]
 Description=AURA Jetson Agent
-After=network-online.target
+After=network-online.target ollama.service
 Wants=network-online.target
+Requires=ollama.service
 
 [Service]
 Type=simple
@@ -180,8 +191,8 @@ echo "Setup Complete"
 echo "===================================="
 echo ""
 echo "What this now does:"
-echo "1. Creates/uses aura_env"
-echo "2. Installs all Python/system dependencies"
+echo "1. Rebuilds aura_env cleanly"
+echo "2. Installs all Python/system dependencies into the venv"
 echo "3. Auto-starts agent/main.py on boot"
 echo "4. Auto-applies /dev/ttyACM0 permissions"
 echo "5. Auto-rotates display right on login"

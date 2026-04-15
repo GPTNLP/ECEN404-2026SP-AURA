@@ -53,7 +53,13 @@ from hardware.camera import camera_service, get_camera_status
 from ai.rag_manager import rag_manager
 from ai.chat_manager import chat_manager
 
-from stt_faster import STTService
+from stt_faster import (
+    STTService,
+    classify_intent,
+    detect_last_movement_command,
+    looks_like_weak_transcript,
+    normalize_text,
+)
 from tts import TTSService
 
 # -------------------------------------------------------------------
@@ -83,10 +89,11 @@ _last_uploaded_signature: Optional[str] = None
 # -------------------------------------------------------------------
 stt_task: Optional[asyncio.Task] = None
 stt_service: Optional[STTService] = None
-voice_enabled = True
+voice_enabled = False
 voice_running = False
 voice_loaded = False
 voice_idle_seconds = 0
+voice_request_lock: Optional[asyncio.Lock] = None
 tts_service = TTSService()
 
 
@@ -269,12 +276,27 @@ async def query_rag_with_timeout(query: str, timeout_seconds: float):
     return await asyncio.wait_for(rag_manager.query(query), timeout=timeout_seconds)
 
 
-async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> None:
+
+async def handle_voice_text(
+    text: str,
+    intent: str,
+    movement: Optional[str],
+    *,
+    speak_response: bool = True,
+) -> dict:
     global voice_idle_seconds
 
     text = (text or "").strip()
     if not text:
-        return
+        return {
+            "ok": False,
+            "transcript": "",
+            "intent": intent,
+            "movement": movement,
+            "action": "empty",
+            "response_text": "",
+            "spoken": False,
+        }
 
     voice_idle_seconds = 0
     lowered = text.lower()
@@ -282,11 +304,23 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
     set_ui_state("THINKING", truncate_for_ui(text))
     quiet_print("voice_question_received", f"[VOICE] question received: {text}")
 
+    result = {
+        "ok": True,
+        "transcript": text,
+        "intent": intent,
+        "movement": movement,
+        "action": "llm",
+        "response_text": "",
+        "spoken": False,
+    }
+
     try:
         if "speak" in lowered:
             speak_payload = extract_speak_payload(text)
 
             if speak_payload:
+                result["action"] = "tts"
+                result["response_text"] = speak_payload
                 send_or_queue_log(
                     "info",
                     "voice_tts_command",
@@ -294,8 +328,12 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text, "spoken_text": speak_payload},
                 )
                 quiet_print("voice_action", f"[VOICE] tts -> {speak_payload}")
-                await speak_with_timeout(speak_payload, speak_payload)
+                if speak_response:
+                    result["spoken"] = await speak_with_timeout(speak_payload, speak_payload)
             else:
+                result["ok"] = False
+                result["action"] = "tts_missing_payload"
+                result["response_text"] = "Please tell me what you want me to say."
                 send_or_queue_log(
                     "warning",
                     "voice_tts_missing_payload",
@@ -303,11 +341,12 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text},
                 )
                 quiet_print("voice_action", "[VOICE] tts requested but no payload found")
-                await speak_with_timeout(
-                    "Please tell me what you want me to say.",
-                    "Prompting for speech text",
-                )
-            return
+                if speak_response:
+                    result["spoken"] = await speak_with_timeout(
+                        result["response_text"],
+                        "Prompting for speech text",
+                    )
+            return result
 
         if movement and movement in MOVEMENT_COMMANDS:
             try:
@@ -322,7 +361,13 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text, "intent": intent, "movement": movement},
                 )
 
-                await speak_with_timeout(f"Moving {movement}", f"Moving {movement}")
+                result["action"] = "movement"
+                result["response_text"] = f"Moving {movement}"
+                if speak_response:
+                    result["spoken"] = await speak_with_timeout(
+                        result["response_text"],
+                        result["response_text"],
+                    )
 
             except Exception as e:
                 set_ui_state("ERROR", truncate_for_ui(str(e)))
@@ -335,11 +380,15 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
                     {"text": text, "intent": intent, "movement": movement},
                 )
 
-                await speak_with_timeout(
-                    "I could not send the movement command.",
-                    "Movement failed",
-                )
-            return
+                result["ok"] = False
+                result["action"] = "movement_failed"
+                result["response_text"] = "I could not send the movement command."
+                if speak_response:
+                    result["spoken"] = await speak_with_timeout(
+                        result["response_text"],
+                        "Movement failed",
+                    )
+            return result
 
         chat_manager.add_message("user", text, api, DEVICE_ID)
         set_ui_state("THINKING", "Running local RAG query")
@@ -358,7 +407,11 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
         answer = str(answer)
         chat_manager.add_message("assistant", answer, api, DEVICE_ID)
 
-        await speak_with_timeout(answer, truncate_for_ui(answer))
+        result["action"] = "llm"
+        result["response_text"] = answer
+
+        if speak_response:
+            result["spoken"] = await speak_with_timeout(answer, truncate_for_ui(answer))
 
         quiet_print("voice_chat", f"[VOICE] answered: {text}")
         send_or_queue_log(
@@ -369,6 +422,9 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
         )
 
     except Exception as e:
+        result["ok"] = False
+        result["action"] = "error"
+        result["response_text"] = str(e)
         set_ui_state("ERROR", truncate_for_ui(str(e)))
         quiet_print("voice_chat_fail", f"[VOICE] failed: {e}")
         send_or_queue_log(
@@ -381,24 +437,130 @@ async def handle_voice_text(text: str, intent: str, movement: Optional[str]) -> 
         if voice_running:
             set_ui_state("LISTENING", "Wake word active")
             quiet_print("voice_listening", "[VOICE] listening")
+        else:
+            set_ui_state("READY", "Voice idle")
+
+    return result
 
 
 def build_stt_service() -> STTService:
     return STTService(
         callback=handle_voice_text,
-        model_size="base.en",
+        model_size="small.en",
         input_device=None,
         device_sample_rate=None,
         target_sample_rate=16000,
         channels=None,
-        device="cpu",
-        compute_type="int8",
+        device="cuda",
+        compute_type="float16",
         language="en",
         task="transcribe",
         log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
-        unload_after_idle_seconds=300.0,
+        unload_after_idle_seconds=3600.0,
         auto_reload_model=True,
     )
+
+
+def _build_button_stt_service() -> STTService:
+    return STTService(
+        callback=handle_voice_text,
+        model_size="small.en",
+        input_device=None,
+        device_sample_rate=None,
+        target_sample_rate=16000,
+        channels=None,
+        device="cuda",
+        compute_type="float16",
+        language="en",
+        task="transcribe",
+        log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
+        unload_after_idle_seconds=0.0,
+        auto_reload_model=True,
+    )
+
+
+async def capture_single_voice_request() -> dict:
+    global stt_service, voice_running, voice_loaded, voice_idle_seconds
+
+    if voice_request_lock is None:
+        raise RuntimeError("Voice system lock is not ready yet.")
+
+    async with voice_request_lock:
+        if stt_task and not stt_task.done():
+            await stop_voice_loop()
+
+        temp_service = _build_button_stt_service()
+        stt_service = temp_service
+        voice_running = True
+        voice_loaded = False
+        voice_idle_seconds = 0
+
+        try:
+            set_ui_state("LISTENING", "Tap-to-talk listening")
+            quiet_print("voice_button_load", "[VOICE] button capture loading model")
+            await asyncio.to_thread(temp_service._ensure_model_loaded)
+            voice_loaded = True
+
+            await asyncio.to_thread(temp_service.calibrate_noise_floor)
+            heard_text = await asyncio.to_thread(
+                temp_service.listen_until_done,
+                12.0,
+                1.0,
+                0.12,
+            )
+
+            final_text = normalize_text(heard_text)
+            if not final_text:
+                set_ui_state("READY", "No speech heard")
+                return {
+                    "ok": False,
+                    "transcript": "",
+                    "intent": "empty",
+                    "movement": None,
+                    "action": "no_speech",
+                    "response_text": "I did not hear anything.",
+                    "spoken": False,
+                }
+
+            if looks_like_weak_transcript(final_text):
+                set_ui_state("READY", "Speech too short")
+                return {
+                    "ok": False,
+                    "transcript": final_text,
+                    "intent": "empty",
+                    "movement": None,
+                    "action": "weak_transcript",
+                    "response_text": "Please try again and say a little more.",
+                    "spoken": False,
+                }
+
+            movement = detect_last_movement_command(final_text)
+            intent = classify_intent(final_text)
+
+            quiet_print("voice_button_heard", f"[VOICE] button heard: {final_text}")
+            result = await handle_voice_text(
+                final_text,
+                intent,
+                movement,
+                speak_response=True,
+            )
+            return result
+
+        finally:
+            try:
+                await asyncio.to_thread(temp_service.unload_model)
+            except Exception:
+                pass
+            try:
+                temp_service.stop()
+            except Exception:
+                pass
+            stt_service = None
+            voice_running = False
+            voice_loaded = False
+            voice_idle_seconds = 0
+            set_ui_state("READY", "Voice idle")
+
 
 
 async def start_voice_loop():
@@ -1243,6 +1405,7 @@ async def lifespan(app_instance: FastAPI):
         quiet_print("camera_idle", f"[CAMERA] idle init warning: {e}")
 
     quiet_print("tts", f"[TTS] ready device={tts_service.device}")
+    voice_request_lock = asyncio.Lock()
 
     try:
         rag_manager.initialize()
@@ -1263,11 +1426,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
-    asyncio.create_task(voice_watchdog_loop())
     asyncio.create_task(_warmup_llm())
-
-    if voice_enabled:
-        asyncio.create_task(start_voice_loop())
 
     set_ui_state("READY", "AURA online")
     quiet_print("startup", "[STARTUP] telemetry agent running")
@@ -1363,6 +1522,17 @@ async def voice_stop():
         return {"ok": True, "running": voice_running}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop voice loop: {e}")
+
+
+
+@app.post("/voice/listen_once")
+async def voice_listen_once():
+    try:
+        result = await capture_single_voice_request()
+        return {"ok": True, **result, "running": False, "model_loaded": False}
+    except Exception as e:
+        set_ui_state("ERROR", truncate_for_ui(str(e)))
+        raise HTTPException(status_code=500, detail=f"Failed to handle voice request: {e}")
 
 
 # -------------------------------------------------------------------

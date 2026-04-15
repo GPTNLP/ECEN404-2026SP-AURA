@@ -86,6 +86,10 @@ class AuraConsoleApp:
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
+        self.voice_button_text = tk.StringVar(value="Tap Mic")
+        self.voice_status_text = tk.StringVar(value="Press the mic, speak once, and AURA will respond.")
+        self.voice_result_text = tk.StringVar(value="Last voice result will appear here.")
+        self.voice_busy = False
 
         # LLM chat state
         self._llm_thinking = False
@@ -142,6 +146,63 @@ class AuraConsoleApp:
         self._build_vision_ui(self.vision_frame, button_font, vision_title_font, vision_info_font)
 
         self._show_home()
+
+
+def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
+    try:
+        _top, bottom = widget.yview()
+        return bottom >= (1.0 - threshold)
+    except Exception:
+        return True
+
+def _format_live_line(self, line: str):
+    line = (line or "").strip()
+    if not line:
+        return None
+
+    if line.startswith("[STATUS] ok"):
+        return None
+    if line.startswith("[UI_STATE]"):
+        return None
+    if line.startswith("=") or line.startswith("-" * 10):
+        return None
+    if line.startswith("RAW TEXT:"):
+        return None
+    if line.startswith("CLEANED TEXT:"):
+        return "Heard: " + line.split(":", 1)[1].strip()
+    if line.startswith("INTENT:"):
+        return "Intent: " + line.split(":", 1)[1].strip().upper()
+    if line.startswith("MOVEMENT:"):
+        value = line.split(":", 1)[1].strip()
+        if value and value != "None":
+            return "Action: " + value
+        return None
+    if "[VOICE] question received:" in line:
+        return "Heard: " + line.split(":", 1)[1].strip()
+    if "[VOICE] speaking:" in line:
+        return "Speaking..."
+    if "[VOICE] answered:" in line:
+        return "Done."
+    if "[VOICE] button heard:" in line:
+        return "Heard: " + line.split(":", 1)[1].strip()
+    if "[VOICE] button capture loading model" in line:
+        return "Loading speech model..."
+    if "[AURA] Listening for command..." in line:
+        return "Listening..."
+    if "[AURA] No speech heard." in line:
+        return "No speech heard."
+    if "[AURA] Returning to wake mode." in line or "[AURA] Waiting for wake word..." in line:
+        return None
+    if "[STARTUP]" in line or "[RAG]" in line or "[TTS]" in line or "[CAMERA]" in line or "[COMMAND]" in line:
+        return line
+    if "error" in line.lower() or "failed" in line.lower():
+        return line
+    return line[:140]
+
+def _set_voice_busy(self, busy: bool, status: str = ""):
+    self.voice_busy = busy
+    self.voice_button_text.set("Listening..." if busy else "Tap Mic")
+    self.voice_status_text.set(status or ("Listening for your question..." if busy else "Press the mic, speak once, and AURA will respond."))
 
     def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
         # ── Mode toggle row (replaces old READY status card) ─────────────────
@@ -245,6 +306,68 @@ class AuraConsoleApp:
             btn.grid(row=0, column=idx, sticky="nsew", padx=6)
             buttons_wrap.grid_columnconfigure(idx, weight=1)
 
+
+        voice_card = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        voice_card.pack(fill="x", pady=(0, 10))
+
+        voice_top = tk.Frame(voice_card, bg="#0b0f14")
+        voice_top.pack(fill="x", padx=12, pady=(12, 8))
+
+        tk.Label(
+            voice_top,
+            text="VOICE",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+        ).pack(side="left")
+
+        self.voice_button = tk.Button(
+            voice_top,
+            textvariable=self.voice_button_text,
+            command=self._run_voice_button,
+            font=button_font,
+            bg="#1d4ed8",
+            fg="#ffffff",
+            activebackground="#2563eb",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=12,
+        )
+        self.voice_button.pack(side="right")
+
+        tk.Label(
+            voice_card,
+            textvariable=self.voice_status_text,
+            fg="#e2e8f0",
+            bg="#0b0f14",
+            font=log_font,
+            anchor="w",
+            justify="left",
+            padx=14,
+            pady=2,
+        ).pack(fill="x")
+
+        tk.Label(
+            voice_card,
+            textvariable=self.voice_result_text,
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=log_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
+            padx=14,
+            pady=(0, 12),
+        ).pack(fill="x")
         # ── Content stack (Console / LLM) ─────────────────────────────────
         self.content_stack = tk.Frame(parent, bg="#05070a")
         self.content_stack.pack(fill="both", expand=True)
@@ -268,7 +391,7 @@ class AuraConsoleApp:
 
         tk.Label(
             logs_card,
-            text="LIVE CONSOLE",
+            text="LIVE FEED",
             fg="#14f195",
             bg="#0b0f14",
             font=section_font,
@@ -552,6 +675,7 @@ class AuraConsoleApp:
 
     def _llm_redraw(self):
         """Rebuild the chat Text widget from history + optional thinking indicator."""
+        should_follow = self._is_scrolled_near_bottom(self.llm_chat_text)
         self.llm_chat_text.configure(state="normal")
         self.llm_chat_text.delete("1.0", "end")
 
@@ -569,8 +693,48 @@ class AuraConsoleApp:
         if self._llm_thinking:
             self.llm_chat_text.insert("end", "\nAURA: thinking...\n", "thinking")
 
-        self.llm_chat_text.see("end")
+        if should_follow:
+            self.llm_chat_text.see("end")
         self.llm_chat_text.configure(state="disabled")
+
+
+def _run_voice_button(self):
+    if self.voice_busy:
+        return
+
+    self._set_voice_busy(True, "Listening for your question...")
+    self.voice_result_text.set("Speak normally. AURA will process after about 1 second of silence.")
+
+    def _call():
+        try:
+            result = self._http_json_post("/voice/listen_once", {}, timeout=180.0)
+            self.root.after(0, lambda: self._voice_request_done(result, None))
+        except Exception as exc:
+            self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
+
+    threading.Thread(target=_call, daemon=True).start()
+
+def _voice_request_done(self, result, error):
+    self._set_voice_busy(False)
+
+    if error:
+        self.voice_status_text.set("Voice request failed.")
+        self.voice_result_text.set(error)
+        return
+
+    transcript = (result or {}).get("transcript", "").strip()
+    response_text = (result or {}).get("response_text", "").strip()
+    action = (result or {}).get("action", "").strip() or "unknown"
+
+    if transcript:
+        self.voice_status_text.set(f"Done ({action}).")
+        pieces = [f'Heard: "{transcript}"']
+        if response_text:
+            pieces.append(f'Result: "{response_text}"')
+        self.voice_result_text.set("   ".join(pieces))
+    else:
+        self.voice_status_text.set("No speech detected.")
+        self.voice_result_text.set(response_text or "Try again and speak a little closer to the mic.")
 
     # ── Journal reader ────────────────────────────────────────────────────────
 
@@ -617,16 +781,24 @@ class AuraConsoleApp:
         if self.running:
             self.root.after(POLL_MS, self._poll_logs)
 
-    def _append_log(self, line: str):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        display_line = f"[{timestamp}] {line}\n"
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", display_line)
-        line_count = int(self.log_text.index("end-1c").split(".")[0])
-        if line_count > MAX_LOG_LINES:
-            self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+
+def _append_log(self, line: str):
+    formatted = self._format_live_line(line)
+    if not formatted:
+        return
+
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    display_line = f"[{timestamp}] {formatted}\n"
+    should_follow = self._is_scrolled_near_bottom(self.log_text)
+
+    self.log_text.configure(state="normal")
+    self.log_text.insert("end", display_line)
+    line_count = int(self.log_text.index("end-1c").split(".")[0])
+    if line_count > MAX_LOG_LINES:
+        self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+    if should_follow:
         self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+    self.log_text.configure(state="disabled")
 
     # ── Status helpers ────────────────────────────────────────────────────────
 
