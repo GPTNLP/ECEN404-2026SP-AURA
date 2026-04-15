@@ -1391,6 +1391,7 @@ async def _warmup_llm():
 # -------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
+    global voice_request_lock
     try:
         serial_link.connect()
     except Exception as e:
