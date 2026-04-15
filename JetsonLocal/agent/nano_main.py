@@ -81,32 +81,10 @@ class AuraConsoleApp:
         self.status_text = tk.StringVar(value="BOOTING")
         self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
         self.banner_text = tk.StringVar(value="AURA")
-        self.quick_info_text = tk.StringVar(value="DB: none loaded   |   Last cmd: idle")
         self.vision_title_text = tk.StringVar(value="")
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
-<<<<<<< HEAD
-=======
-        self.voice_button_text = tk.StringVar(value="Tap Mic")
-        self.voice_status_text = tk.StringVar(
-            value="Press the mic, speak once, and AURA will respond."
-        )
-        self.voice_result_text = tk.StringVar(
-            value="Last voice result will appear here."
-        )
-        self.voice_busy = False
-
-        self.current_loaded_db = ""
-        self.current_build_db = ""
-        self.last_command_name = "idle"
-
-        self._llm_thinking = False
-        self._llm_history = []
-
-        self._vision_poll_counter = 0
-        self._camera_fail_count = 0
->>>>>>> parent of b55bdaa (Revert "format fixes")
 
         self._build_ui()
         self._start_reader()
@@ -148,18 +126,6 @@ class AuraConsoleApp:
         )
         self.header_label.pack(fill="x")
 
-        self.header_sub_label = tk.Label(
-            self.header,
-            textvariable=self.quick_info_text,
-            fg="#94a3b8",
-            bg="#0b0f14",
-            font=sub_font,
-            anchor="center",
-            padx=10,
-            pady=(0, 10),
-        )
-        self.header_sub_label.pack(fill="x")
-
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
@@ -171,55 +137,8 @@ class AuraConsoleApp:
 
         self._show_home()
 
-<<<<<<< HEAD
     def _build_home_ui(self, parent, status_font, sub_font, section_font, log_font, button_font):
         self.status_card = tk.Frame(
-=======
-    def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
-        try:
-            _top, bottom = widget.yview()
-            return bottom >= (1.0 - threshold)
-        except Exception:
-            return True
-
-    def _outline_button(
-        self,
-        parent,
-        text,
-        command,
-        font,
-        *,
-        fg=BTN_FG,
-        highlight=BTN_GREEN,
-        padx=20,
-        pady=12,
-        fill=False,
-    ):
-        btn = tk.Button(
-            parent,
-            text=text,
-            command=command,
-            font=font,
-            bg=BTN_BG,
-            fg=fg,
-            activebackground=BTN_ACTIVE_BG,
-            activeforeground=BTN_ACTIVE_FG,
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            padx=padx,
-            pady=pady,
-            highlightthickness=1,
-            highlightbackground=highlight,
-            highlightcolor=highlight,
-        )
-        if fill:
-            btn.pack(fill="x", padx=12, pady=12)
-        return btn
-
-    def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
-        mode_card = tk.Frame(
->>>>>>> parent of b55bdaa (Revert "format fixes")
             parent,
             bg="#0b0f14",
             highlightbackground="#14f195",
@@ -452,319 +371,6 @@ class AuraConsoleApp:
         self.home_frame.pack_forget()
         self.vision_frame.pack(fill="both", expand=True)
 
-<<<<<<< HEAD
-=======
-    def _switch_view(self, mode: str):
-        self.view_mode = mode
-        if mode == "llm":
-            self.console_panel.pack_forget()
-            self.llm_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
-            self.llm_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
-            self.llm_entry.focus_set()
-        else:
-            self.llm_panel.pack_forget()
-            self.console_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
-            self.llm_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
-
-    # =========================
-    # LLM chat
-    # =========================
-
-    def _llm_submit(self):
-        query = self.llm_entry.get().strip()
-        if not query or self._llm_thinking:
-            return
-
-        self.llm_entry.delete(0, "end")
-        self._llm_thinking = True
-        self.llm_send_btn.configure(state="disabled", bg="#111827")
-        self.llm_entry.configure(state="disabled")
-
-        self._llm_history.append(("user", query))
-        self._llm_redraw()
-
-        def _call():
-            try:
-                result = self._http_json_post("/rag/chat", {"query": query}, timeout=120.0)
-                answer = result.get("answer") or "(no response from model)"
-                self.root.after(0, lambda: self._llm_got_response(answer, None))
-            except Exception as exc:
-                self.root.after(0, lambda: self._llm_got_response(None, str(exc)))
-
-        threading.Thread(target=_call, daemon=True).start()
-
-    def _llm_got_response(self, answer, error):
-        self._llm_thinking = False
-        if error:
-            self._llm_history.append(("error", error))
-        else:
-            self._llm_history.append(("assistant", answer))
-        self._llm_redraw()
-        self.llm_send_btn.configure(state="normal", bg="#111827")
-        self.llm_entry.configure(state="normal")
-        self.llm_entry.focus_set()
-
-    def _llm_redraw(self):
-        should_follow = self._is_scrolled_near_bottom(self.llm_chat_text)
-        self.llm_chat_text.configure(state="normal")
-        self.llm_chat_text.delete("1.0", "end")
-
-        for role, text in self._llm_history:
-            if role == "user":
-                self.llm_chat_text.insert("end", "\nYOU:  ", "user_label")
-                self.llm_chat_text.insert("end", text + "\n", "user_text")
-            elif role == "error":
-                self.llm_chat_text.insert("end", "\nERROR: ", "error_label")
-                self.llm_chat_text.insert("end", text + "\n", "error_text")
-            else:
-                self.llm_chat_text.insert("end", "\nAURA: ", "aura_label")
-                self.llm_chat_text.insert("end", text + "\n", "aura_text")
-
-        if self._llm_thinking:
-            self.llm_chat_text.insert("end", "\nAURA: thinking...\n", "thinking")
-
-        if should_follow:
-            self.llm_chat_text.see("end")
-        self.llm_chat_text.configure(state="disabled")
-
-    # =========================
-    # Voice
-    # =========================
-
-    def _set_voice_busy(self, busy: bool, status: str = ""):
-        self.voice_busy = busy
-        self.voice_button_text.set("Listening..." if busy else "Tap Mic")
-        if hasattr(self, "voice_button"):
-            self.voice_button.configure(text=self.voice_button_text.get())
-        self.voice_status_text.set(
-            status or ("Listening for your question..." if busy else "Press the mic, speak once, and AURA will respond.")
-        )
-
-    def _run_voice_button(self):
-        if self.voice_busy:
-            return
-
-        self._set_voice_busy(True, "Listening for your question...")
-        self.voice_result_text.set(
-            "Speak normally. AURA will process after about 1 second of silence."
-        )
-
-        def _call():
-            try:
-                result = self._http_json_post("/voice/listen_once", {}, timeout=180.0)
-                self.root.after(0, lambda: self._voice_request_done(result, None))
-            except Exception as exc:
-                self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
-
-        threading.Thread(target=_call, daemon=True).start()
-
-    def _voice_request_done(self, result, error):
-        self._set_voice_busy(False)
-
-        if error:
-            self.voice_status_text.set("Voice request failed.")
-            self.voice_result_text.set(error)
-            return
-
-        transcript = (result or {}).get("transcript", "").strip()
-        response_text = (result or {}).get("response_text", "").strip()
-        action = (result or {}).get("action", "").strip() or "unknown"
-
-        if transcript:
-            self.voice_status_text.set(f"Done ({action}).")
-            pieces = [f'Heard: "{transcript}"']
-            if response_text:
-                pieces.append(f'Result: "{response_text}"')
-            self.voice_result_text.set("   ".join(pieces))
-        else:
-            self.voice_status_text.set("No speech detected.")
-            self.voice_result_text.set(
-                response_text or "Try again and speak a little closer to the mic."
-            )
-
-    # =========================
-    # Live feed helpers
-    # =========================
-
-    def _extract_db_name(self, line: str) -> str:
-        patterns = [
-            r'db_name["\']?\s*[:=]\s*["\']([^"\']+)["\']',
-            r'database["\']?\s*[:=]\s*["\']([^"\']+)["\']',
-            r'\bdb\s+["\']([^"\']+)["\']',
-            r'\bdb\s+([a-zA-Z0-9._-]+)',
-            r'\bdatabase\s+([a-zA-Z0-9._-]+)',
-            r'\"([a-zA-Z0-9._-]+)\"\s+on\s+Jetson',
-        ]
-        for pat in patterns:
-            m = re.search(pat, line, flags=re.IGNORECASE)
-            if m:
-                return m.group(1).strip()
-        return ""
-
-    def _extract_movement(self, line: str) -> str:
-        m = re.search(r'\b(forward|backward|left|right|stop|pitch|yaw|lift|down|up)\b', line, flags=re.IGNORECASE)
-        return m.group(1).lower() if m else ""
-
-    def _friendly_command_name(self, line: str) -> str:
-        lower = line.lower()
-        if "sync_vectors" in lower:
-            return "sync_vectors"
-        if "delete_vectors" in lower:
-            return "delete_vectors"
-        if "build_rag" in lower or "/api/databases/build" in lower:
-            return "build_rag"
-        if "chat_prompt" in lower:
-            return "chat_prompt"
-        mv = self._extract_movement(lower)
-        if mv:
-            return mv
-        return ""
-
-    def _remember_db_and_command(self, line: str):
-        db = self._extract_db_name(line)
-        cmd = self._friendly_command_name(line)
-        if db:
-            if "sync_vectors" in line.lower():
-                self.current_loaded_db = db
-            if any(x in line.lower() for x in ("build", "vector", "embed", "index")):
-                self.current_build_db = db
-        if cmd:
-            self.last_command_name = cmd
-        loaded = self.current_loaded_db or "none loaded"
-        last_cmd = self.last_command_name or "idle"
-        self.quick_info_text.set(f"DB: {loaded}   |   Last cmd: {last_cmd}")
-
-    def _format_live_line(self, line: str):
-        line = (line or "").strip()
-        if not line:
-            return None
-
-        self._remember_db_and_command(line)
-        lower = line.lower()
-
-        if line.startswith("[UI_STATE]"):
-            return None
-        if line.startswith("=") or line.startswith("-" * 10):
-            return None
-        if line.startswith("RAW TEXT:"):
-            return None
-
-        if line.startswith("CLEANED TEXT:"):
-            return "Heard: " + line.split(":", 1)[1].strip()
-
-        if line.startswith("INTENT:"):
-            value = line.split(":", 1)[1].strip().upper()
-            if value == "LLM":
-                return "Mode: CHAT"
-            if value == "MOVEMENT":
-                return "Mode: MOVE"
-            return "Mode: " + value
-
-        if line.startswith("MOVEMENT:"):
-            value = line.split(":", 1)[1].strip()
-            if value and value != "None":
-                return "Move: " + value.upper()
-            return None
-
-        if "[VOICE] question received:" in line:
-            return "Heard: " + line.split(":", 1)[1].strip()
-
-        if "[VOICE] speaking:" in line:
-            return "Speaking..."
-
-        if "[VOICE] answered:" in line:
-            return "Done."
-
-        if "[VOICE] button heard:" in line:
-            return "Heard: " + line.split(":", 1)[1].strip()
-
-        if "[VOICE] button capture loading model" in line:
-            return "Loading speech model..."
-
-        if "[AURA] Listening for command..." in line:
-            return "Listening..."
-
-        if "[AURA] No speech heard." in line:
-            return "No speech heard."
-
-        if "[AURA] Returning to wake mode." in line or "[AURA] Waiting for wake word..." in line:
-            return None
-
-        if "[STARTUP] RAG build worker ready" in line:
-            return "RAG ready"
-        if "[STARTUP] telemetry agent running" in line:
-            return "Telemetry online"
-        if "[STARTUP] local device id=" in line:
-            return "Device ready"
-        if "[STARTUP] idle while website activates raw mode" in line:
-            return "Camera idle"
-        if "[STARTUP] LLM warmup skipped" in line:
-            return "LLM warmup skipped"
-        if "[CAMERA] ready" in line:
-            return "Camera ready"
-        if "[SERIAL] Connect failed:" in line:
-            return "ESP32 not connected"
-
-        if "sync_vectors" in lower:
-            db = self._extract_db_name(line) or self.current_loaded_db or "unknown"
-            return f'DB pushed to Jetson: {db}'
-
-        if "delete_vectors" in lower:
-            db = self._extract_db_name(line) or "unknown"
-            return f'DB delete queued: {db}'
-
-        if "build_rag" in lower or "/api/databases/build" in lower:
-            db = self._extract_db_name(line) or self.current_build_db or self.current_loaded_db or "unknown"
-            return f'Build queued: {db}'
-
-        if any(k in lower for k in ("vectorizing", "embedding", "embeddings", "indexed", "indexing", "building vectors", "build complete", "synced back", "build failed")):
-            db = self._extract_db_name(line) or self.current_build_db or self.current_loaded_db or "current DB"
-            if "build complete" in lower or "completed" in lower:
-                return f'Build complete: {db}'
-            if "synced back" in lower or "synced" in lower:
-                return f'Synced to website: {db}'
-            if "failed" in lower:
-                return f'Build failed: {db}'
-            return f'Vectorizing: {db}'
-
-        if "[command]" in lower or "command:" in lower or "movement" in lower:
-            move = self._extract_movement(line)
-            if move:
-                return f"Move command: {move.upper()}"
-            cmd = self._friendly_command_name(line)
-            if cmd:
-                return f"Command: {cmd}"
-
-        if "[chat]" in lower and "chat_prompt" in lower:
-            return "Chat prompt sent"
-
-        if "[ui]" in lower or "[ui error]" in lower:
-            return line[:120]
-
-        if "error" in lower or "failed" in lower:
-            return line[:120]
-
-        if (
-            "[startup]" in lower
-            or "[rag]" in lower
-            or "[tts]" in lower
-            or "[camera]" in lower
-            or "[command]" in lower
-            or "[chat]" in lower
-            or "[voice]" in lower
-            or "[jetson db]" in lower
-        ):
-            return line[:120]
-
-        return None
-
-    # =========================
-    # Journal reader
-    # =========================
-
->>>>>>> parent of b55bdaa (Revert "format fixes")
     def _start_reader(self):
         thread = threading.Thread(target=self._reader_worker, daemon=True)
         thread.start()
@@ -779,7 +385,6 @@ class AuraConsoleApp:
                 text=True,
                 bufsize=1,
             )
-<<<<<<< HEAD
         except Exception as exc:
             self.log_queue.put(f"[UI ERROR] Failed to start journal reader: {exc}")
             return
@@ -794,8 +399,6 @@ class AuraConsoleApp:
             line = raw_line.rstrip("\n")
             if line.strip():
                 self.log_queue.put(line)
-=======
->>>>>>> parent of b55bdaa (Revert "format fixes")
 
     def _poll_logs(self):
         processed = 0
@@ -835,8 +438,6 @@ class AuraConsoleApp:
     def _update_state_from_line(self, line: str):
         lower = line.lower()
         clean = self._clean_event(line)
-        db = self._extract_db_name(line)
-        move = self._extract_movement(line)
 
         if "[startup]" in lower or "telemetry agent running" in lower:
             self._set_status("READY", "AURA services are up")
@@ -850,42 +451,16 @@ class AuraConsoleApp:
         if "[chat]" in lower and ("running rag query" in lower or "received command" in lower):
             self._set_status("THINKING", clean)
             return
-
-        if any(k in lower for k in ("vectorizing", "embedding", "embeddings", "indexing", "indexed", "build complete", "synced back")) or (
-            "[jetson db]" in lower and any(k in lower for k in ("loading", "loaded", "vector", "build"))
-        ):
-            label = db or self.current_build_db or self.current_loaded_db or "database"
-            if "build complete" in lower or "completed" in lower:
-                self._set_status("READY", f'Build complete: {label}')
-            elif "synced back" in lower or "synced" in lower:
-                self._set_status("READY", f'Synced to website: {label}')
-            else:
-                self._set_status("VECTORIZING", f'Vectorizing: {label}')
+        if "[jetson db]" in lower and ("loading" in lower or "loaded" in lower or "vector" in lower or "build" in lower):
+            self._set_status("VECTORIZING", clean)
             return
-
-        if "sync_vectors" in lower:
-            label = db or self.current_loaded_db or "database"
-            self._set_status("COMMAND", f'Pushed DB: {label}')
-            return
-
-        if "delete_vectors" in lower:
-            label = db or "database"
-            self._set_status("COMMAND", f'Deleting DB: {label}')
-            return
-
-        if move:
-            self._set_status("COMMAND", f'Movement: {move.upper()}')
-            return
-
         if "[command]" in lower:
             self._set_status("COMMAND", clean)
             return
-
         if "[status] ok" in lower:
             if self.ui_mode != "vision":
                 self._set_status("READY", "Systems nominal")
             return
-
         if "error" in lower or "failed" in lower or "traceback" in lower:
             self._set_status("ERROR", clean)
             return
@@ -997,20 +572,8 @@ class AuraConsoleApp:
             self.camera_label.configure(image="", text=f"Camera HTTP error: {exc.code}")
             self.current_frame_image = None
         except Exception as exc:
-<<<<<<< HEAD
             self.camera_label.configure(image="", text=f"Waiting for camera...\n{exc}")
             self.current_frame_image = None
-=======
-            self._camera_fail_count += 1
-            if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
-                self.camera_label.configure(
-                    image="",
-                    text=f"Waiting for camera...\n{exc}"
-                )
-                self.current_frame_image = None
-            else:
-                self.vision_status_text.set("Camera reconnecting...")
->>>>>>> parent of b55bdaa (Revert "format fixes")
 
     def _refresh_detections(self):
         if not self.active_vision_mode:
