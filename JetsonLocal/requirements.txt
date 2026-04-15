@@ -13,5 +13,3 @@ faster-whisper
 pyaudio==0.2.14
 pypdf==4.2.0
 opencv-python
-sounddevice
-Pillow

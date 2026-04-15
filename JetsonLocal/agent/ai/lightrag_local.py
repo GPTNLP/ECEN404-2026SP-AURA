@@ -35,36 +35,29 @@ from rank_bm25 import BM25Okapi
 # ─── Tunables ────────────────────────────────────────────────────────────────
 
 # Ollama connectivity
-AURA_OLLAMA_URL       = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
+AURA_OLLAMA_URL    = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
 AURA_OLLAMA_TIMEOUT_S = float(os.getenv("AURA_OLLAMA_TIMEOUT_S", "180"))
-# 2h keep-alive: prevents model eviction from VRAM between interactions.
-# Without this, a 30-min gap causes a GPU→CPU fallback on the next call.
-AURA_KEEP_ALIVE    = os.getenv("AURA_KEEP_ALIVE", "2h")
-AURA_NUM_GPU       = int(os.getenv("AURA_NUM_GPU", "99"))   # offload all layers to Jetson GPU
+AURA_KEEP_ALIVE    = os.getenv("AURA_KEEP_ALIVE", "30m")   # keep model loaded
+AURA_NUM_GPU       = int(os.getenv("AURA_NUM_GPU", "99"))   # GPU layers to offload
 
 # Answer generation
-# num_ctx=2048: actual prompts are ~1100 tokens (4000-char context + query + system).
-# Halving from 4096 cuts KV-cache VRAM by ~50%, keeping the model on GPU when
-# camera/YOLO also compete for the Jetson's unified 8 GB.
 AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "256"))
-AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "2048"))
+AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "4096"))
 AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 
-# Graph extraction (build-time only, not on the query path)
+# Graph extraction (build-time, expensive but one-off)
 AURA_GRAPH_EXTRACT       = os.getenv("AURA_GRAPH_EXTRACT", "true").lower() == "true"
 AURA_GRAPH_TIMEOUT_S     = float(os.getenv("AURA_GRAPH_TIMEOUT_S", "90"))
 AURA_GRAPH_NUM_PREDICT   = int(os.getenv("AURA_GRAPH_NUM_PREDICT", "512"))
 AURA_GRAPH_NUM_CTX       = int(os.getenv("AURA_GRAPH_NUM_CTX", "3072"))
 
 # Retrieval
-# MAX_CTX_CHARS=4000: ~1000 tokens — half of 8000. Directly cuts TTFT because
-# the LLM reads fewer tokens before generating the first output token.
-MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "4000"))
-DEFAULT_TOP_K       = int(os.getenv("AURA_TOP_K", "4"))       # was 6; fewer chunks = smaller prompt
+MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "8000"))
+DEFAULT_TOP_K       = int(os.getenv("AURA_TOP_K", "6"))
 BM25_REBUILD_EVERY  = int(os.getenv("AURA_BM25_REBUILD_EVERY", "50"))
-AURA_LOCAL_TOP_K    = int(os.getenv("AURA_LOCAL_TOP_K", "4"))   # entity matches
-AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "4"))  # entity FAISS hits
+AURA_LOCAL_TOP_K    = int(os.getenv("AURA_LOCAL_TOP_K", "5"))   # entity matches
+AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "5"))  # entity FAISS hits
 
 # Chunking — paper uses 1200 chars
 AURA_INSERT_CHUNK_SIZE    = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "1200"))
@@ -841,8 +834,8 @@ class LightRAG:
                 prompt=prompt,
                 system=_KEYWORD_EXTRACT_SYSTEM,
                 timeout_s=15.0,
-                num_predict=60,   # keyword JSON is short; was 80
-                num_ctx=256,      # query + prefix fits in 256; was 512 (halves KV alloc)
+                num_predict=80,
+                num_ctx=512,
                 temperature=0.0,
                 fast=True,
             )

@@ -212,7 +212,7 @@ def chat_via_jetson(payload: DeviceCommandIn, request: Request):
 
     print(f"[CHAT] queued chat_prompt -> {command_id}")
 
-    timeout = 180
+    timeout = 60
     start = time.time()
 
     while time.time() - start < timeout:
