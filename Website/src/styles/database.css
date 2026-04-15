@@ -145,7 +145,6 @@ textarea.db-input {
   background: var(--accent);
   color: white;
   border-color: transparent;
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .db-panel .btn-primary:hover,
@@ -641,46 +640,6 @@ textarea.db-input {
   min-height: 54px;
   display: flex;
   align-items: center;
-}
-
-/* Vector build banner */
-.db-build-banner {
-  margin-top: 12px;
-  margin-bottom: 14px;
-  padding: 16px 18px;
-  border-radius: 18px;
-  border: 1px solid var(--card-border);
-  background: color-mix(in srgb, var(--card-bg) 88%, var(--accent-soft));
-  box-shadow: var(--shadow);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.db-build-banner.running {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--card-border));
-  background: color-mix(in srgb, var(--accent) 10%, var(--card-bg));
-}
-
-.db-build-banner.good {
-  border-color: color-mix(in srgb, var(--status-good) 35%, var(--card-border));
-  background: color-mix(in srgb, var(--status-good) 10%, var(--card-bg));
-}
-
-.db-build-banner.bad {
-  border-color: color-mix(in srgb, var(--status-bad) 35%, var(--card-border));
-  background: color-mix(in srgb, var(--status-bad) 10%, var(--card-bg));
-}
-
-.db-build-title {
-  font-weight: 900;
-  font-size: 15px;
-  color: var(--text);
-}
-
-.db-build-sub {
-  font-size: 13px;
-  color: var(--muted-text);
 }
 
 /* Mobile */

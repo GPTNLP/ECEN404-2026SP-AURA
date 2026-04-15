@@ -95,9 +95,7 @@ export default function SimulatorPage() {
   const [loading, setLoading] = useState(false);
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [statusText, setStatusText] = useState("");
-  const [loadedDb, setLoadedDb] = useState(
-    () => localStorage.getItem("aura_device_loaded_db") || ""
-  );
+  const [loadedDb, setLoadedDb] = useState(() => localStorage.getItem("aura_loaded_db") || "");
 
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -150,7 +148,7 @@ export default function SimulatorPage() {
   }, [sessions, sessionSearch]);
 
   const refreshLoadedDb = () => {
-    setLoadedDb(localStorage.getItem("aura_device_loaded_db") || "");
+    setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
   };
 
   const writeLog = async (payload: {
@@ -223,7 +221,8 @@ export default function SimulatorPage() {
       localStorage.setItem("aura_active_session_id", session.session_id);
 
       if (session.db_name) {
-        localStorage.setItem("aura_session_db", session.db_name);
+        localStorage.setItem("aura_loaded_db", session.db_name);
+        window.dispatchEvent(new Event("aura:loaded-db"));
       }
 
       const nextUrl = new URL(window.location.href);
@@ -451,11 +450,11 @@ export default function SimulatorPage() {
 
   useEffect(() => {
     window.addEventListener("storage", refreshLoadedDb);
-    window.addEventListener("aura:device-loaded-db", refreshLoadedDb as EventListener);
+    window.addEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
 
     return () => {
       window.removeEventListener("storage", refreshLoadedDb);
-      window.removeEventListener("aura:device-loaded-db", refreshLoadedDb as EventListener);
+      window.removeEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
     };
   }, []);
 
@@ -548,7 +547,7 @@ export default function SimulatorPage() {
               {apiOnline === null ? "Checking..." : apiOnline ? "Backend online" : "Backend offline"}
             </div>
 
-            <button className="btn btn-primary" type="button" onClick={startNewChat}>
+            <button className="btn" type="button" onClick={startNewChat}>
               New Chat
             </button>
           </div>
@@ -564,7 +563,7 @@ export default function SimulatorPage() {
                 </div>
               </div>
 
-              <button className="btn btn-primary" type="button" onClick={() => void fetchMySessions()}>
+              <button className="btn" type="button" onClick={() => void fetchMySessions()}>
                 Refresh
               </button>
             </div>

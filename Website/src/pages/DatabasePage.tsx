@@ -103,13 +103,6 @@ function prettyBuildStatus(status: BuildStatus) {
   }
 }
 
-function buildStatusTone(status: BuildStatus) {
-  if (status === "failed" || status === "timed_out") return "bad";
-  if (status === "completed" || status === "synced") return "good";
-  if (status === "pending" || status === "claimed" || status === "running") return "warn";
-  return "idle";
-}
-
 function isActiveBuildStatus(status: BuildStatus) {
   return status === "pending" || status === "claimed" || status === "running";
 }
@@ -808,8 +801,8 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Failed to queue Jetson load");
 
-      localStorage.setItem("aura_device_loaded_db", activeDb);
-      window.dispatchEvent(new Event("aura:device-loaded-db"));
+      localStorage.setItem("aura_loaded_db", activeDb);
+      window.dispatchEvent(new Event("aura:loaded-db"));
 
       setStatus(`✅ Queued "${activeDb}" to load on Jetson.`);
     } catch (e: any) {
@@ -866,10 +859,10 @@ export default function DatabasePage() {
         throw new Error(cmdData?.detail || "Jetson delete queue failed");
       }
 
-      const loadedDb = localStorage.getItem("aura_device_loaded_db") || "";
+      const loadedDb = localStorage.getItem("aura_loaded_db") || "";
       if (loadedDb === activeDb) {
-        localStorage.removeItem("aura_device_loaded_db");
-        window.dispatchEvent(new Event("aura:device-loaded-db"));
+        localStorage.removeItem("aura_loaded_db");
+        window.dispatchEvent(new Event("aura:loaded-db"));
       }
 
       const deletedName = activeDb;
@@ -1258,59 +1251,6 @@ export default function DatabasePage() {
                 <div className="db-panel-sub">Create, build, load, and delete vector DBs</div>
               </div>
             </div>
-
-            {(buildMonitorActive || isActiveBuildStatus(buildStatus) || isTerminalBuildStatus(buildStatus)) && (
-              <div
-                style={{
-                  marginTop: 12,
-                  marginBottom: 14,
-                  padding: "14px 16px",
-                  borderRadius: 14,
-                  border:
-                    buildStatusTone(buildStatus) === "bad"
-                      ? "1px solid color-mix(in srgb, var(--status-bad) 35%, var(--card-border))"
-                      : buildStatusTone(buildStatus) === "good"
-                      ? "1px solid color-mix(in srgb, var(--status-good) 35%, var(--card-border))"
-                      : "1px solid color-mix(in srgb, var(--accent) 28%, var(--card-border))",
-                  background:
-                    buildStatusTone(buildStatus) === "bad"
-                      ? "color-mix(in srgb, var(--status-bad) 10%, var(--card-bg))"
-                      : buildStatusTone(buildStatus) === "good"
-                      ? "color-mix(in srgb, var(--status-good) 10%, var(--card-bg))"
-                      : "color-mix(in srgb, var(--accent) 10%, var(--card-bg))",
-                  color: "var(--text)",
-                  boxShadow: "var(--shadow)",
-                }}
-              >
-                <div style={{ fontWeight: 900, fontSize: 15 }}>
-                  {buildStatus === "running"
-                    ? `Vectorizing "${activeDb}" on Jetson`
-                    : buildStatus === "pending"
-                    ? `Queued "${activeDb}" for Jetson build`
-                    : buildStatus === "claimed"
-                    ? `Jetson received "${activeDb}"`
-                    : buildStatus === "completed"
-                    ? `"${activeDb}" build complete`
-                    : buildStatus === "synced"
-                    ? `"${activeDb}" synced back to website`
-                    : prettyBuildStatus(buildStatus)}
-                </div>
-
-                <div style={{ marginTop: 6, fontSize: 13, color: "var(--muted-text)" }}>
-                  {buildStatus === "running"
-                    ? "Documents are being embedded and indexed right now."
-                    : buildStatus === "pending"
-                    ? "The job is waiting for the Jetson to start it."
-                    : buildStatus === "claimed"
-                    ? "The Jetson picked up the job and is preparing the build."
-                    : buildStatus === "completed"
-                    ? "The vector database finished building on the Jetson."
-                    : buildStatus === "synced"
-                    ? "The completed database has been synced back to the website."
-                    : status.replace(/^❌\s*/, "").replace(/^⚠️\s*/, "").replace(/^✅\s*/, "").replace(/^⏳\s*/, "")}
-                </div>
-              </div>
-            )}
 
             <div className="db-box">
               <div className="db-box-title">Active database</div>
