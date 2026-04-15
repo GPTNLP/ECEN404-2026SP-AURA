@@ -45,16 +45,16 @@ VISION_MODES = {
 }
 
 STATUS_STYLES = {
-    "BOOTING":    {"fg": "#7dd3fc", "sub": "Starting services"},
-    "READY":      {"fg": "#a7f3d0", "sub": "Ready"},
-    "LISTENING":  {"fg": "#67e8f9", "sub": "Listening for wake word"},
-    "THINKING":   {"fg": "#fcd34d", "sub": "Thinking"},
-    "SPEAKING":   {"fg": "#c4b5fd", "sub": "Speaking"},
-    "VISION":     {"fg": "#f9a8d4", "sub": "Vision mode active"},
-    "VECTORIZING":{"fg": "#f9a8d4", "sub": "Vectorizing PDFs"},
-    "COMMAND":    {"fg": "#fdba74", "sub": "Running command"},
-    "ERROR":      {"fg": "#fca5a5", "sub": "Check live console"},
-    "OFFLINE":    {"fg": "#94a3b8", "sub": "Waiting for agent"},
+    "BOOTING": {"fg": "#7dd3fc", "sub": "Starting services"},
+    "READY": {"fg": "#a7f3d0", "sub": "Ready"},
+    "LISTENING": {"fg": "#67e8f9", "sub": "Listening for wake word"},
+    "THINKING": {"fg": "#fcd34d", "sub": "Thinking"},
+    "SPEAKING": {"fg": "#c4b5fd", "sub": "Speaking"},
+    "VISION": {"fg": "#f9a8d4", "sub": "Vision mode active"},
+    "VECTORIZING": {"fg": "#f9a8d4", "sub": "Vectorizing PDFs"},
+    "COMMAND": {"fg": "#fdba74", "sub": "Running command"},
+    "ERROR": {"fg": "#fca5a5", "sub": "Check live console"},
+    "OFFLINE": {"fg": "#94a3b8", "sub": "Waiting for agent"},
 }
 
 
@@ -73,7 +73,7 @@ class AuraConsoleApp:
         self.log_queue: queue.Queue[str] = queue.Queue()
 
         self.ui_mode = "home"
-        self.view_mode = "console"       # "console" or "llm"
+        self.view_mode = "console"
         self.active_vision_mode = None
         self.voice_should_resume = False
         self.current_frame_image = None
@@ -87,13 +87,16 @@ class AuraConsoleApp:
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
         self.voice_button_text = tk.StringVar(value="Tap Mic")
-        self.voice_status_text = tk.StringVar(value="Press the mic, speak once, and AURA will respond.")
-        self.voice_result_text = tk.StringVar(value="Last voice result will appear here.")
+        self.voice_status_text = tk.StringVar(
+            value="Press the mic, speak once, and AURA will respond."
+        )
+        self.voice_result_text = tk.StringVar(
+            value="Last voice result will appear here."
+        )
         self.voice_busy = False
 
-        # LLM chat state
         self._llm_thinking = False
-        self._llm_history = []   # list of (role, text) — role: "user"|"assistant"|"error"
+        self._llm_history = []
 
         self._build_ui()
         self._start_reader()
@@ -105,13 +108,27 @@ class AuraConsoleApp:
     def _build_ui(self):
         sw = self.root.winfo_screenwidth()
 
-        title_font       = tkfont.Font(family="Courier", size=max(22, int(sw * 0.030)), weight="bold")
-        sub_font         = tkfont.Font(family="Courier", size=max(11, int(sw * 0.016)))
-        section_font     = tkfont.Font(family="Courier", size=max(17, int(sw * 0.024)), weight="bold")
-        log_font         = tkfont.Font(family="Courier", size=max(9,  int(sw * 0.013)))
-        button_font      = tkfont.Font(family="Courier", size=max(14, int(sw * 0.018)), weight="bold")
-        vision_title_font = tkfont.Font(family="Courier", size=max(18, int(sw * 0.024)), weight="bold")
-        vision_info_font  = tkfont.Font(family="Courier", size=max(12, int(sw * 0.015)))
+        title_font = tkfont.Font(
+            family="Courier", size=max(22, int(sw * 0.030)), weight="bold"
+        )
+        sub_font = tkfont.Font(
+            family="Courier", size=max(11, int(sw * 0.016))
+        )
+        section_font = tkfont.Font(
+            family="Courier", size=max(17, int(sw * 0.024)), weight="bold"
+        )
+        log_font = tkfont.Font(
+            family="Courier", size=max(9, int(sw * 0.013))
+        )
+        button_font = tkfont.Font(
+            family="Courier", size=max(14, int(sw * 0.018)), weight="bold"
+        )
+        vision_title_font = tkfont.Font(
+            family="Courier", size=max(18, int(sw * 0.024)), weight="bold"
+        )
+        vision_info_font = tkfont.Font(
+            family="Courier", size=max(12, int(sw * 0.015))
+        )
 
         outer = tk.Frame(self.root, bg="#05070a")
         outer.pack(fill="both", expand=True, padx=12, pady=12)
@@ -139,73 +156,91 @@ class AuraConsoleApp:
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
-        self.home_frame   = tk.Frame(self.content, bg="#05070a")
+        self.home_frame = tk.Frame(self.content, bg="#05070a")
         self.vision_frame = tk.Frame(self.content, bg="#05070a")
 
-        self._build_home_ui(self.home_frame, sub_font, section_font, log_font, button_font)
-        self._build_vision_ui(self.vision_frame, button_font, vision_title_font, vision_info_font)
+        self._build_home_ui(
+            self.home_frame, sub_font, section_font, log_font, button_font
+        )
+        self._build_vision_ui(
+            self.vision_frame, button_font, vision_title_font, vision_info_font
+        )
 
         self._show_home()
 
+    def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
+        try:
+            _top, bottom = widget.yview()
+            return bottom >= (1.0 - threshold)
+        except Exception:
+            return True
 
-def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
-    try:
-        _top, bottom = widget.yview()
-        return bottom >= (1.0 - threshold)
-    except Exception:
-        return True
+    def _format_live_line(self, line: str):
+        line = (line or "").strip()
+        if not line:
+            return None
 
-def _format_live_line(self, line: str):
-    line = (line or "").strip()
-    if not line:
-        return None
+        if line.startswith("[STATUS] ok"):
+            return None
+        if line.startswith("[UI_STATE]"):
+            return None
+        if line.startswith("=") or line.startswith("-" * 10):
+            return None
+        if line.startswith("RAW TEXT:"):
+            return None
+        if line.startswith("CLEANED TEXT:"):
+            return "Heard: " + line.split(":", 1)[1].strip()
+        if line.startswith("INTENT:"):
+            return "Intent: " + line.split(":", 1)[1].strip().upper()
+        if line.startswith("MOVEMENT:"):
+            value = line.split(":", 1)[1].strip()
+            if value and value != "None":
+                return "Action: " + value
+            return None
+        if "[VOICE] question received:" in line:
+            return "Heard: " + line.split(":", 1)[1].strip()
+        if "[VOICE] speaking:" in line:
+            return "Speaking..."
+        if "[VOICE] answered:" in line:
+            return "Done."
+        if "[VOICE] button heard:" in line:
+            return "Heard: " + line.split(":", 1)[1].strip()
+        if "[VOICE] button capture loading model" in line:
+            return "Loading speech model..."
+        if "[AURA] Listening for command..." in line:
+            return "Listening..."
+        if "[AURA] No speech heard." in line:
+            return "No speech heard."
+        if (
+            "[AURA] Returning to wake mode." in line
+            or "[AURA] Waiting for wake word..." in line
+        ):
+            return None
+        if (
+            "[STARTUP]" in line
+            or "[RAG]" in line
+            or "[TTS]" in line
+            or "[CAMERA]" in line
+            or "[COMMAND]" in line
+        ):
+            return line
+        if "error" in line.lower() or "failed" in line.lower():
+            return line
+        return line[:140]
 
-    if line.startswith("[STATUS] ok"):
-        return None
-    if line.startswith("[UI_STATE]"):
-        return None
-    if line.startswith("=") or line.startswith("-" * 10):
-        return None
-    if line.startswith("RAW TEXT:"):
-        return None
-    if line.startswith("CLEANED TEXT:"):
-        return "Heard: " + line.split(":", 1)[1].strip()
-    if line.startswith("INTENT:"):
-        return "Intent: " + line.split(":", 1)[1].strip().upper()
-    if line.startswith("MOVEMENT:"):
-        value = line.split(":", 1)[1].strip()
-        if value and value != "None":
-            return "Action: " + value
-        return None
-    if "[VOICE] question received:" in line:
-        return "Heard: " + line.split(":", 1)[1].strip()
-    if "[VOICE] speaking:" in line:
-        return "Speaking..."
-    if "[VOICE] answered:" in line:
-        return "Done."
-    if "[VOICE] button heard:" in line:
-        return "Heard: " + line.split(":", 1)[1].strip()
-    if "[VOICE] button capture loading model" in line:
-        return "Loading speech model..."
-    if "[AURA] Listening for command..." in line:
-        return "Listening..."
-    if "[AURA] No speech heard." in line:
-        return "No speech heard."
-    if "[AURA] Returning to wake mode." in line or "[AURA] Waiting for wake word..." in line:
-        return None
-    if "[STARTUP]" in line or "[RAG]" in line or "[TTS]" in line or "[CAMERA]" in line or "[COMMAND]" in line:
-        return line
-    if "error" in line.lower() or "failed" in line.lower():
-        return line
-    return line[:140]
-
-def _set_voice_busy(self, busy: bool, status: str = ""):
-    self.voice_busy = busy
-    self.voice_button_text.set("Listening..." if busy else "Tap Mic")
-    self.voice_status_text.set(status or ("Listening for your question..." if busy else "Press the mic, speak once, and AURA will respond."))
+    def _set_voice_busy(self, busy: bool, status: str = ""):
+        self.voice_busy = busy
+        self.voice_button_text.set("Listening..." if busy else "Tap Mic")
+        self.voice_status_text.set(
+            status
+            or (
+                "Listening for your question..."
+                if busy
+                else "Press the mic, speak once, and AURA will respond."
+            )
+        )
 
     def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
-        # ── Mode toggle row (replaces old READY status card) ─────────────────
         mode_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -251,7 +286,6 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
         )
         self.llm_btn.pack(side="left")
 
-        # Mini status indicator on the right of the mode card
         self.status_mini_label = tk.Label(
             mode_card,
             textvariable=self.status_text,
@@ -263,7 +297,6 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
         )
         self.status_mini_label.pack(side="right", fill="y")
 
-        # ── Vision modes ─────────────────────────────────────────────────────
         vision_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -305,7 +338,6 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
             )
             btn.grid(row=0, column=idx, sticky="nsew", padx=6)
             buttons_wrap.grid_columnconfigure(idx, weight=1)
-
 
         voice_card = tk.Frame(
             parent,
@@ -368,12 +400,12 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
             padx=14,
             pady=(0, 12),
         ).pack(fill="x")
-        # ── Content stack (Console / LLM) ─────────────────────────────────
+
         self.content_stack = tk.Frame(parent, bg="#05070a")
         self.content_stack.pack(fill="both", expand=True)
 
         self.console_panel = tk.Frame(self.content_stack, bg="#05070a")
-        self.llm_panel     = tk.Frame(self.content_stack, bg="#05070a")
+        self.llm_panel = tk.Frame(self.content_stack, bg="#05070a")
 
         self._build_console_panel(self.console_panel, section_font, log_font)
         self._build_llm_panel(self.llm_panel, section_font, log_font, button_font)
@@ -448,17 +480,19 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
         )
         self.llm_chat_text.pack(fill="both", expand=True)
 
-        # Colour tags
-        bold_log = tkfont.Font(family="Courier", size=max(9, int(log_font.cget("size"))), weight="bold")
-        self.llm_chat_text.tag_configure("user_label",  fg="#14f195",  font=bold_log)
-        self.llm_chat_text.tag_configure("user_text",   fg="#ffffff")
-        self.llm_chat_text.tag_configure("aura_label",  fg="#fcd34d",  font=bold_log)
-        self.llm_chat_text.tag_configure("aura_text",   fg="#cbd5e1")
-        self.llm_chat_text.tag_configure("thinking",    fg="#64748b")
-        self.llm_chat_text.tag_configure("error_label", fg="#fca5a5",  font=bold_log)
-        self.llm_chat_text.tag_configure("error_text",  fg="#fca5a5")
+        bold_log = tkfont.Font(
+            family="Courier",
+            size=max(9, int(log_font.cget("size"))),
+            weight="bold",
+        )
+        self.llm_chat_text.tag_configure("user_label", fg="#14f195", font=bold_log)
+        self.llm_chat_text.tag_configure("user_text", fg="#ffffff")
+        self.llm_chat_text.tag_configure("aura_label", fg="#fcd34d", font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text", fg="#cbd5e1")
+        self.llm_chat_text.tag_configure("thinking", fg="#64748b")
+        self.llm_chat_text.tag_configure("error_label", fg="#fca5a5", font=bold_log)
+        self.llm_chat_text.tag_configure("error_text", fg="#fca5a5")
 
-        # Input row
         input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=8, padx=8)
         input_frame.pack(fill="x")
 
@@ -623,18 +657,17 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
         self.vision_frame.pack(fill="both", expand=True)
 
     def _switch_view(self, mode: str):
-        """Toggle between console and LLM chat panels."""
         self.view_mode = mode
         if mode == "llm":
             self.console_panel.pack_forget()
             self.llm_panel.pack(fill="both", expand=True)
             self.console_btn.configure(bg="#111827", fg="#ecfeff")
-            self.llm_btn.configure(bg="#1d4ed8",  fg="#ffffff")
+            self.llm_btn.configure(bg="#1d4ed8", fg="#ffffff")
             self.llm_entry.focus_set()
         else:
             self.llm_panel.pack_forget()
             self.console_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(bg="#1d4ed8",  fg="#ffffff")
+            self.console_btn.configure(bg="#1d4ed8", fg="#ffffff")
             self.llm_btn.configure(bg="#111827", fg="#ecfeff")
 
     # ── LLM chat helpers ──────────────────────────────────────────────────────
@@ -674,7 +707,6 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
         self.llm_entry.focus_set()
 
     def _llm_redraw(self):
-        """Rebuild the chat Text widget from history + optional thinking indicator."""
         should_follow = self._is_scrolled_near_bottom(self.llm_chat_text)
         self.llm_chat_text.configure(state="normal")
         self.llm_chat_text.delete("1.0", "end")
@@ -686,7 +718,7 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
             elif role == "error":
                 self.llm_chat_text.insert("end", "\nERROR: ", "error_label")
                 self.llm_chat_text.insert("end", text + "\n", "error_text")
-            else:  # assistant
+            else:
                 self.llm_chat_text.insert("end", "\nAURA: ", "aura_label")
                 self.llm_chat_text.insert("end", text + "\n", "aura_text")
 
@@ -697,44 +729,47 @@ def _set_voice_busy(self, busy: bool, status: str = ""):
             self.llm_chat_text.see("end")
         self.llm_chat_text.configure(state="disabled")
 
+    def _run_voice_button(self):
+        if self.voice_busy:
+            return
 
-def _run_voice_button(self):
-    if self.voice_busy:
-        return
+        self._set_voice_busy(True, "Listening for your question...")
+        self.voice_result_text.set(
+            "Speak normally. AURA will process after about 1 second of silence."
+        )
 
-    self._set_voice_busy(True, "Listening for your question...")
-    self.voice_result_text.set("Speak normally. AURA will process after about 1 second of silence.")
+        def _call():
+            try:
+                result = self._http_json_post("/voice/listen_once", {}, timeout=180.0)
+                self.root.after(0, lambda: self._voice_request_done(result, None))
+            except Exception as exc:
+                self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
 
-    def _call():
-        try:
-            result = self._http_json_post("/voice/listen_once", {}, timeout=180.0)
-            self.root.after(0, lambda: self._voice_request_done(result, None))
-        except Exception as exc:
-            self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
+        threading.Thread(target=_call, daemon=True).start()
 
-    threading.Thread(target=_call, daemon=True).start()
+    def _voice_request_done(self, result, error):
+        self._set_voice_busy(False)
 
-def _voice_request_done(self, result, error):
-    self._set_voice_busy(False)
+        if error:
+            self.voice_status_text.set("Voice request failed.")
+            self.voice_result_text.set(error)
+            return
 
-    if error:
-        self.voice_status_text.set("Voice request failed.")
-        self.voice_result_text.set(error)
-        return
+        transcript = (result or {}).get("transcript", "").strip()
+        response_text = (result or {}).get("response_text", "").strip()
+        action = (result or {}).get("action", "").strip() or "unknown"
 
-    transcript = (result or {}).get("transcript", "").strip()
-    response_text = (result or {}).get("response_text", "").strip()
-    action = (result or {}).get("action", "").strip() or "unknown"
-
-    if transcript:
-        self.voice_status_text.set(f"Done ({action}).")
-        pieces = [f'Heard: "{transcript}"']
-        if response_text:
-            pieces.append(f'Result: "{response_text}"')
-        self.voice_result_text.set("   ".join(pieces))
-    else:
-        self.voice_status_text.set("No speech detected.")
-        self.voice_result_text.set(response_text or "Try again and speak a little closer to the mic.")
+        if transcript:
+            self.voice_status_text.set(f"Done ({action}).")
+            pieces = [f'Heard: "{transcript}"']
+            if response_text:
+                pieces.append(f'Result: "{response_text}"')
+            self.voice_result_text.set("   ".join(pieces))
+        else:
+            self.voice_status_text.set("No speech detected.")
+            self.voice_result_text.set(
+                response_text or "Try again and speak a little closer to the mic."
+            )
 
     # ── Journal reader ────────────────────────────────────────────────────────
 
@@ -781,24 +816,23 @@ def _voice_request_done(self, result, error):
         if self.running:
             self.root.after(POLL_MS, self._poll_logs)
 
+    def _append_log(self, line: str):
+        formatted = self._format_live_line(line)
+        if not formatted:
+            return
 
-def _append_log(self, line: str):
-    formatted = self._format_live_line(line)
-    if not formatted:
-        return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        display_line = f"[{timestamp}] {formatted}\n"
+        should_follow = self._is_scrolled_near_bottom(self.log_text)
 
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    display_line = f"[{timestamp}] {formatted}\n"
-    should_follow = self._is_scrolled_near_bottom(self.log_text)
-
-    self.log_text.configure(state="normal")
-    self.log_text.insert("end", display_line)
-    line_count = int(self.log_text.index("end-1c").split(".")[0])
-    if line_count > MAX_LOG_LINES:
-        self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
-    if should_follow:
-        self.log_text.see("end")
-    self.log_text.configure(state="disabled")
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", display_line)
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            self.log_text.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+        if should_follow:
+            self.log_text.see("end")
+        self.log_text.configure(state="disabled")
 
     # ── Status helpers ────────────────────────────────────────────────────────
 
@@ -826,10 +860,14 @@ def _append_log(self, line: str):
         if "[voice]" in lower and "answered" in lower:
             self._set_status("SPEAKING", clean)
             return
-        if "[chat]" in lower and ("running rag query" in lower or "received command" in lower):
+        if "[chat]" in lower and (
+            "running rag query" in lower or "received command" in lower
+        ):
             self._set_status("THINKING", clean)
             return
-        if "[jetson db]" in lower and ("loading" in lower or "loaded" in lower or "vector" in lower or "build" in lower):
+        if "[jetson db]" in lower and (
+            "loading" in lower or "loaded" in lower or "vector" in lower or "build" in lower
+        ):
             self._set_status("VECTORIZING", clean)
             return
         if "[command]" in lower:
@@ -873,7 +911,7 @@ def _append_log(self, line: str):
             active = mode == self.active_vision_mode
             btn.configure(
                 bg="#1d4ed8" if active else "#111827",
-                fg="#ffffff"  if active else "#ecfeff",
+                fg="#ffffff" if active else "#ecfeff",
             )
 
     def enter_vision_mode(self, mode: str):
@@ -973,19 +1011,19 @@ def _append_log(self, line: str):
             return
 
         try:
-            status     = self._http_json("GET", "/camera/status")
+            status = self._http_json("GET", "/camera/status")
             detections = self._http_json("GET", "/camera/detections")
         except Exception as exc:
             self.vision_meta_text.set(f"Status unavailable: {exc}")
             return
 
         model_loaded = status.get("models_loaded", {}).get(self.active_vision_mode)
-        count      = int(status.get("detection_count") or 0)
-        fps        = status.get("actual_fps") or status.get("fps") or 0
+        count = int(status.get("detection_count") or 0)
+        fps = status.get("actual_fps") or status.get("fps") or 0
         resolution = status.get("actual_resolution") or {}
-        w = resolution.get("width")  or status.get("resolution", {}).get("width")  or "?"
+        w = resolution.get("width") or status.get("resolution", {}).get("width") or "?"
         h = resolution.get("height") or status.get("resolution", {}).get("height") or "?"
-        backend    = status.get("capture_backend") or "unknown"
+        backend = status.get("capture_backend") or "unknown"
         last_error = status.get("last_error")
 
         self.vision_meta_text.set(
@@ -995,7 +1033,7 @@ def _append_log(self, line: str):
 
         items = detections.get("detections", []) or []
         if not model_loaded:
-            path_map   = status.get("model_paths", {})
+            path_map = status.get("model_paths", {})
             model_path = path_map.get(self.active_vision_mode, "model file missing")
             self.detection_text.set(
                 f"Model for {self.active_vision_mode} is not loaded. Expected path: {model_path}."
@@ -1009,15 +1047,17 @@ def _append_log(self, line: str):
             if last_error:
                 self.vision_status_text.set(f"Vision warning: {last_error}")
             else:
-                self.vision_status_text.set(VISION_MODES[self.active_vision_mode]["subtitle"])
+                self.vision_status_text.set(
+                    VISION_MODES[self.active_vision_mode]["subtitle"]
+                )
             return
 
         counts = Counter(item.get("label", "unknown") for item in items)
-        lines  = []
+        lines = []
         for idx, item in enumerate(items[:8], start=1):
-            label    = item.get("label", "unknown")
-            conf     = item.get("confidence")
-            bbox     = item.get("bbox") or []
+            label = item.get("label", "unknown")
+            conf = item.get("confidence")
+            bbox = item.get("bbox") or []
             bbox_text = f" bbox={bbox}" if bbox else ""
             conf_text = f" ({conf:.2f})" if isinstance(conf, (float, int)) else ""
             lines.append(f"{idx}. {label}{conf_text}{bbox_text}")
@@ -1039,7 +1079,14 @@ def _append_log(self, line: str):
                 self.reader_process.terminate()
         except Exception:
             pass
-        self.root.destroy()
+        try:
+            self.root.quit()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 def main():
