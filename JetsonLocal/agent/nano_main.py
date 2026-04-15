@@ -186,76 +186,45 @@ class AuraConsoleApp:
             return None
         if line.startswith("RAW TEXT:"):
             return None
-
         if line.startswith("CLEANED TEXT:"):
             return "Heard: " + line.split(":", 1)[1].strip()
-
         if line.startswith("INTENT:"):
-            value = line.split(":", 1)[1].strip().upper()
-            if value == "LLM":
-                return "Mode: CHAT"
-            if value == "MOVEMENT":
-                return "Mode: MOVE"
-            return "Mode: " + value
-
+            return "Intent: " + line.split(":", 1)[1].strip().upper()
         if line.startswith("MOVEMENT:"):
             value = line.split(":", 1)[1].strip()
             if value and value != "None":
-                return "Move: " + value.upper()
+                return "Action: " + value
             return None
-
         if "[VOICE] question received:" in line:
             return "Heard: " + line.split(":", 1)[1].strip()
-
         if "[VOICE] speaking:" in line:
             return "Speaking..."
-
         if "[VOICE] answered:" in line:
             return "Done."
-
         if "[VOICE] button heard:" in line:
             return "Heard: " + line.split(":", 1)[1].strip()
-
         if "[VOICE] button capture loading model" in line:
             return "Loading speech model..."
-
         if "[AURA] Listening for command..." in line:
             return "Listening..."
-
         if "[AURA] No speech heard." in line:
             return "No speech heard."
-
-        if "[STARTUP] RAG build worker ready" in line:
-            return "RAG ready"
-        if "[STARTUP] telemetry agent running" in line:
-            return "Telemetry online"
-        if "[STARTUP] local device id=" in line:
-            return "Device ready"
-        if "[STARTUP] idle while website activates raw mode" in line:
-            return "Camera idle"
-        if "[STARTUP] LLM warmup skipped" in line:
-            return "LLM warmup skipped"
-        if "[CAMERA] ready" in line:
-            return "Camera ready"
-        if "[SERIAL] Connect failed:" in line:
-            return "ESP32 not connected"
-        if "could not open port" in line.lower():
-            return None
-        if "/dev/ttyACM0" in line:
-            return None
-        if "message_body should be a bytes-like object or an iterable, got <class 'float'>" in line:
-            return "TTS payload error"
-
         if (
             "[AURA] Returning to wake mode." in line
             or "[AURA] Waiting for wake word..." in line
         ):
             return None
-
+        if (
+            "[STARTUP]" in line
+            or "[RAG]" in line
+            or "[TTS]" in line
+            or "[CAMERA]" in line
+            or "[COMMAND]" in line
+        ):
+            return line
         if "error" in line.lower() or "failed" in line.lower():
-            return line[:110]
-
-        return None
+            return line
+        return line[:140]
 
     def _set_voice_busy(self, busy: bool, status: str = ""):
         self.voice_busy = busy
@@ -286,17 +255,15 @@ class AuraConsoleApp:
             text="CONSOLE",
             command=lambda: self._switch_view("console"),
             font=button_font,
-            bg="#16a34a",
+            bg="#1d4ed8",
             fg="#ffffff",
-            activebackground="#15803d",
+            activebackground="#2563eb",
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
             cursor="hand2",
             padx=20,
             pady=12,
-            highlightthickness=1,
-            highlightbackground="#22c55e",
         )
         self.console_btn.pack(side="left", padx=(0, 8))
 
@@ -307,15 +274,13 @@ class AuraConsoleApp:
             font=button_font,
             bg="#111827",
             fg="#ecfeff",
-            activebackground="#15803d",
+            activebackground="#1d4ed8",
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
             cursor="hand2",
             padx=20,
             pady=12,
-            highlightthickness=1,
-            highlightbackground="#94a3b8",
         )
         self.llm_btn.pack(side="left")
 
@@ -338,8 +303,19 @@ class AuraConsoleApp:
         )
         vision_card.pack(fill="x", pady=(0, 10))
 
+        tk.Label(
+            vision_card,
+            text="VISION MODES",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+            padx=14,
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
+
         buttons_wrap = tk.Frame(vision_card, bg="#0b0f14")
-        buttons_wrap.pack(fill="x", padx=12, pady=12)
+        buttons_wrap.pack(fill="x", padx=12, pady=(0, 12))
 
         for idx, mode in enumerate(("face", "detection", "colorcode")):
             cfg = VISION_MODES[mode]
@@ -348,17 +324,15 @@ class AuraConsoleApp:
                 text=cfg["button"],
                 command=lambda m=mode: self.enter_vision_mode(m),
                 font=button_font,
-                bg="#166534",
-                fg="#ffffff",
-                activebackground="#15803d",
+                bg="#111827",
+                fg="#ecfeff",
+                activebackground="#1d4ed8",
                 activeforeground="#ffffff",
                 relief="flat",
                 bd=0,
                 cursor="hand2",
                 padx=20,
                 pady=18,
-                highlightthickness=1,
-                highlightbackground="#22c55e",
             )
             btn.grid(row=0, column=idx, sticky="nsew", padx=6)
             buttons_wrap.grid_columnconfigure(idx, weight=1)
@@ -388,26 +362,24 @@ class AuraConsoleApp:
             textvariable=self.voice_button_text,
             command=self._run_voice_button,
             font=button_font,
-            bg="#16a34a",
+            bg="#1d4ed8",
             fg="#ffffff",
-            activebackground="#15803d",
+            activebackground="#2563eb",
             activeforeground="#ffffff",
             relief="flat",
             bd=0,
             cursor="hand2",
             padx=20,
             pady=12,
-            highlightthickness=1,
-            highlightbackground="#22c55e",
         )
         self.voice_button.pack(side="right")
 
         tk.Label(
             voice_card,
             textvariable=self.voice_status_text,
-            fg="#cbd5e1",
+            fg="#e2e8f0",
             bg="#0b0f14",
-            font=("Courier", max(10, int(self.root.winfo_screenwidth() * 0.012))),
+            font=log_font,
             anchor="w",
             justify="left",
             padx=14,
@@ -419,7 +391,7 @@ class AuraConsoleApp:
             textvariable=self.voice_result_text,
             fg="#94a3b8",
             bg="#0b0f14",
-            font=("Courier", max(10, int(self.root.winfo_screenwidth() * 0.012))),
+            font=log_font,
             anchor="w",
             justify="left",
             wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
@@ -458,12 +430,6 @@ class AuraConsoleApp:
             pady=10,
         ).pack(fill="x")
 
-        live_font = tkfont.Font(
-            family="Courier",
-            size=max(11, int(self.root.winfo_screenwidth() * 0.015)),
-            weight="bold",
-        )
-
         self.log_text = tk.Text(
             logs_card,
             bg="#05070a",
@@ -471,16 +437,13 @@ class AuraConsoleApp:
             insertbackground="#9effc7",
             relief="flat",
             wrap="word",
-            font=live_font,
-            padx=14,
-            pady=14,
+            font=log_font,
+            padx=12,
+            pady=12,
             state="disabled",
-            spacing1=2,
-            spacing2=2,
-            spacing3=2,
         )
         self.log_text.pack(fill="both", expand=True)
-        
+
     def _build_llm_panel(self, parent, section_font, log_font, button_font):
         chat_card = tk.Frame(
             parent,
@@ -766,31 +729,15 @@ class AuraConsoleApp:
         if mode == "llm":
             self.console_panel.pack_forget()
             self.llm_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(
-                bg="#111827",
-                fg="#ecfeff",
-                highlightbackground="#94a3b8",
-            )
-            self.llm_btn.configure(
-                bg="#16a34a",
-                fg="#ffffff",
-                highlightbackground="#22c55e",
-            )
+            self.console_btn.configure(bg="#111827", fg="#ecfeff")
+            self.llm_btn.configure(bg="#1d4ed8", fg="#ffffff")
             self.llm_entry.focus_set()
         else:
             self.llm_panel.pack_forget()
             self.console_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(
-                bg="#16a34a",
-                fg="#ffffff",
-                highlightbackground="#22c55e",
-            )
-            self.llm_btn.configure(
-                bg="#111827",
-                fg="#ecfeff",
-                highlightbackground="#94a3b8",
-            )
-            
+            self.console_btn.configure(bg="#1d4ed8", fg="#ffffff")
+            self.llm_btn.configure(bg="#111827", fg="#ecfeff")
+
     def _llm_submit(self):
         query = self.llm_entry.get().strip()
         if not query or self._llm_thinking:
@@ -1021,11 +968,8 @@ class AuraConsoleApp:
         for mode, btn in self.mode_buttons.items():
             active = mode == self.active_vision_mode
             btn.configure(
-                bg="#16a34a" if active else "#166534",
-                fg="#ffffff",
-                activebackground="#15803d",
-                activeforeground="#ffffff",
-                highlightbackground="#22c55e",
+                bg="#1d4ed8" if active else "#111827",
+                fg="#ffffff" if active else "#ecfeff",
             )
 
     def enter_vision_mode(self, mode: str):
