@@ -24,8 +24,28 @@ if [ "${EUID:-$(id -u)}" -eq 0 ]; then
 fi
 
 # -----------------------------
+# Helpers
+# -----------------------------
+ensure_user_owns_path() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        echo "Ensuring ownership of: $path"
+        sudo chown -R "$USER_NAME:$USER_NAME" "$path" || true
+    fi
+}
+
+safe_remove_path() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        echo "Removing existing path: $path"
+        sudo rm -rf "$path"
+    fi
+}
+
+# -----------------------------
 # System packages
 # -----------------------------
+echo "Installing system dependencies..."
 sudo apt-get update
 
 sudo apt-get install -y \
@@ -46,7 +66,7 @@ echo "System dependencies installed"
 # -----------------------------
 # Install Ollama if missing
 # -----------------------------
-if ! command -v ollama &> /dev/null; then
+if ! command -v ollama >/dev/null 2>&1; then
     echo "Installing Ollama..."
     curl -fsSL https://ollama.com/install.sh | sh
 fi
@@ -54,27 +74,28 @@ fi
 sudo systemctl enable ollama
 sudo systemctl start ollama
 
-# Force Ollama to use all GPU layers and enable performance features.
 OLLAMA_SVC="/etc/systemd/system/ollama.service"
 if [ -f "$OLLAMA_SVC" ]; then
     CHANGED=0
-    if ! grep -q "OLLAMA_NUM_GPU" "$OLLAMA_SVC"; then
+
+    if ! grep -q 'OLLAMA_NUM_GPU' "$OLLAMA_SVC"; then
         sudo sed -i '/\[Service\]/a Environment="OLLAMA_NUM_GPU=999"' "$OLLAMA_SVC"
         CHANGED=1
     fi
-    if ! grep -q "OLLAMA_FLASH_ATTENTION" "$OLLAMA_SVC"; then
+    if ! grep -q 'OLLAMA_FLASH_ATTENTION' "$OLLAMA_SVC"; then
         sudo sed -i '/\[Service\]/a Environment="OLLAMA_FLASH_ATTENTION=1"' "$OLLAMA_SVC"
         CHANGED=1
     fi
-    if ! grep -q "OLLAMA_KV_CACHE_TYPE" "$OLLAMA_SVC"; then
+    if ! grep -q 'OLLAMA_KV_CACHE_TYPE' "$OLLAMA_SVC"; then
         sudo sed -i '/\[Service\]/a Environment="OLLAMA_KV_CACHE_TYPE=q8_0"' "$OLLAMA_SVC"
         CHANGED=1
     fi
+
     if [ "$CHANGED" -eq 1 ]; then
         sudo systemctl daemon-reload
         sudo systemctl restart ollama
         sleep 3
-        echo "Ollama GPU environment configured (flash attention + q8_0 KV cache)"
+        echo "Ollama GPU environment configured"
     fi
 fi
 
@@ -84,24 +105,35 @@ ollama pull llama3.2:1b
 ollama pull nomic-embed-text
 
 # -----------------------------
-# Create clean venv
+# Clean + rebuild venv
 # -----------------------------
-if [ -d "$PROJECT_DIR/aura_env" ]; then
-    echo "Removing existing aura_env to fix broken pip/venv state..."
-    rm -rf "$PROJECT_DIR/aura_env"
+VENV_DIR="$PROJECT_DIR/aura_env"
+
+if [ -d "$VENV_DIR" ]; then
+    echo "Existing aura_env detected"
+    ensure_user_owns_path "$VENV_DIR"
+    safe_remove_path "$VENV_DIR"
 fi
 
-python3 -m venv "$PROJECT_DIR/aura_env"
-source "$PROJECT_DIR/aura_env/bin/activate"
+echo "Creating fresh virtual environment..."
+python3 -m venv "$VENV_DIR"
+
+ensure_user_owns_path "$VENV_DIR"
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
 
 export PIP_REQUIRE_VIRTUALENV=true
 unset PIP_USER
 unset PYTHONUSERBASE
 
+echo "Upgrading pip/setuptools/wheel..."
 python -m pip install --upgrade pip setuptools wheel
+
+echo "Installing Python requirements..."
 python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 
-echo "Installing Jetson specific libraries"
+echo "Installing Jetson-specific Python libraries..."
 python -m pip install --no-user jetson-stats SpeechRecognition
 
 # -----------------------------
@@ -113,12 +145,13 @@ cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 set -Eeuo pipefail
 
 cd "$PROJECT_DIR"
-source "$PROJECT_DIR/aura_env/bin/activate"
+source "$VENV_DIR/bin/activate"
 
 exec python agent/main.py
 EOF
 
 chmod +x "$PROJECT_DIR/start_aura.sh"
+ensure_user_owns_path "$PROJECT_DIR/start_aura.sh"
 
 # -----------------------------
 # Serial permissions via udev
@@ -180,7 +213,13 @@ Exec=/bin/bash -lc 'sleep 3; OUTPUT=$(xrandr --query | awk "/ connected/{print \
 X-GNOME-Autostart-enabled=true
 EOF
 
-chown -R "$USER_NAME:$USER_NAME" "$USER_HOME/.config"
+sudo chown -R "$USER_NAME:$USER_NAME" "$USER_HOME/.config"
+
+# -----------------------------
+# Final ownership cleanup
+# -----------------------------
+ensure_user_owns_path "$PROJECT_DIR"
+ensure_user_owns_path "$VENV_DIR"
 
 # -----------------------------
 # Done
@@ -191,15 +230,19 @@ echo "Setup Complete"
 echo "===================================="
 echo ""
 echo "What this now does:"
-echo "1. Rebuilds aura_env cleanly"
-echo "2. Installs all Python/system dependencies into the venv"
-echo "3. Auto-starts agent/main.py on boot"
-echo "4. Auto-applies /dev/ttyACM0 permissions"
-echo "5. Auto-rotates display right on login"
+echo "1. Fixes old root-owned aura_env issues"
+echo "2. Rebuilds aura_env cleanly"
+echo "3. Installs all Python/system dependencies into the venv"
+echo "4. Auto-starts agent/main.py on boot"
+echo "5. Auto-applies /dev/ttyACM0 permissions"
+echo "6. Auto-rotates display right on login"
 echo ""
 echo "Useful commands:"
 echo "systemctl status $SERVICE_NAME"
 echo "journalctl -u $SERVICE_NAME -f"
+echo ""
+echo "If you still hit permission issues, run this once:"
+echo "sudo chown -R $USER_NAME:$USER_NAME \"$PROJECT_DIR\""
 echo ""
 echo "Reboot recommended:"
 echo "sudo reboot"
