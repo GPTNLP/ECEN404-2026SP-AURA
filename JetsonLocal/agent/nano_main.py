@@ -755,8 +755,6 @@ class AuraConsoleApp:
         if not line:
             return None
 
-        if line.startswith("[STATUS] ok"):
-            return None
         if line.startswith("[UI_STATE]"):
             return None
         if line.startswith("=") or line.startswith("-" * 10):
@@ -819,25 +817,25 @@ class AuraConsoleApp:
             return "Camera ready"
         if "[SERIAL] Connect failed:" in line:
             return "ESP32 not connected"
-        if "could not open port" in line.lower():
-            return None
-        if "/dev/ttyACM0" in line:
-            return None
-        if "message_body should be a bytes-like object or an iterable, got <class 'float'>" in line:
-            return "TTS payload error"
 
-        if "[RAG]" in line:
-            return "RAG event"
-        if "[TTS]" in line:
-            return "TTS event"
-        if "[COMMAND]" in line:
-            return line[:110]
+        if "[UI]" in line or "[UI ERROR]" in line:
+            return line
 
         if "error" in line.lower() or "failed" in line.lower():
-            return line[:110]
+            return line[:120]
+
+        if (
+            "[STARTUP]" in line
+            or "[RAG]" in line
+            or "[TTS]" in line
+            or "[CAMERA]" in line
+            or "[COMMAND]" in line
+            or "[CHAT]" in line
+            or "[VOICE]" in line
+        ):
+            return line[:120]
 
         return None
-
     # =========================
     # Journal reader
     # =========================
@@ -847,29 +845,46 @@ class AuraConsoleApp:
         thread.start()
 
     def _reader_worker(self):
-        cmd = ["journalctl", "-u", SERVICE_NAME, "-f", "-n", "150", "--no-pager", "-o", "cat"]
-        try:
-            self.reader_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+        commands = [
+            ["journalctl", "-u", SERVICE_NAME, "-f", "-n", "150", "--no-pager", "-o", "cat"],
+            ["journalctl", "-f", "-n", "150", "--no-pager", "-o", "cat"],
+        ]
+
+        last_error = None
+
+        for cmd in commands:
+            try:
+                self.log_queue.put(f"[UI] Log source: {' '.join(cmd)}")
+                self.reader_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                )
+
+                if self.reader_process.stdout is None:
+                    raise RuntimeError("journalctl stdout unavailable")
+
+                for raw_line in self.reader_process.stdout:
+                    if not self.running:
+                        break
+                    line = raw_line.rstrip("\n")
+                    if line.strip():
+                        self.log_queue.put(line)
+
+                return
+
+            except Exception as exc:
+                last_error = exc
+                self.log_queue.put(f"[UI ERROR] Log source failed: {exc}")
+
+        if last_error is not None:
+            self.log_queue.put(
+                "[UI ERROR] Could not attach to journalctl. "
+                "If you launched agent/main.py manually, the UI will not see those logs here."
             )
-        except Exception as exc:
-            self.log_queue.put(f"[UI ERROR] Failed to start journal reader: {exc}")
-            return
-
-        if self.reader_process.stdout is None:
-            self.log_queue.put("[UI ERROR] journalctl stdout unavailable")
-            return
-
-        for raw_line in self.reader_process.stdout:
-            if not self.running:
-                break
-            line = raw_line.rstrip("\n")
-            if line.strip():
-                self.log_queue.put(line)
+            
 
     def _poll_logs(self):
         processed = 0
