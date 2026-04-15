@@ -105,20 +105,28 @@ ollama pull llama3.2:1b
 ollama pull nomic-embed-text
 
 # -----------------------------
-# Clean + rebuild venv
+# Reuse or rebuild venv
 # -----------------------------
 VENV_DIR="$PROJECT_DIR/aura_env"
+REBUILD_VENV="${REBUILD_VENV:-0}"
 
 if [ -d "$VENV_DIR" ]; then
     echo "Existing aura_env detected"
     ensure_user_owns_path "$VENV_DIR"
-    safe_remove_path "$VENV_DIR"
+
+    if [ "$REBUILD_VENV" = "1" ]; then
+        echo "REBUILD_VENV=1 -> removing old venv"
+        safe_remove_path "$VENV_DIR"
+    fi
 fi
 
-echo "Creating fresh virtual environment..."
-python3 -m venv "$VENV_DIR"
-
-ensure_user_owns_path "$VENV_DIR"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating fresh virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    ensure_user_owns_path "$VENV_DIR"
+else
+    echo "Reusing existing virtual environment"
+fi
 
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
@@ -134,7 +142,7 @@ echo "Installing Python requirements..."
 python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 
 echo "Installing Jetson-specific Python libraries..."
-python -m pip install --no-user jetson-stats SpeechRecognition
+python -m pip install --no-user jetson-stats SpeechRecognition Pillow
 
 # -----------------------------
 # Create startup launcher
@@ -231,11 +239,12 @@ echo "===================================="
 echo ""
 echo "What this now does:"
 echo "1. Fixes old root-owned aura_env issues"
-echo "2. Rebuilds aura_env cleanly"
-echo "3. Installs all Python/system dependencies into the venv"
-echo "4. Auto-starts agent/main.py on boot"
-echo "5. Auto-applies /dev/ttyACM0 permissions"
-echo "6. Auto-rotates display right on login"
+echo "2. Reuses aura_env by default"
+echo "3. Rebuilds aura_env only if REBUILD_VENV=1"
+echo "4. Installs all Python/system dependencies into the venv"
+echo "5. Auto-starts agent/main.py on boot"
+echo "6. Auto-applies /dev/ttyACM0 permissions"
+echo "7. Auto-rotates display left on login"
 echo ""
 echo "Useful commands:"
 echo "systemctl status $SERVICE_NAME"

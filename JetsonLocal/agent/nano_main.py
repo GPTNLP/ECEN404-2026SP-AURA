@@ -183,6 +183,13 @@ class AuraConsoleApp:
 
         self._show_home()
 
+    def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
+        try:
+            _top, bottom = widget.yview()
+            return bottom >= (1.0 - threshold)
+        except Exception:
+            return True
+    
     def _outline_button(
         self,
         parent,
