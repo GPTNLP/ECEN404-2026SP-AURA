@@ -1,44 +1,57 @@
-/* Container to push the footer to the very bottom of the screen */
+/* 1. LOCK THE SCREEN HEIGHT */
 .home-container {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh; /* Locked strictly to exactly one screen height */
+  overflow: hidden; /* Ban the scrollbar */
+  background: var(--bg); 
 }
 
 /* TOP HEADER: Texas A&M */
 .home-header {
   width: 100%;
   display: flex;
-  justify-content: center; /* Change to flex-start if you want it on the left */
-  padding: 20px 40px;
+  justify-content: center;
+  padding: 15px 40px; /* Tightened padding to save space */
   background-color: var(--bg-color, #ffffff);
   border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  flex-shrink: 0; /* Prevents the header from getting squished */
 }
 
 .tamu-logo {
-  max-height: 70px;
+  height: 50px; 
   width: auto;
   object-fit: contain;
 }
 
-/* MAIN CONTENT */
+/* MAIN CONTENT (The Login Card) */
 .home-content {
-  flex: 1; /* This forces the footer to sit at the bottom */
-  padding: 40px;
+  flex: 1; /* Automatically stretches to fill the exact middle space */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow-y: auto;
+}
+
+/* THE MAGIC OVERRIDE: Strips the 100vh from your existing login.css */
+.aura-login.login-page.home-content {
+  min-height: auto !important; 
+  padding: 0 !important;
 }
 
 /* BOTTOM FOOTER: Affiliates */
 .affiliates-section {
   background-color: var(--card-bg, #f4f4f9);
-  padding: 50px 20px;
+  padding: 25px 20px; /* Tightened padding */
   text-align: center;
   border-top: 1px solid rgba(0, 0, 0, 0.1);
+  flex-shrink: 0; /* Prevents the footer from getting squished */
 }
 
 .affiliates-section h3 {
   color: var(--text-muted, #666666);
-  font-size: 1.1rem;
-  margin-bottom: 35px;
+  font-size: 0.95rem; 
+  margin-bottom: 15px; 
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 1.5px;
@@ -49,16 +62,19 @@
   flex-wrap: wrap;
   justify-content: center;
   align-items: center;
-  gap: 50px;
+  gap: 40px; 
   max-width: 1200px;
   margin: 0 auto;
 }
 
+/* 2. THE LOGO SCALING FIX */
 .affiliates-grid img {
-  max-height: 45px;
-  max-width: 160px;
+  height: 35px; /* Force uniform height across all logos */
+  width: auto; /* Let the width adapt naturally */
+  max-width: 280px; /* Give wide logos like Lockheed room to stretch horizontally */
   object-fit: contain;
-  /* Pro styling: start faded & grayscale, light up on hover */
+  
+  /* Styling */
   opacity: 0.55; 
   filter: grayscale(100%);
   transition: all 0.3s ease;
@@ -71,13 +87,17 @@
   transform: scale(1.05);
 }
 
-/* Mobile Responsiveness */
+/* Mobile Responsiveness (Allows scrolling only on tiny phone screens) */
 @media (max-width: 768px) {
+  .home-container {
+    height: auto; 
+    min-height: 100vh;
+    overflow: auto;
+  }
   .affiliates-grid {
-    gap: 30px;
+    gap: 20px;
   }
   .affiliates-grid img {
-    max-height: 35px;
-    max-width: 120px;
+    height: 25px; 
   }
 }
