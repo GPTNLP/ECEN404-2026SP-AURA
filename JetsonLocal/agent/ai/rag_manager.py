@@ -87,6 +87,10 @@ class RagManager:
                 "meta.json",
                 "db.json",
                 "entities.json",
+                "graph.json",
+                "entity_list.json",
+                "entity_emb.npy",
+                "entity_faiss.index",
                 "build_manifest.json",
             ]:
                 if (self.active_db_path / name).exists():

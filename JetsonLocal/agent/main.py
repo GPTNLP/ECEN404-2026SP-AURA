@@ -3,6 +3,7 @@ import time
 import asyncio
 import os
 import re as _re
+import traceback
 from datetime import datetime as _datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from typing import Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel as _BaseModel
 import uvicorn
 import requests
 
@@ -40,6 +42,7 @@ from core.config import (
     CONFIG_REFRESH_SECONDS,
     OFFLINE_RETRY_SECONDS,
     LOCAL_DB_NAME,
+    DEFAULT_MODEL,
 )
 
 from cloud.api_client import ApiClient
@@ -445,7 +448,7 @@ async def handle_voice_text(
     return result
 
 
-def build_stt_service() -> STTService:
+def build_stt_service(unload_after_idle_seconds: float = 3600.0) -> STTService:
     return STTService(
         callback=handle_voice_text,
         model_size="small.en",
@@ -458,25 +461,7 @@ def build_stt_service() -> STTService:
         language="en",
         task="transcribe",
         log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
-        unload_after_idle_seconds=3600.0,
-        auto_reload_model=True,
-    )
-
-
-def _build_button_stt_service() -> STTService:
-    return STTService(
-        callback=handle_voice_text,
-        model_size="small.en",
-        input_device=None,
-        device_sample_rate=None,
-        target_sample_rate=16000,
-        channels=None,
-        device="cuda",
-        compute_type="float16",
-        language="en",
-        task="transcribe",
-        log_path=os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/transcriptions.log"),
-        unload_after_idle_seconds=0.0,
+        unload_after_idle_seconds=unload_after_idle_seconds,
         auto_reload_model=True,
     )
 
@@ -491,7 +476,7 @@ async def capture_single_voice_request() -> dict:
         if stt_task and not stt_task.done():
             await stop_voice_loop()
 
-        temp_service = _build_button_stt_service()
+        temp_service = build_stt_service(unload_after_idle_seconds=0.0)
         stt_service = temp_service
         voice_running = True
         voice_loaded = False
@@ -637,38 +622,6 @@ async def stop_voice_loop():
     voice_loaded = False
     quiet_print("voice_stop", "[VOICE] stopped")
     set_ui_state("READY", "Voice stopped")
-
-
-async def voice_watchdog_loop():
-    while True:
-        try:
-            if voice_enabled:
-                if stt_task is None:
-                    quiet_print("voice_watchdog_start", "[VOICE WATCHDOG] no STT task, starting")
-                    await start_voice_loop()
-                elif stt_task.done():
-                    err = None
-                    try:
-                        err = stt_task.exception()
-                    except Exception:
-                        err = None
-
-                    if err:
-                        quiet_print("voice_watchdog_restart", f"[VOICE WATCHDOG] restarting after crash: {err}")
-                    else:
-                        quiet_print("voice_watchdog_restart", "[VOICE WATCHDOG] restarting stopped STT task")
-
-                    try:
-                        await stop_voice_loop()
-                    except Exception:
-                        pass
-
-                    await asyncio.sleep(1.0)
-                    await start_voice_loop()
-        except Exception as e:
-            quiet_print("voice_watchdog_error", f"[VOICE WATCHDOG] error: {e}")
-
-        await asyncio.sleep(2.0)
 
 
 # -------------------------------------------------------------------
@@ -1163,11 +1116,10 @@ async def command_loop():
                         # Unload LLM from Ollama by setting keep_alive=0
                         try:
                             _flush_ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
-                            from core.config import DEFAULT_MODEL as _flush_model
                             requests.post(
                                 f"{_flush_ollama_url}/api/generate",
                                 json={
-                                    "model": _flush_model,
+                                    "model": DEFAULT_MODEL,
                                     "prompt": "",
                                     "stream": False,
                                     "keep_alive": 0,
@@ -1175,7 +1127,7 @@ async def command_loop():
                                 timeout=15.0,
                             )
                             flushed.append("llm")
-                            print(f"[FLUSH] LLM '{_flush_model}' unloaded from Ollama VRAM")
+                            print(f"[FLUSH] LLM '{DEFAULT_MODEL}' unloaded from Ollama VRAM")
                         except Exception as _fe:
                             print(f"[FLUSH] LLM unload skipped: {_fe}")
 
@@ -1291,8 +1243,7 @@ async def rag_build_loop():
                 build_error = e
                 build_result = {"db_name": db_name, "error": str(e)}
                 print(f"[RAG JOB] build FAILED for '{db_name}': {e}")
-                import traceback as _tb
-                print(_tb.format_exc())
+                print(traceback.format_exc())
 
             # ── ACK final status — retry up to 3 times so the website unblocks ──
             ack_status = "failed" if build_error else "completed"
@@ -1445,9 +1396,8 @@ async def _warmup_llm():
     num_gpu    = int(os.getenv("AURA_NUM_GPU", "99"))
     keep_alive = os.getenv("AURA_KEEP_ALIVE", "2h")
 
-    from core.config import DEFAULT_MODEL as _model
     payload = _json.dumps({
-        "model":      _model,
+        "model":      DEFAULT_MODEL,
         "prompt":     "Hi",
         "stream":     False,
         "keep_alive": keep_alive,
@@ -1468,7 +1418,7 @@ async def _warmup_llm():
     )
     try:
         await asyncio.to_thread(_ur.urlopen, req, 60.0)
-        quiet_print("llm_warmup", f"[STARTUP] LLM '{_model}' loaded into GPU VRAM (keep_alive={keep_alive})")
+        quiet_print("llm_warmup", f"[STARTUP] LLM '{DEFAULT_MODEL}' loaded into GPU VRAM (keep_alive={keep_alive})")
     except Exception as exc:
         quiet_print("llm_warmup", f"[STARTUP] LLM warmup skipped (non-fatal): {exc}")
 
@@ -1646,8 +1596,6 @@ async def voice_listen_once():
 # -------------------------------------------------------------------
 # RAG endpoints
 # -------------------------------------------------------------------
-from pydantic import BaseModel as _BaseModel
-
 
 class _ChatRequest(_BaseModel):
     query: str

@@ -316,7 +316,7 @@ export default function DashboardPage() {
             value={ramValue}
             sub={isOnline ? "Memory load" : "No recent data"}
             status={isOnline ? "BAD" : "WARN"}
-            autoStatus={false}
+
           />
 
           <FiloCard
@@ -324,7 +324,7 @@ export default function DashboardPage() {
             value={cpuValue}
             sub={isOnline ? "Processor load" : "No recent data"}
             status={isOnline ? "BAD" : "WARN"}
-            autoStatus={false}
+
           />
 
           <FiloCard
@@ -332,7 +332,7 @@ export default function DashboardPage() {
             value={gpuValue}
             sub={isOnline ? "GPU load" : "No recent data"}
             status={isOnline ? "BAD" : "WARN"}
-            autoStatus={false}
+
           />
 
           <FiloCard
@@ -340,7 +340,7 @@ export default function DashboardPage() {
             value={uptimeValue}
             sub={isOnline ? "Since boot" : "No recent data"}
             status={isOnline ? "BAD" : "WARN"}
-            autoStatus={false}
+
           />
 
           <FiloCard
@@ -367,21 +367,13 @@ function FiloCard({
   value,
   sub,
   status,
-  autoStatus = true,
 }: {
   label: string;
   value: string;
   sub: string;
   status?: HealthStatus;
-  autoStatus?: boolean;
 }) {
-  let resolvedStatus: HealthStatus;
-
-  if (!autoStatus) {
-    resolvedStatus = status ?? "WARN";
-  } else {
-    resolvedStatus = status ?? "WARN";
-  }
+  const resolvedStatus = status ?? "WARN";
 
   return (
     <div className="filo-item">
