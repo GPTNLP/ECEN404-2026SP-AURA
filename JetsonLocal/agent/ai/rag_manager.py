@@ -245,9 +245,13 @@ class RagManager:
                         continue
 
                 if not processed_files:
+                    reasons = "; ".join(
+                        f"{f['file']}: {f['error']}" for f in failed_files
+                    ) or "unknown"
                     raise RuntimeError(
                         "No PDFs were successfully inserted into LightRAG. "
-                        f"Skipped={len(skipped_files)}, Failed={len(failed_files)}"
+                        f"Skipped={len(skipped_files)}, Failed={len(failed_files)}. "
+                        f"Reasons: {reasons}"
                     )
 
                 manifest = self.write_manifest(

@@ -73,10 +73,11 @@ AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "4"))  # entity FAISS h
 # Chunking — paper uses 1200 chars
 AURA_INSERT_CHUNK_SIZE    = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "1200"))
 AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "200"))
-# Minimum chunk length: filters arXiv stamps, page headers, lone figure captions,
-# and other sub-paragraph artifacts that pypdf emits as isolated text runs.
-# These pollute vector search — short text embeds close to generic queries.
-AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "100"))
+# Minimum chunk length: filters single-word headers and stray punctuation
+# that pypdf emits from some PDFs. Set low (30) to avoid silently dropping
+# content from column-heavy or table-heavy documents. Set AURA_MIN_CHUNK_CHARS
+# in .env to tune; was 100 but that dropped all content from dense-layout PDFs.
+AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "30"))
 
 # Batch embedding
 AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "8"))
@@ -746,14 +747,19 @@ class LightRAG:
         # etc. These short fragments embed close to unrelated queries and pollute
         # vector search results without contributing useful content.
         chunks = [c for c in raw_chunks if len(c) >= AURA_MIN_CHUNK_CHARS]
+        source = (meta or {}).get("source", f"doc_{_now_ms()}")
         if not chunks:
+            print(
+                f"[LightRAG] insert: 0 usable chunks from '{source}' "
+                f"(raw={len(raw_chunks)}, all filtered by AURA_MIN_CHUNK_CHARS={AURA_MIN_CHUNK_CHARS}). "
+                f"Longest raw chunk: {max((len(c) for c in raw_chunks), default=0)} chars."
+            )
             return
 
         dropped = len(raw_chunks) - len(chunks)
         total = len(chunks)
-        source = (meta or {}).get("source", f"doc_{_now_ms()}")
         if dropped:
-            print(f"[LightRAG] insert: {total} chunk(s) from '{source}' ({dropped} short chunk(s) filtered)")
+            print(f"[LightRAG] insert: {total} chunk(s) from '{source}' ({dropped} short chunk(s) filtered, min={AURA_MIN_CHUNK_CHARS})")
         else:
             print(f"[LightRAG] insert: {total} chunk(s) from '{source}'")
 
