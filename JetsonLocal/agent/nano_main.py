@@ -828,6 +828,15 @@ class AuraConsoleApp:
         if "[UI]" in line or "[UI ERROR]" in line:
             return line
 
+        # RAG vectorization progress — [RAG JOB] from rag_manager, [LightRAG] from lightrag_local
+        if "[RAG JOB]" in line:
+            text = line.split("[RAG JOB]", 1)[-1].strip()
+            return f"[RAG] {text}"[:120]
+
+        if "[LightRAG]" in line:
+            text = line.split("[LightRAG]", 1)[-1].strip()
+            return f"[RAG] {text}"[:120]
+
         if "error" in line.lower() or "failed" in line.lower():
             return line[:120]
 
@@ -960,6 +969,12 @@ class AuraConsoleApp:
             return
         if "[jetson db]" in lower and ("loading" in lower or "loaded" in lower or "vector" in lower or "build" in lower):
             self._set_status("VECTORIZING", clean)
+            return
+        if "[rag job]" in lower or "[lightrag]" in lower:
+            if "sync complete" in lower or "insert done" in lower or "vector db sync" in lower:
+                self._set_status("READY", "RAG build complete")
+            else:
+                self._set_status("VECTORIZING", clean[:80])
             return
         if "[command]" in lower:
             self._set_status("COMMAND", clean)

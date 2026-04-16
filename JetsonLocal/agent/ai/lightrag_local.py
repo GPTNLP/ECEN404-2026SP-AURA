@@ -52,16 +52,20 @@ AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 
 # Graph extraction (build-time only, not on the query path)
-AURA_GRAPH_EXTRACT       = os.getenv("AURA_GRAPH_EXTRACT", "true").lower() == "true"
+# Default OFF: each chunk requires one LLM call (~20s on Jetson), making a 30-chunk
+# document take 10+ minutes. Enable with AURA_GRAPH_EXTRACT=true only when build
+# time is not a concern and the richer entity graph is needed.
+AURA_GRAPH_EXTRACT       = os.getenv("AURA_GRAPH_EXTRACT", "false").lower() == "true"
 AURA_GRAPH_TIMEOUT_S     = float(os.getenv("AURA_GRAPH_TIMEOUT_S", "90"))
 AURA_GRAPH_NUM_PREDICT   = int(os.getenv("AURA_GRAPH_NUM_PREDICT", "512"))
 AURA_GRAPH_NUM_CTX       = int(os.getenv("AURA_GRAPH_NUM_CTX", "3072"))
 
 # Retrieval
-# MAX_CTX_CHARS=4000: ~1000 tokens — half of 8000. Directly cuts TTFT because
-# the LLM reads fewer tokens before generating the first output token.
-MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "4000"))
-DEFAULT_TOP_K       = int(os.getenv("AURA_TOP_K", "4"))       # was 6; fewer chunks = smaller prompt
+# MAX_CTX_CHARS=5000: ~1250 tokens. More context improves answerability without
+# blowing the 2048-token KV budget (system + context + query + answer all fit).
+# top_k=6: retrieve more candidate chunks so sparse-content docs still get good hits.
+MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "5000"))
+DEFAULT_TOP_K       = int(os.getenv("AURA_TOP_K", "8"))
 BM25_REBUILD_EVERY  = int(os.getenv("AURA_BM25_REBUILD_EVERY", "50"))
 AURA_LOCAL_TOP_K    = int(os.getenv("AURA_LOCAL_TOP_K", "4"))   # entity matches
 AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "4"))  # entity FAISS hits
@@ -69,6 +73,10 @@ AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "4"))  # entity FAISS h
 # Chunking — paper uses 1200 chars
 AURA_INSERT_CHUNK_SIZE    = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "1200"))
 AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "200"))
+# Minimum chunk length: filters arXiv stamps, page headers, lone figure captions,
+# and other sub-paragraph artifacts that pypdf emits as isolated text runs.
+# These pollute vector search — short text embeds close to generic queries.
+AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "100"))
 
 # Batch embedding
 AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "8"))
@@ -733,13 +741,21 @@ class LightRAG:
             self._entity_index_dirty = True
 
     async def ainsert(self, text: str, meta: Optional[Dict[str, Any]] = None):
-        chunks = _chunk_text(text)
+        raw_chunks = _chunk_text(text)
+        # Filter sub-paragraph artifacts: page headers, arXiv stamps, lone captions,
+        # etc. These short fragments embed close to unrelated queries and pollute
+        # vector search results without contributing useful content.
+        chunks = [c for c in raw_chunks if len(c) >= AURA_MIN_CHUNK_CHARS]
         if not chunks:
             return
 
+        dropped = len(raw_chunks) - len(chunks)
         total = len(chunks)
         source = (meta or {}).get("source", f"doc_{_now_ms()}")
-        print(f"[LightRAG] insert: {total} chunk(s) from '{source}'")
+        if dropped:
+            print(f"[LightRAG] insert: {total} chunk(s) from '{source}' ({dropped} short chunk(s) filtered)")
+        else:
+            print(f"[LightRAG] insert: {total} chunk(s) from '{source}'")
 
         # ── 1. Batch-embed ALL chunks in one round-trip ───────────────────────
         # This is the main speed win vs one embed call per chunk.
@@ -1054,8 +1070,13 @@ class LightRAG:
         for idx, d in candidates.items():
             vec   = d.get("vec", 0.0)
             bm    = d.get("bm25", 0.0)
-            bm_n  = bm / (abs(bm) + 8.0)
-            total = (0.75 * vec + 0.25 * bm_n) if mode == "hybrid" else (
+            # Normalization constant 4.0 (was 8.0): tighter constant spreads BM25
+            # scores further apart, making keyword hits more discriminating.
+            bm_n  = bm / (abs(bm) + 4.0)
+            # 60/40 split (was 75/25): BM25 needs more weight when the query term
+            # appears in nearly every chunk (common in domain-specific docs), so
+            # term-frequency differences within each chunk can override vector rank.
+            total = (0.60 * vec + 0.40 * bm_n) if mode == "hybrid" else (
                 vec if mode == "vector" else bm_n
             )
             scored.append((float(total), int(idx)))
@@ -1074,17 +1095,17 @@ class LightRAG:
         # ── 5. Build context + generate answer ───────────────────────────
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
-            "You are AURA, a knowledgeable lab assistant with access to research documents. "
-            "Use the provided context — which includes entity descriptions, relationships, "
-            "and source passages — to answer the question as helpfully as possible. "
-            "When a concept, system, or technique is mentioned by name in the context, "
-            "explain it based on what the context says about it. "
-            "Be informative and accurate. "
-            "If the context is genuinely insufficient, say what you found and note the gap."
+            "You are AURA, a helpful lab assistant. "
+            "Use the provided context as your primary source to answer the question. "
+            "When the context contains relevant information, explain it clearly and in full. "
+            "If the context is sparse or incomplete, supplement freely with your own knowledge "
+            "to give a complete and useful answer — always prioritizing what is in the context "
+            "but never refusing to answer just because the context is thin. "
+            "Be direct and informative. Do not apologize or explain what the context lacks."
         )
         prompt = (
-            f"Context information from the knowledge base:\n{context}\n\n"
-            f"Using the context above, answer this question: {query}\n\nAnswer:"
+            f"Context from the knowledge base:\n{context}\n\n"
+            f"Question: {query}\n\nAnswer:"
         )
         answer  = await self.client.generate(
             prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S
