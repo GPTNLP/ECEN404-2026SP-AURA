@@ -68,7 +68,8 @@ class RagManager:
             )
             self.active_db_name = db_name
             self.active_db_path = db_dir
-            print(f"[RAG JOB] local LightRAG ready at {db_dir}")
+            chunk_count = len(self.rag_system._rows)
+            print(f"[RAG JOB] local LightRAG ready at {db_dir} — {chunk_count} chunk(s) loaded")
             return True
         except Exception as e:
             print(f"[RAG JOB] failed to initialize DB '{db_name}': {e}")
