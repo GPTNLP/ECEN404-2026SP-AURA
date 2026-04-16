@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import io
 import json
@@ -67,7 +66,6 @@ BTN_FG = "#ecfeff"
 BTN_ACTIVE_BG = "#0f172a"
 BTN_ACTIVE_FG = "#ffffff"
 BTN_GREEN = "#14f195"
-BTN_GREEN_ACTIVE = "#22c55e"
 
 
 class AuraConsoleApp:
@@ -91,7 +89,6 @@ class AuraConsoleApp:
         self.voice_should_resume = False
         self.current_frame_image = None
 
-        self.state = "BOOTING"
         self.status_text = tk.StringVar(value="BOOTING")
         self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
         self.banner_text = tk.StringVar(value="AURA")
@@ -99,7 +96,6 @@ class AuraConsoleApp:
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
-        self.voice_button_text = tk.StringVar(value="Tap Mic")
         self.voice_status_text = tk.StringVar(
             value="Press the mic, speak once, and AURA will respond."
         )
@@ -112,7 +108,6 @@ class AuraConsoleApp:
         self._llm_history = []
         self._osk_shift = False
         self._osk_mode = "alpha"
-        self._system_keyboard_disabled = False
 
         self._vision_poll_counter = 0
         self._camera_fail_count = 0
@@ -131,127 +126,125 @@ class AuraConsoleApp:
     # UI
     # =========================
 
+    def _build_ui(self):
+        sw = self.root.winfo_screenwidth()
 
-def _build_ui(self):
-    sw = self.root.winfo_screenwidth()
+        title_font = tkfont.Font(
+            family="Courier", size=max(22, int(sw * 0.030)), weight="bold"
+        )
+        sub_font = tkfont.Font(
+            family="Courier", size=max(11, int(sw * 0.016))
+        )
+        section_font = tkfont.Font(
+            family="Courier", size=max(17, int(sw * 0.024)), weight="bold"
+        )
+        log_font = tkfont.Font(
+            family="Courier", size=max(10, int(sw * 0.015)), weight="bold"
+        )
+        button_font = tkfont.Font(
+            family="Courier", size=max(14, int(sw * 0.018)), weight="bold"
+        )
+        vision_title_font = tkfont.Font(
+            family="Courier", size=max(18, int(sw * 0.024)), weight="bold"
+        )
+        vision_info_font = tkfont.Font(
+            family="Courier", size=max(12, int(sw * 0.015))
+        )
 
-    title_font = tkfont.Font(
-        family="Courier", size=max(22, int(sw * 0.030)), weight="bold"
-    )
-    sub_font = tkfont.Font(
-        family="Courier", size=max(11, int(sw * 0.016))
-    )
-    section_font = tkfont.Font(
-        family="Courier", size=max(17, int(sw * 0.024)), weight="bold"
-    )
-    log_font = tkfont.Font(
-        family="Courier", size=max(10, int(sw * 0.015)), weight="bold"
-    )
-    button_font = tkfont.Font(
-        family="Courier", size=max(14, int(sw * 0.018)), weight="bold"
-    )
-    vision_title_font = tkfont.Font(
-        family="Courier", size=max(18, int(sw * 0.024)), weight="bold"
-    )
-    vision_info_font = tkfont.Font(
-        family="Courier", size=max(12, int(sw * 0.015))
-    )
+        outer = tk.Frame(self.root, bg="#05070a")
+        outer.pack(fill="both", expand=True, padx=12, pady=12)
 
-    outer = tk.Frame(self.root, bg="#05070a")
-    outer.pack(fill="both", expand=True, padx=12, pady=12)
+        self.header = tk.Frame(
+            outer,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        self.header.pack(fill="x", pady=(0, 10))
 
-    self.header = tk.Frame(
-        outer,
-        bg="#0b0f14",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-    )
-    self.header.pack(fill="x", pady=(0, 10))
+        header_inner = tk.Frame(self.header, bg="#0b0f14")
+        header_inner.pack(fill="x")
+        header_inner.grid_columnconfigure(0, weight=1)
+        header_inner.grid_columnconfigure(1, weight=0)
+        header_inner.grid_columnconfigure(2, weight=1)
 
-    header_inner = tk.Frame(self.header, bg="#0b0f14")
-    header_inner.pack(fill="x")
-    header_inner.grid_columnconfigure(0, weight=1)
-    header_inner.grid_columnconfigure(1, weight=0)
-    header_inner.grid_columnconfigure(2, weight=1)
+        tk.Frame(header_inner, bg="#0b0f14").grid(row=0, column=0, sticky="ew")
 
-    left_spacer = tk.Frame(header_inner, bg="#0b0f14")
-    left_spacer.grid(row=0, column=0, sticky="ew")
+        self.header_label = tk.Label(
+            header_inner,
+            textvariable=self.banner_text,
+            fg="#14f195",
+            bg="#0b0f14",
+            font=title_font,
+            anchor="center",
+            padx=10,
+            pady=10,
+        )
+        self.header_label.grid(row=0, column=1, sticky="n")
 
-    self.header_label = tk.Label(
-        header_inner,
-        textvariable=self.banner_text,
-        fg="#14f195",
-        bg="#0b0f14",
-        font=title_font,
-        anchor="center",
-        padx=10,
-        pady=10,
-    )
-    self.header_label.grid(row=0, column=1, sticky="n")
+        header_actions = tk.Frame(header_inner, bg="#0b0f14")
+        header_actions.grid(row=0, column=2, sticky="e", padx=10, pady=8)
 
-    header_actions = tk.Frame(header_inner, bg="#0b0f14")
-    header_actions.grid(row=0, column=2, sticky="e", padx=10, pady=8)
+        icon_font = tkfont.Font(
+            family="Courier", size=max(16, int(sw * 0.020)), weight="bold"
+        )
 
-    icon_font = tkfont.Font(
-        family="Courier", size=max(16, int(sw * 0.020)), weight="bold"
-    )
+        self.refresh_button = tk.Button(
+            header_actions,
+            text="↻",
+            command=self._refresh_ui_data,
+            font=icon_font,
+            bg="#0b0f14",
+            fg="#14f195",
+            activebackground="#052e1c",
+            activeforeground="#eafff3",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            width=3,
+            padx=8,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.refresh_button.pack(side="left", padx=(0, 8))
 
-    self.refresh_button = tk.Button(
-        header_actions,
-        text="↻",
-        command=self._refresh_ui_data,
-        font=icon_font,
-        bg="#0b0f14",
-        fg="#14f195",
-        activebackground="#052e1c",
-        activeforeground="#eafff3",
-        relief="flat",
-        bd=0,
-        cursor="hand2",
-        width=3,
-        padx=8,
-        pady=8,
-        highlightthickness=1,
-        highlightbackground="#14f195",
-        highlightcolor="#14f195",
-    )
-    self.refresh_button.pack(side="left", padx=(0, 8))
+        self.reboot_button = tk.Button(
+            header_actions,
+            text="⏻",
+            command=self._tap_reboot,
+            font=icon_font,
+            bg="#0b0f14",
+            fg="#14f195",
+            activebackground="#052e1c",
+            activeforeground="#eafff3",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            width=3,
+            padx=8,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.reboot_button.pack(side="left")
 
-    self.reboot_button = tk.Button(
-        header_actions,
-        text="⏻",
-        command=self._tap_reboot,
-        font=icon_font,
-        bg="#0b0f14",
-        fg="#14f195",
-        activebackground="#052e1c",
-        activeforeground="#eafff3",
-        relief="flat",
-        bd=0,
-        cursor="hand2",
-        width=3,
-        padx=8,
-        pady=8,
-        highlightthickness=1,
-        highlightbackground="#14f195",
-        highlightcolor="#14f195",
-    )
-    self.reboot_button.pack(side="left")
+        self.content = tk.Frame(outer, bg="#05070a")
+        self.content.pack(fill="both", expand=True)
 
-    self.content = tk.Frame(outer, bg="#05070a")
-    self.content.pack(fill="both", expand=True)
+        self.home_frame = tk.Frame(self.content, bg="#05070a")
+        self.vision_frame = tk.Frame(self.content, bg="#05070a")
 
-    self.home_frame = tk.Frame(self.content, bg="#05070a")
-    self.vision_frame = tk.Frame(self.content, bg="#05070a")
+        self._build_home_ui(
+            self.home_frame, sub_font, section_font, log_font, button_font
+        )
+        self._build_vision_ui(
+            self.vision_frame, button_font, vision_title_font, vision_info_font
+        )
 
-    self._build_home_ui(
-        self.home_frame, sub_font, section_font, log_font, button_font
-    )
-    self._build_vision_ui(
-        self.vision_frame, button_font, vision_title_font, vision_info_font
-    )
-
-    self._show_home()
+        self._show_home()
 
     def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
         try:
@@ -298,158 +291,157 @@ def _build_ui(self):
             btn.pack(fill="x", padx=12, pady=12)
         return btn
 
+    def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
+        mode_card = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        mode_card.pack(fill="x", pady=(0, 10))
 
-def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
-    mode_card = tk.Frame(
-        parent,
-        bg="#0b0f14",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-    )
-    mode_card.pack(fill="x", pady=(0, 10))
+        tabs_wrap = tk.Frame(mode_card, bg="#0b0f14")
+        tabs_wrap.pack(side="left", fill="x", expand=True, padx=12, pady=10)
 
-    tabs_wrap = tk.Frame(mode_card, bg="#0b0f14")
-    tabs_wrap.pack(side="left", fill="x", expand=True, padx=12, pady=10)
+        self.home_btn = self._outline_button(
+            tabs_wrap,
+            "HOME",
+            lambda: self._switch_view("home"),
+            button_font,
+            fg="#9effc7",
+            highlight=BTN_GREEN,
+            padx=10,
+            pady=14,
+        )
+        self.live_btn = self._outline_button(
+            tabs_wrap,
+            "LIVE",
+            lambda: self._switch_view("live"),
+            button_font,
+            fg="#9effc7",
+            highlight=BTN_GREEN,
+            padx=10,
+            pady=14,
+        )
+        self.llm_btn = self._outline_button(
+            tabs_wrap,
+            "LLM CHAT",
+            lambda: self._switch_view("llm"),
+            button_font,
+            fg="#9effc7",
+            highlight=BTN_GREEN,
+            padx=10,
+            pady=14,
+        )
 
-    self.home_btn = self._outline_button(
-        tabs_wrap,
-        "HOME",
-        lambda: self._switch_view("home"),
-        button_font,
-        fg="#9effc7",
-        highlight=BTN_GREEN,
-        padx=10,
-        pady=14,
-    )
-    self.live_btn = self._outline_button(
-        tabs_wrap,
-        "LIVE",
-        lambda: self._switch_view("live"),
-        button_font,
-        fg="#9effc7",
-        highlight=BTN_GREEN,
-        padx=10,
-        pady=14,
-    )
-    self.llm_btn = self._outline_button(
-        tabs_wrap,
-        "LLM CHAT",
-        lambda: self._switch_view("llm"),
-        button_font,
-        fg="#9effc7",
-        highlight=BTN_GREEN,
-        padx=10,
-        pady=14,
-    )
+        for idx, btn in enumerate((self.home_btn, self.live_btn, self.llm_btn)):
+            btn.grid(row=0, column=idx, sticky="nsew", padx=5)
+            tabs_wrap.grid_columnconfigure(idx, weight=1)
 
-    for idx, btn in enumerate((self.home_btn, self.live_btn, self.llm_btn)):
-        btn.grid(row=0, column=idx, sticky="nsew", padx=5)
-        tabs_wrap.grid_columnconfigure(idx, weight=1)
+        self.status_mini_label = tk.Label(
+            mode_card,
+            textvariable=self.status_text,
+            fg=STATUS_STYLES["BOOTING"]["fg"],
+            bg="#0b0f14",
+            font=sub_font,
+            anchor="e",
+            padx=16,
+        )
+        self.status_mini_label.pack(side="right", fill="y")
 
-    self.status_mini_label = tk.Label(
-        mode_card,
-        textvariable=self.status_text,
-        fg=STATUS_STYLES["BOOTING"]["fg"],
-        bg="#0b0f14",
-        font=sub_font,
-        anchor="e",
-        padx=16,
-    )
-    self.status_mini_label.pack(side="right", fill="y")
+        self.home_dashboard = tk.Frame(parent, bg="#05070a")
+        self.live_panel = tk.Frame(parent, bg="#05070a")
+        self.llm_panel = tk.Frame(parent, bg="#05070a")
 
-    self.home_dashboard = tk.Frame(parent, bg="#05070a")
-    self.live_panel = tk.Frame(parent, bg="#05070a")
-    self.llm_panel = tk.Frame(parent, bg="#05070a")
+        self.camera_card = tk.Frame(
+            self.home_dashboard,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        self.camera_card.pack(fill="x", pady=(0, 10))
 
-    self.camera_card = tk.Frame(
-        self.home_dashboard,
-        bg="#0b0f14",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-    )
-    self.camera_card.pack(fill="x", pady=(0, 10))
+        self.camera_home_button = self._outline_button(
+            self.camera_card,
+            "CAMERA",
+            lambda: self.enter_vision_mode("face"),
+            button_font,
+            fg=BTN_GREEN,
+            highlight=BTN_GREEN,
+            pady=18,
+            fill=True,
+        )
 
-    self.camera_home_button = self._outline_button(
-        self.camera_card,
-        "CAMERA",
-        lambda: self.enter_vision_mode("face"),
-        button_font,
-        fg=BTN_GREEN,
-        highlight=BTN_GREEN,
-        pady=18,
-        fill=True,
-    )
+        self.voice_card = tk.Frame(
+            self.home_dashboard,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        self.voice_card.pack(fill="x", pady=(0, 10))
 
-    self.voice_card = tk.Frame(
-        self.home_dashboard,
-        bg="#0b0f14",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-    )
-    self.voice_card.pack(fill="x", pady=(0, 10))
+        voice_top = tk.Frame(self.voice_card, bg="#0b0f14")
+        voice_top.pack(fill="x", padx=12, pady=(12, 8))
 
-    voice_top = tk.Frame(self.voice_card, bg="#0b0f14")
-    voice_top.pack(fill="x", padx=12, pady=(12, 8))
+        tk.Label(
+            voice_top,
+            text="VOICE",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+        ).pack(side="left")
 
-    tk.Label(
-        voice_top,
-        text="VOICE",
-        fg="#14f195",
-        bg="#0b0f14",
-        font=section_font,
-        anchor="w",
-    ).pack(side="left")
+        self.voice_button = self._outline_button(
+            voice_top,
+            "Tap Mic",
+            self._run_voice_button,
+            button_font,
+            fg=BTN_GREEN,
+            highlight=BTN_GREEN,
+        )
+        self.voice_button.pack(side="right")
 
-    self.voice_button = self._outline_button(
-        voice_top,
-        "Tap Mic",
-        self._run_voice_button,
-        button_font,
-        fg=BTN_GREEN,
-        highlight=BTN_GREEN,
-    )
-    self.voice_button.pack(side="right")
+        info_font = tkfont.Font(
+            family="Courier",
+            size=max(10, int(self.root.winfo_screenwidth() * 0.012)),
+        )
 
-    info_font = tkfont.Font(
-        family="Courier",
-        size=max(10, int(self.root.winfo_screenwidth() * 0.012)),
-    )
+        tk.Label(
+            self.voice_card,
+            textvariable=self.voice_status_text,
+            fg="#cbd5e1",
+            bg="#0b0f14",
+            font=info_font,
+            anchor="w",
+            justify="left",
+            padx=14,
+            pady=2,
+        ).pack(fill="x")
 
-    tk.Label(
-        self.voice_card,
-        textvariable=self.voice_status_text,
-        fg="#cbd5e1",
-        bg="#0b0f14",
-        font=info_font,
-        anchor="w",
-        justify="left",
-        padx=14,
-        pady=2,
-    ).pack(fill="x")
+        tk.Label(
+            self.voice_card,
+            textvariable=self.voice_result_text,
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=info_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
+            padx=14,
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
 
-    tk.Label(
-        self.voice_card,
-        textvariable=self.voice_result_text,
-        fg="#94a3b8",
-        bg="#0b0f14",
-        font=info_font,
-        anchor="w",
-        justify="left",
-        wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
-        padx=14,
-        pady=0,
-    ).pack(fill="x", pady=(0, 12))
+        self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
+        self.home_console_panel.pack(fill="both", expand=True)
+        self._build_console_panel(self.home_console_panel, section_font, title="LIVE FEED", raw=False)
 
-    self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
-    self.home_console_panel.pack(fill="both", expand=True)
-    self._build_console_panel(self.home_console_panel, section_font, log_font, title="LIVE FEED", raw=False)
+        self._build_live_panel(self.live_panel, section_font)
+        self._build_llm_panel(self.llm_panel, section_font, button_font)
 
-    self._build_live_panel(self.live_panel, section_font)
-    self._build_llm_panel(self.llm_panel, section_font, log_font, button_font)
+        self._switch_view("home")
 
-    self._switch_view("home")
-
-    def _build_console_panel(self, parent, section_font, log_font, *, title="LIVE FEED", raw=False):
+    def _build_console_panel(self, parent, section_font, *, title="LIVE FEED", raw=False):
         logs_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -510,313 +502,291 @@ def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
         scroll.config(command=text_widget.yview)
 
         if raw:
-            self.raw_log_scroll = scroll
             self.raw_log_text = text_widget
         else:
-            self.log_scroll = scroll
             self.log_text = text_widget
 
     def _build_live_panel(self, parent, section_font):
-        self._build_console_panel(parent, section_font, None, title="LIVE TERMINAL", raw=True)
+        self._build_console_panel(parent, section_font, title="LIVE TERMINAL", raw=True)
 
+    def _build_llm_panel(self, parent, section_font, button_font):
+        chat_card = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        chat_card.pack(fill="both", expand=True)
 
-def _build_llm_panel(self, parent, section_font, log_font, button_font):
-    chat_card = tk.Frame(
-        parent,
-        bg="#0b0f14",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-    )
-    chat_card.pack(fill="both", expand=True)
+        title_row = tk.Frame(chat_card, bg="#0b0f14")
+        title_row.pack(fill="x")
 
-    title_row = tk.Frame(chat_card, bg="#0b0f14")
-    title_row.pack(fill="x")
+        tk.Label(
+            title_row,
+            text="LLM CHAT",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+            padx=14,
+            pady=10,
+        ).pack(side="left")
 
-    tk.Label(
-        title_row,
-        text="LLM CHAT",
-        fg="#14f195",
-        bg="#0b0f14",
-        font=section_font,
-        anchor="w",
-        padx=14,
-        pady=10,
-    ).pack(side="left")
+        ds_info_font = tkfont.Font(
+            family="Courier",
+            size=max(11, int(self.root.winfo_screenwidth() * 0.014)),
+            weight="bold",
+        )
 
-    ds_info_font = tkfont.Font(
-        family="Courier",
-        size=max(11, int(self.root.winfo_screenwidth() * 0.014)),
-        weight="bold",
-    )
+        dataset_bubble = tk.Frame(
+            title_row,
+            bg="#052e1c",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+            padx=12,
+            pady=6,
+        )
+        dataset_bubble.pack(side="right", padx=12, pady=6)
 
-    dataset_bubble = tk.Frame(
-        title_row,
-        bg="#052e1c",
-        highlightbackground="#14f195",
-        highlightthickness=1,
-        padx=12,
-        pady=6,
-    )
-    dataset_bubble.pack(side="right", padx=12, pady=6)
+        tk.Label(
+            dataset_bubble,
+            text="DATASET:",
+            fg="#bbf7d0",
+            bg="#052e1c",
+            font=ds_info_font,
+            anchor="w",
+        ).pack(side="left")
 
-    tk.Label(
-        dataset_bubble,
-        text="DATASET:",
-        fg="#bbf7d0",
-        bg="#052e1c",
-        font=ds_info_font,
-        anchor="w",
-    ).pack(side="left")
+        self._dataset_label = tk.Label(
+            dataset_bubble,
+            textvariable=self._rag_dataset_var,
+            fg="#14f195",
+            bg="#052e1c",
+            font=ds_info_font,
+            anchor="w",
+            padx=6,
+        )
+        self._dataset_label.pack(side="left")
 
-    self._dataset_label = tk.Label(
-        dataset_bubble,
-        textvariable=self._rag_dataset_var,
-        fg="#14f195",
-        bg="#052e1c",
-        font=ds_info_font,
-        anchor="w",
-        padx=6,
-    )
-    self._dataset_label.pack(side="left")
+        chat_history_wrap = tk.Frame(chat_card, bg="#0b0f14")
+        chat_history_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
-    chat_history_wrap = tk.Frame(chat_card, bg="#0b0f14")
-    chat_history_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+        self.llm_chat_scroll = tk.Scrollbar(
+            chat_history_wrap,
+            orient="vertical",
+            width=26,
+            troughcolor="#05070a",
+            activebackground="#14f195",
+            bg="#111827",
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.llm_chat_scroll.pack(side="right", fill="y")
 
-    self.llm_chat_scroll = tk.Scrollbar(
-        chat_history_wrap,
-        orient="vertical",
-        width=26,
-        troughcolor="#05070a",
-        activebackground="#14f195",
-        bg="#111827",
-        highlightthickness=0,
-        relief="flat",
-    )
-    self.llm_chat_scroll.pack(side="right", fill="y")
+        llm_font = tkfont.Font(
+            family="Courier",
+            size=max(11, int(self.root.winfo_screenwidth() * 0.015)),
+            weight="bold",
+        )
 
-    llm_font = tkfont.Font(
-        family="Courier",
-        size=max(11, int(self.root.winfo_screenwidth() * 0.015)),
-        weight="bold",
-    )
+        self.llm_chat_text = tk.Text(
+            chat_history_wrap,
+            bg="#05070a",
+            fg="#e2e8f0",
+            insertbackground="#e2e8f0",
+            relief="flat",
+            wrap="word",
+            font=llm_font,
+            padx=12,
+            pady=12,
+            state="disabled",
+            yscrollcommand=self.llm_chat_scroll.set,
+        )
+        self.llm_chat_text.pack(side="left", fill="both", expand=True)
+        self.llm_chat_scroll.config(command=self.llm_chat_text.yview)
 
-    self.llm_chat_text = tk.Text(
-        chat_history_wrap,
-        bg="#05070a",
-        fg="#e2e8f0",
-        insertbackground="#e2e8f0",
-        relief="flat",
-        wrap="word",
-        font=llm_font,
-        padx=12,
-        pady=12,
-        state="disabled",
-        yscrollcommand=self.llm_chat_scroll.set,
-    )
-    self.llm_chat_text.pack(side="left", fill="both", expand=True)
-    self.llm_chat_scroll.config(command=self.llm_chat_text.yview)
+        bold_log = tkfont.Font(
+            family="Courier",
+            size=max(10, int(llm_font.cget("size"))),
+            weight="bold",
+        )
 
-    bold_log = tkfont.Font(
-        family="Courier",
-        size=max(10, int(llm_font.cget("size"))),
-        weight="bold",
-    )
+        self.llm_chat_text.tag_configure("user_label", foreground="#14f195", font=bold_log)
+        self.llm_chat_text.tag_configure("user_text", foreground="#ffffff")
+        self.llm_chat_text.tag_configure("aura_label", foreground="#86efac", font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text", foreground="#d1fae5")
+        self.llm_chat_text.tag_configure("thinking", foreground="#64748b")
+        self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
+        self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
 
-    self.llm_chat_text.tag_configure("user_label", foreground="#14f195", font=bold_log)
-    self.llm_chat_text.tag_configure("user_text", foreground="#ffffff")
-    self.llm_chat_text.tag_configure("aura_label", foreground="#86efac", font=bold_log)
-    self.llm_chat_text.tag_configure("aura_text", foreground="#d1fae5")
-    self.llm_chat_text.tag_configure("thinking", foreground="#64748b")
-    self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
-    self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
+        input_frame = tk.Frame(chat_card, bg="#07130b", pady=8, padx=8)
+        input_frame.pack(fill="x")
 
-    input_frame = tk.Frame(chat_card, bg="#07130b", pady=8, padx=8)
-    input_frame.pack(fill="x")
+        self.llm_entry = tk.Entry(
+            input_frame,
+            bg="#0b1a11",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            font=button_font,
+        )
+        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=12)
+        self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
+        self.llm_entry.bind("<Button-1>", lambda _e: self._best_effort_disable_system_keyboard())
+        self.llm_entry.bind("<FocusIn>", lambda _e: self.root.after(50, self._best_effort_disable_system_keyboard))
 
-    self.llm_entry = tk.Entry(
-        input_frame,
-        bg="#0b1a11",
-        fg="#ffffff",
-        insertbackground="#ffffff",
-        relief="flat",
-        font=button_font,
-    )
-    self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=12)
-    self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
-    self.llm_entry.bind("<Button-1>", lambda _e: self._best_effort_disable_system_keyboard())
-    self.llm_entry.bind("<FocusIn>", lambda _e: self.root.after(50, self._best_effort_disable_system_keyboard))
+        self.llm_send_btn = tk.Button(
+            input_frame,
+            text="Ask",
+            command=self._llm_submit,
+            font=button_font,
+            bg="#14f195",
+            fg="#04130b",
+            activebackground="#22c55e",
+            activeforeground="#04130b",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=20,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground="#14532d",
+            highlightcolor="#14f195",
+        )
+        self.llm_send_btn.pack(side="right")
 
-    self.llm_send_btn = tk.Button(
-        input_frame,
-        text="Ask",
-        command=self._llm_submit,
-        font=button_font,
-        bg="#14f195",
-        fg="#04130b",
-        activebackground="#22c55e",
-        activeforeground="#04130b",
-        relief="flat",
-        bd=0,
-        cursor="hand2",
-        padx=20,
-        pady=10,
-        highlightthickness=1,
-        highlightbackground="#14532d",
-        highlightcolor="#14f195",
-    )
-    self.llm_send_btn.pack(side="right")
+        self._build_osk(chat_card)
 
-    self._build_osk(chat_card, button_font)
+    def _build_osk(self, parent):
+        sw = self.root.winfo_screenwidth()
+        self._osk_key_font = tkfont.Font(
+            family="Courier",
+            size=max(11, int(sw * 0.014)),
+            weight="bold",
+        )
+        self._osk_keyboard_bg = "#06150d"
+        self._osk_key_bg = "#0d2618"
+        self._osk_key_active = "#14532d"
+        self._osk_key_fg = "#d1fae5"
+        self._osk_key_border = "#14f195"
 
-
-def _build_osk(self, parent, button_font):
-    sw = self.root.winfo_screenwidth()
-    key_font = tkfont.Font(
-        family="Courier",
-        size=max(11, int(sw * 0.014)),
-        weight="bold",
-    )
-
-    keyboard_bg = "#06150d"
-    key_bg = "#0d2618"
-    key_active = "#14532d"
-    key_fg = "#d1fae5"
-    key_border = "#14f195"
-
-    self._osk_outer = tk.Frame(
-        parent,
-        bg=keyboard_bg,
-        pady=6,
-        padx=6,
-        highlightbackground=key_border,
-        highlightthickness=1,
-    )
-    self._osk_outer.pack(fill="x", side="bottom")
-
-    self._osk_key_font = key_font
-    self._osk_keyboard_bg = keyboard_bg
-    self._osk_key_bg = key_bg
-    self._osk_key_active = key_active
-    self._osk_key_fg = key_fg
-    self._osk_key_border = key_border
-
-    self._render_osk()
-
-def _render_osk(self):
-    if not hasattr(self, "_osk_outer"):
-        return
-
-    for child in self._osk_outer.winfo_children():
-        child.destroy()
-
-    mode = getattr(self, "_osk_mode", "alpha")
-    shift = getattr(self, "_osk_shift", False)
-
-    if mode == "alpha":
-        rows = [
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-            list("QWERTYUIOP" if not shift else "qwertyuiop"),
-            list("ASDFGHJKL" if not shift else "asdfghjkl"),
-            ["⇧"] + list("ZXCVBNM" if not shift else "zxcvbnm") + ["⌫"],
-            ["123", ",", "SPACE", ".", "↩"],
-        ]
-    elif mode == "num":
-        rows = [
-            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-            ["-", "/", ":", ";", "(", ")", "$", "&", "@", '"'],
-            [".", ",", "?", "!", "'", "#", "%", "^", "*", "⌫"],
-            ["ABC", "+", "=", "_", "\\", "|", "~", "<", ">", "SYM"],
-            ["CLR", "[", "SPACE", "]", "↩"],
-        ]
-    else:
-        rows = [
-            ["`", "{", "}", "[", "]", "(", ")", "<", ">", "⌫"],
-            ["+", "-", "*", "/", "=", "_", "|", "~", "^", "%"],
-            ["#", "@", "$", "&", "!", "?", ":", ";", '"', "'"],
-            ["ABC", ".", ",", "\\", "€", "£", "¥", "•", "…", "123"],
-            ["CLR", "TAB", "SPACE", "ENTER", "↩"],
-        ]
-
-    for row in rows:
-        rf = tk.Frame(self._osk_outer, bg=self._osk_keyboard_bg)
-        rf.pack(fill="x", pady=1)
-        for key in row:
-            self._make_osk_key(rf, key)
-
-def _make_osk_key(self, parent_frame, label):
-    wide = label in {"SPACE", "ENTER"}
-    accent = label in {"↩", "ENTER"}
-    btn = tk.Button(
-        parent_frame,
-        text=label,
-        command=lambda k=label: self._osk_key(k),
-        font=self._osk_key_font,
-        bg="#14f195" if accent else self._osk_key_bg,
-        fg="#04130b" if accent else self._osk_key_fg,
-        activebackground="#22c55e" if accent else self._osk_key_active,
-        activeforeground="#04130b" if accent else "#ffffff",
-        relief="flat",
-        bd=0,
-        cursor="hand2",
-        padx=0,
-        pady=10,
-        highlightthickness=1,
-        highlightbackground=self._osk_key_border,
-        highlightcolor=self._osk_key_border,
-    )
-    if wide:
-        btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
-    else:
-        btn.pack(side="left", expand=True, fill="x", padx=3, pady=3)
-
-
-def _osk_key(self, key: str):
-    self._best_effort_disable_system_keyboard()
-
-    if key == "⌫":
-        cur = self.llm_entry.get()
-        if cur:
-            self.llm_entry.delete(len(cur) - 1, "end")
-        return
-
-    if key == "⇧":
-        self._osk_shift = not self._osk_shift
+        self._osk_outer = tk.Frame(
+            parent,
+            bg=self._osk_keyboard_bg,
+            pady=6,
+            padx=6,
+            highlightbackground=self._osk_key_border,
+            highlightthickness=1,
+        )
+        self._osk_outer.pack(fill="x", side="bottom")
         self._render_osk()
-        return
 
-    if key == "123":
-        self._osk_mode = "num"
-        self._render_osk()
-        return
+    def _render_osk(self):
+        if not hasattr(self, "_osk_outer"):
+            return
 
-    if key == "SYM":
-        self._osk_mode = "sym"
-        self._render_osk()
-        return
+        for child in self._osk_outer.winfo_children():
+            child.destroy()
 
-    if key == "ABC":
-        self._osk_mode = "alpha"
-        self._osk_shift = False
-        self._render_osk()
-        return
+        mode = self._osk_mode
+        shift = self._osk_shift
 
-    if key == "CLR":
-        self.llm_entry.delete(0, "end")
-        return
+        if mode == "alpha":
+            rows = [
+                list("1234567890"),
+                list("QWERTYUIOP" if not shift else "qwertyuiop"),
+                list("ASDFGHJKL" if not shift else "asdfghjkl"),
+                ["⇧"] + list("ZXCVBNM" if not shift else "zxcvbnm") + ["⌫"],
+                ["123", ",", "SPACE", ".", "↩"],
+            ]
+        elif mode == "num":
+            rows = [
+                list("1234567890"),
+                ["-", "/", ":", ";", "(", ")", "$", "&", "@", '"'],
+                [".", ",", "?", "!", "'", "#", "%", "^", "*", "⌫"],
+                ["ABC", "+", "=", "_", "\\", "|", "~", "<", ">", "SYM"],
+                ["CLR", "[", "SPACE", "]", "↩"],
+            ]
+        else:
+            rows = [
+                ["`", "{", "}", "[", "]", "(", ")", "<", ">", "⌫"],
+                ["+", "-", "*", "/", "=", "_", "|", "~", "^", "%"],
+                ["#", "@", "$", "&", "!", "?", ":", ";", '"', "'"],
+                ["ABC", ".", ",", "\\", "€", "£", "¥", "•", "…", "123"],
+                ["CLR", "TAB", "SPACE", "ENTER", "↩"],
+            ]
 
-    if key in {"↩", "ENTER"}:
-        self._llm_submit()
-        return
+        for row in rows:
+            rf = tk.Frame(self._osk_outer, bg=self._osk_keyboard_bg)
+            rf.pack(fill="x", pady=1)
+            for key in row:
+                self._make_osk_key(rf, key)
 
-    if key == "SPACE":
-        self.llm_entry.insert("end", " ")
-        return
+    def _make_osk_key(self, parent_frame, label):
+        wide = label in {"SPACE", "ENTER"}
+        accent = label in {"↩", "ENTER"}
+        btn = tk.Button(
+            parent_frame,
+            text=label,
+            command=lambda k=label: self._osk_key(k),
+            font=self._osk_key_font,
+            bg="#14f195" if accent else self._osk_key_bg,
+            fg="#04130b" if accent else self._osk_key_fg,
+            activebackground="#22c55e" if accent else self._osk_key_active,
+            activeforeground="#04130b" if accent else "#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=0,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground=self._osk_key_border,
+            highlightcolor=self._osk_key_border,
+        )
+        if wide:
+            btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
+        else:
+            btn.pack(side="left", expand=True, fill="x", padx=3, pady=3)
 
-    if key == "TAB":
-        self.llm_entry.insert("end", "    ")
-        return
+    def _osk_key(self, key: str):
+        self._best_effort_disable_system_keyboard()
 
-    self.llm_entry.insert("end", key)
+        if key == "⌫":
+            cur = self.llm_entry.get()
+            if cur:
+                self.llm_entry.delete(len(cur) - 1, "end")
+            return
+        if key == "⇧":
+            self._osk_shift = not self._osk_shift
+            self._render_osk()
+            return
+        if key == "123":
+            self._osk_mode = "num"
+            self._render_osk()
+            return
+        if key == "SYM":
+            self._osk_mode = "sym"
+            self._render_osk()
+            return
+        if key == "ABC":
+            self._osk_mode = "alpha"
+            self._osk_shift = False
+            self._render_osk()
+            return
+        if key == "CLR":
+            self.llm_entry.delete(0, "end")
+            return
+        if key in {"↩", "ENTER"}:
+            self._llm_submit()
+            return
+        if key == "SPACE":
+            self.llm_entry.insert("end", " ")
+            return
+        if key == "TAB":
+            self.llm_entry.insert("end", "    ")
+            return
+
+        self.llm_entry.insert("end", key)
 
     def _build_vision_ui(self, parent, button_font, title_font, info_font):
         topbar = tk.Frame(parent, bg="#05070a")
@@ -945,7 +915,7 @@ def _osk_key(self, key: str):
         ).pack(fill="x", pady=(0, 12))
 
     # =========================
-    # View switching
+    # View switching / actions
     # =========================
 
     def _show_home(self):
@@ -958,31 +928,35 @@ def _osk_key(self, key: str):
         self.home_frame.pack_forget()
         self.vision_frame.pack(fill="both", expand=True)
 
+    def _switch_view(self, mode: str):
+        self.view_mode = mode
+        self.home_dashboard.pack_forget()
+        self.live_panel.pack_forget()
+        self.llm_panel.pack_forget()
 
-def _switch_view(self, mode: str):
-    self.view_mode = mode
-    self.home_dashboard.pack_forget()
-    self.live_panel.pack_forget()
-    self.llm_panel.pack_forget()
+        inactive = {"bg": "#0b0f14", "fg": "#9effc7", "highlightbackground": "#14f195"}
+        active = {"bg": "#052e1c", "fg": "#eafff3", "highlightbackground": "#22c55e"}
 
-    inactive = {"bg": "#0b0f14", "fg": "#9effc7", "highlightbackground": "#14f195"}
-    active = {"bg": "#052e1c", "fg": "#eafff3", "highlightbackground": "#22c55e"}
+        self.home_btn.configure(**inactive)
+        self.live_btn.configure(**inactive)
+        self.llm_btn.configure(**inactive)
 
-    self.home_btn.configure(**inactive)
-    self.live_btn.configure(**inactive)
-    self.llm_btn.configure(**inactive)
+        if mode == "llm":
+            self.llm_panel.pack(fill="both", expand=True)
+            self.llm_btn.configure(**active)
+            self.llm_entry.focus_set()
+            self.root.after(80, self._best_effort_disable_system_keyboard)
+        elif mode == "live":
+            self.live_panel.pack(fill="both", expand=True)
+            self.live_btn.configure(**active)
+        else:
+            self.home_dashboard.pack(fill="both", expand=True)
+            self.home_btn.configure(**active)
 
-    if mode == "llm":
-        self.llm_panel.pack(fill="both", expand=True)
-        self.llm_btn.configure(**active)
-        self.llm_entry.focus_set()
-        self.root.after(80, self._best_effort_disable_system_keyboard)
-    elif mode == "live":
-        self.live_panel.pack(fill="both", expand=True)
-        self.live_btn.configure(**active)
-    else:
-        self.home_dashboard.pack(fill="both", expand=True)
-        self.home_btn.configure(**active)
+    def _refresh_ui_data(self):
+        self._poll_rag_dataset()
+        self._poll_vision()
+        self._best_effort_disable_system_keyboard()
 
     def _tap_reboot(self):
         now_ms = int(datetime.now().timestamp() * 1000)
@@ -991,7 +965,6 @@ def _switch_view(self, mode: str):
             return
 
         self._reboot_armed_until = now_ms + 4000
-        self.sub_text.set("Tap power again within 4s to reboot")
         self.reboot_button.configure(text="⏻!")
 
         def _clear_reboot_arm():
@@ -1004,22 +977,28 @@ def _switch_view(self, mode: str):
 
     def _reboot_now(self):
         self.reboot_button.configure(text="...")
-        self.sub_text.set("Rebooting system")
-
         def _worker():
-            commands = [
-                ["systemctl", "reboot"],
-                ["sudo", "systemctl", "reboot"],
-                ["reboot"],
-            ]
-            for cmd in commands:
+            for cmd in (["systemctl", "reboot"], ["sudo", "systemctl", "reboot"], ["reboot"]):
                 try:
                     subprocess.Popen(cmd)
                     return
                 except Exception:
                     continue
-
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _best_effort_disable_system_keyboard(self):
+        commands = [
+            ["gsettings", "set", "org.gnome.desktop.a11y.applications", "screen-keyboard-enabled", "false"],
+            ["gsettings", "set", "org.gnome.desktop.a11y.keyboard", "enable", "false"],
+            ["pkill", "-f", "onboard"],
+            ["pkill", "-f", "maliit"],
+            ["pkill", "-f", "caribou"],
+        ]
+        for cmd in commands:
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            except Exception:
+                pass
 
     # =========================
     # LLM chat
@@ -1048,10 +1027,10 @@ def _switch_view(self, mode: str):
 
         threading.Thread(target=_call, daemon=True).start()
 
-    def _llm_got_response(self, answer, error):
+    def _llm_got_response(self, answer, err):
         self._llm_thinking = False
-        if error:
-            self._llm_history.append(("error", error))
+        if err:
+            self._llm_history.append(("error", err))
         else:
             self._llm_history.append(("assistant", answer))
         self._llm_redraw()
@@ -1118,9 +1097,8 @@ def _switch_view(self, mode: str):
 
     def _set_voice_busy(self, busy: bool, status: str = ""):
         self.voice_busy = busy
-        self.voice_button_text.set("Listening..." if busy else "Tap Mic")
         if hasattr(self, "voice_button"):
-            self.voice_button.configure(text=self.voice_button_text.get())
+            self.voice_button.configure(text="Listening..." if busy else "Tap Mic")
         self.voice_status_text.set(
             status or ("Listening for your question..." if busy else "Press the mic, speak once, and AURA will respond.")
         )
@@ -1143,12 +1121,12 @@ def _switch_view(self, mode: str):
 
         threading.Thread(target=_call, daemon=True).start()
 
-    def _voice_request_done(self, result, error):
+    def _voice_request_done(self, result, err):
         self._set_voice_busy(False)
 
-        if error:
+        if err:
             self.voice_status_text.set("Voice request failed.")
-            self.voice_result_text.set(error)
+            self.voice_result_text.set(err)
             return
 
         transcript = (result or {}).get("transcript", "").strip()
@@ -1202,25 +1180,18 @@ def _switch_view(self, mode: str):
 
         if "[VOICE] question received:" in line:
             return "Heard: " + line.split(":", 1)[1].strip()
-
         if "[VOICE] speaking:" in line:
             return "Speaking..."
-
         if "[VOICE] answered:" in line:
             return "Done."
-
         if "[VOICE] button heard:" in line:
             return "Heard: " + line.split(":", 1)[1].strip()
-
         if "[VOICE] button capture loading model" in line:
             return "Loading speech model..."
-
         if "[AURA] Listening for command..." in line:
             return "Listening..."
-
         if "[AURA] No speech heard." in line:
             return "No speech heard."
-
         if "[AURA] Returning to wake mode." in line or "[AURA] Waiting for wake word..." in line:
             return None
 
@@ -1245,7 +1216,6 @@ def _switch_view(self, mode: str):
         if "[RAG JOB]" in line:
             text = line.split("[RAG JOB]", 1)[-1].strip()
             return f"[RAG] {text}"[:120]
-
         if "[LightRAG]" in line:
             text = line.split("[LightRAG]", 1)[-1].strip()
             return f"[RAG] {text}"[:120]
@@ -1271,8 +1241,7 @@ def _switch_view(self, mode: str):
     # =========================
 
     def _start_reader(self):
-        thread = threading.Thread(target=self._reader_worker, daemon=True)
-        thread.start()
+        threading.Thread(target=self._reader_worker, daemon=True).start()
 
     def _reader_worker(self):
         commands = [
@@ -1281,7 +1250,6 @@ def _switch_view(self, mode: str):
         ]
 
         last_error = None
-
         for cmd in commands:
             try:
                 self.log_queue.put(f"[UI] Log source: {' '.join(cmd)}")
@@ -1302,9 +1270,7 @@ def _switch_view(self, mode: str):
                     line = raw_line.rstrip("\n")
                     if line.strip():
                         self.log_queue.put(line)
-
                 return
-
             except Exception as exc:
                 last_error = exc
                 self.log_queue.put(f"[UI ERROR] Log source failed: {exc}")
@@ -1351,7 +1317,7 @@ def _switch_view(self, mode: str):
         self.log_text.configure(state="disabled")
 
     def _append_raw_log(self, line: str):
-        if not getattr(self, "raw_log_text", None):
+        if not hasattr(self, "raw_log_text"):
             return
 
         should_follow = self._is_scrolled_near_bottom(self.raw_log_text)
@@ -1378,8 +1344,7 @@ def _switch_view(self, mode: str):
             self.status_mini_label.configure(fg=style["fg"])
 
     def _clean_event(self, line: str) -> str:
-        line = re.sub(r"\s+", " ", line).strip()
-        return line[:150]
+        return re.sub(r"\s+", " ", line).strip()[:150]
 
     def _update_state_from_line(self, line: str):
         lower = line.lower()
@@ -1512,12 +1477,14 @@ def _switch_view(self, mode: str):
         self.voice_should_resume = False
         self._camera_fail_count = 0
         self.current_frame_image = None
-        self.camera_label.configure(image="", text="Camera stopped.")
+        if hasattr(self, "camera_label"):
+            self.camera_label.configure(image="", text="Camera stopped.")
         self.vision_title_text.set("")
         self.vision_status_text.set("Vision mode closed.")
         self.vision_meta_text.set("")
         self.detection_text.set("No detections yet.")
-        self._set_mode_button_styles()
+        if hasattr(self, "mode_buttons"):
+            self._set_mode_button_styles()
         self._show_home()
         self._set_status("READY", "Returned to home screen")
 
@@ -1529,7 +1496,6 @@ def _switch_view(self, mode: str):
         if self.running and self.ui_mode == "vision" and self.active_vision_mode:
             self._vision_poll_counter += 1
             self._refresh_vision_frame()
-
             if self._vision_poll_counter % DETECTION_EVERY_N_POLLS == 0:
                 self._refresh_detections()
 
@@ -1559,19 +1525,13 @@ def _switch_view(self, mode: str):
         except error.HTTPError as exc:
             self._camera_fail_count += 1
             if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
-                self.camera_label.configure(
-                    image="",
-                    text=f"Camera HTTP error: {exc.code}"
-                )
+                self.camera_label.configure(image="", text=f"Camera HTTP error: {exc.code}")
                 self.current_frame_image = None
 
         except Exception as exc:
             self._camera_fail_count += 1
             if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
-                self.camera_label.configure(
-                    image="",
-                    text=f"Waiting for camera...\n{exc}"
-                )
+                self.camera_label.configure(image="", text=f"Waiting for camera...\n{exc}")
                 self.current_frame_image = None
             else:
                 self.vision_status_text.set("Camera reconnecting...")
