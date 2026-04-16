@@ -489,6 +489,7 @@ class AuraConsoleApp:
     def _build_live_panel(self, parent, section_font):
         self._build_console_panel(parent, section_font, title="LIVE TERMINAL", raw=True)
 
+
     def _build_llm_panel(self, parent, section_font, button_font):
         chat_card = tk.Frame(
             parent,
@@ -618,6 +619,8 @@ class AuraConsoleApp:
             bg="#0b1a11",
             fg="#ffffff",
             insertbackground="#ffffff",
+            disabledbackground="#0b1a11",
+            disabledforeground="#cbd5e1",
             relief="flat",
             font=button_font,
             bd=0,
@@ -651,9 +654,10 @@ class AuraConsoleApp:
 
     def _build_osk(self, parent):
         sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
         self._osk_key_font = tkfont.Font(
             family="Courier",
-            size=max(11, int(sw * 0.014)),
+            size=max(9, int(sw * 0.0105)),
             weight="bold",
         )
         self._osk_keyboard_bg = "#06150d"
@@ -661,11 +665,12 @@ class AuraConsoleApp:
         self._osk_key_active = "#14532d"
         self._osk_key_fg = "#d1fae5"
         self._osk_key_border = "#14f195"
+        self._osk_key_height = max(1, int(sh * 0.0015))
 
         self._osk_outer = tk.Frame(
             parent,
             bg=self._osk_keyboard_bg,
-            pady=6,
+            pady=4,
             padx=6,
             highlightbackground=self._osk_key_border,
             highlightthickness=1,
@@ -680,49 +685,53 @@ class AuraConsoleApp:
         for child in self._osk_outer.winfo_children():
             child.destroy()
 
-        mode = self._osk_mode
         shift = self._osk_shift
+        caps = self._osk_caps
+        upper = caps ^ shift
 
-        if mode == "alpha":
+        if self._osk_mode == "alpha":
             rows = [
-                list("1234567890"),
-                list("QWERTYUIOP" if not shift else "qwertyuiop"),
-                list("ASDFGHJKL" if not shift else "asdfghjkl"),
-                ["⇧"] + list("ZXCVBNM" if not shift else "zxcvbnm") + ["⌫"],
-                ["123", ",", "SPACE", ".", "↩"],
+                [("1",1),("2",1),("3",1),("4",1),("5",1),("6",1),("7",1),("8",1),("9",1),("0",1)],
+                [(c,1) for c in (list("QWERTYUIOP") if upper else list("qwertyuiop"))],
+                [("CAPS",1.5)] + [(c,1) for c in (list("ASDFGHJKL") if upper else list("asdfghjkl"))] + [("⌫",1.5)],
+                [("SHIFT",1.8)] + [(c,1) for c in (list("ZXCVBNM") if upper else list("zxcvbnm"))] + [("123",1.8)],
+                [("SYM",1.4),(",",1),("SPACE",4.2),(".",1),("↩",1.8)],
             ]
-        elif mode == "num":
+        elif self._osk_mode == "num":
             rows = [
-                list("1234567890"),
-                ["-", "/", ":", ";", "(", ")", "$", "&", "@", '"'],
-                [".", ",", "?", "!", "'", "#", "%", "^", "*", "⌫"],
-                ["ABC", "+", "=", "_", "\\", "|", "~", "<", ">", "SYM"],
-                ["CLR", "[", "SPACE", "]", "↩"],
+                [("1",1),("2",1),("3",1),("4",1),("5",1),("6",1),("7",1),("8",1),("9",1),("0",1)],
+                [("-",1),("/",1),(":",1),(";",1),("(",1),(")",1),("$",1),("&",1),("@",1),('"',1)],
+                [(".",1),(",",1),("?",1),("!",1),("'",1),("#",1),("%",1),("^",1),("*",1),("⌫",1.5)],
+                [("ABC",1.8),("+",1),("=",1),("_",1),("\\",1),("|",1),("~",1),("<",1),(">",1),("SYM",1.8)],
+                [("TAB",1.4),("[",1),("SPACE",4.2),("]",1),("↩",1.8)],
             ]
         else:
             rows = [
-                ["`", "{", "}", "[", "]", "(", ")", "<", ">", "⌫"],
-                ["+", "-", "*", "/", "=", "_", "|", "~", "^", "%"],
-                ["#", "@", "$", "&", "!", "?", ":", ";", '"', "'"],
-                ["ABC", ".", ",", "\\", "€", "£", "¥", "•", "…", "123"],
-                ["CLR", "TAB", "SPACE", "ENTER", "↩"],
+                [("`",1),("{",1),("}",1),("[",1),("]",1),("(",1),(")",1),("<",1),(">",1),("⌫",1.5)],
+                [("+",1),("-",1),("*",1),("/",1),("=",1),("_",1),("|",1),("~",1),("^",1),("%",1)],
+                [("#",1),("@",1),("$",1),("&",1),("!",1),("?",1),(":",1),(";",1),('"',1),("'",1)],
+                [("ABC",1.8),(".",1),(",",1),("\\",1),("€",1),("£",1),("¥",1),("•",1),("…",1),("123",1.8)],
+                [("TAB",1.4),("CLR",1.4),("SPACE",3.8),("↩",1.8)],
             ]
 
         for row in rows:
             rf = tk.Frame(self._osk_outer, bg=self._osk_keyboard_bg)
             rf.pack(fill="x", pady=1)
-            for key in row:
-                self._make_osk_key(rf, key)
+            total_weight = sum(weight for _, weight in row)
+            col = 0
+            for label, weight in row:
+                self._make_osk_key(rf, label, col, weight, total_weight)
+                col += 1
 
-    def _make_osk_key(self, parent_frame, label):
-        wide = label in {"SPACE", "ENTER"}
-        extra_wide = label in {"TAB", "SHIFT", "CAPS"}
-        accent = label in {"↩", "ENTER"}
+    def _make_osk_key(self, parent_frame, label, column, weight, total_weight):
+        accent = label == "↩"
         toggle_on = (label == "SHIFT" and self._osk_shift) or (label == "CAPS" and self._osk_caps)
 
         bg = "#14f195" if accent else ("#14532d" if toggle_on else self._osk_key_bg)
         fg = "#04130b" if accent else self._osk_key_fg
         active_bg = "#22c55e" if accent else self._osk_key_active
+
+        parent_frame.grid_columnconfigure(column, weight=int(weight * 100))
 
         btn = tk.Button(
             parent_frame,
@@ -737,17 +746,13 @@ class AuraConsoleApp:
             bd=0,
             cursor="hand2",
             padx=0,
-            pady=8,
+            pady=4,
+            height=self._osk_key_height,
             highlightthickness=1,
             highlightbackground=self._osk_key_border,
             highlightcolor=self._osk_key_border,
         )
-        if wide:
-            btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
-        elif extra_wide:
-            btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
-        else:
-            btn.pack(side="left", expand=True, fill="x", padx=3, pady=3)
+        btn.grid(row=0, column=column, sticky="nsew", padx=2, pady=2)
 
     def _osk_key(self, key: str):
         self._best_effort_disable_system_keyboard()
@@ -783,14 +788,17 @@ class AuraConsoleApp:
         if key == "CLR":
             self.llm_entry.delete(0, "end")
             return
-        if key in {"↩", "ENTER"}:
-            self._llm_submit()
-            return
         if key == "SPACE":
             self.llm_entry.insert("end", " ")
+            if self._osk_mode == "alpha" and self._osk_shift and not self._osk_caps:
+                self._osk_shift = False
+                self._render_osk()
             return
         if key == "TAB":
             self.llm_entry.insert("end", "    ")
+            return
+        if key == "↩":
+            self._llm_submit()
             return
 
         self.llm_entry.insert("end", key)
