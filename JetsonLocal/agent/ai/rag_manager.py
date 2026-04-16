@@ -27,6 +27,7 @@ class RagManager:
         self.rag_system: Optional[LightRAG] = None
         self.active_db_name: Optional[str] = None
         self.active_db_path: Optional[Path] = None
+        self.build_in_progress: bool = False
 
     def get_db_dir(self, db_name: str) -> Path:
         return self.root_dir / _safe_name(db_name)
@@ -157,137 +158,153 @@ class RagManager:
         print(f"[RAG JOB] received {len(document_paths)} PDF(s) for '{db_name}'")
         print(f"[RAG JOB] preparing local DB folder: {db_dir}")
 
-        if not self.initialize_db(db_name, reset=True):
-            raise RuntimeError(f"Failed to initialize local DB for '{db_name}'")
-
-        shutil.rmtree(temp_pdf_dir, ignore_errors=True)
-        temp_pdf_dir.mkdir(parents=True, exist_ok=True)
-
-        processed_files: List[str] = []
-        skipped_files: List[str] = []
-        failed_files: List[Dict[str, str]] = []
-
-        total_files = len(document_paths)
+        self.build_in_progress = True
         try:
-            for file_idx, rel_path in enumerate(document_paths):
-                filename = os.path.basename(rel_path) or "document.pdf"
-                local_pdf_path = temp_pdf_dir / filename
-                file_num = file_idx + 1
+            if not self.initialize_db(db_name, reset=True):
+                raise RuntimeError(f"Failed to initialize local DB for '{db_name}'")
 
-                try:
-                    print(f"[RAG JOB] ── file {file_num}/{total_files}: '{filename}' ──")
-                    print(f"[RAG JOB] downloading '{filename}' from website...")
-                    await asyncio.to_thread(
-                        api_client.download_document,
-                        rel_path,
-                        str(local_pdf_path),
-                    )
+            # Capture the instance this build owns. command_loop may replace
+            # self.rag_system concurrently (e.g. a chat query triggers reload),
+            # which would corrupt flush() if we kept using self.rag_system.
+            _rag = self.rag_system
 
-                    if not local_pdf_path.exists():
-                        raise RuntimeError("Downloaded file does not exist after download")
+            shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+            temp_pdf_dir.mkdir(parents=True, exist_ok=True)
 
-                    file_size = local_pdf_path.stat().st_size
-                    print(f"[RAG JOB] downloaded '{filename}' ({file_size:,} bytes)")
+            processed_files: List[str] = []
+            skipped_files: List[str] = []
+            failed_files: List[Dict[str, str]] = []
 
-                    print(f"[RAG JOB] extracting text from '{filename}'...")
-                    text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
-                    text_len = len(text.strip())
-                    print(f"[RAG JOB] extracted {text_len:,} chars from '{filename}'")
+            total_files = len(document_paths)
+            try:
+                for file_idx, rel_path in enumerate(document_paths):
+                    filename = os.path.basename(rel_path) or "document.pdf"
+                    local_pdf_path = temp_pdf_dir / filename
+                    file_num = file_idx + 1
 
-                    if not text.strip():
-                        print(f"[RAG JOB] skipped '{filename}' — no extractable text")
-                        skipped_files.append(filename)
+                    try:
+                        print(f"[RAG JOB] ── file {file_num}/{total_files}: '{filename}' ──")
+                        print(f"[RAG JOB] downloading '{filename}' from website...")
+                        await asyncio.to_thread(
+                            api_client.download_document,
+                            rel_path,
+                            str(local_pdf_path),
+                        )
+
+                        if not local_pdf_path.exists():
+                            raise RuntimeError("Downloaded file does not exist after download")
+
+                        file_size = local_pdf_path.stat().st_size
+                        print(f"[RAG JOB] downloaded '{filename}' ({file_size:,} bytes)")
+
+                        print(f"[RAG JOB] extracting text from '{filename}'...")
+                        text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
+                        text_len = len(text.strip())
+                        print(f"[RAG JOB] extracted {text_len:,} chars from '{filename}'")
+
+                        if not text.strip():
+                            print(f"[RAG JOB] skipped '{filename}' — no extractable text")
+                            skipped_files.append(filename)
+                            continue
+
+                        chunks_before = len(_rag._rows)
+                        print(f"[RAG JOB] vectorizing '{filename}' (this may take several minutes)...")
+                        t0 = time.time()
+                        await _rag.ainsert(
+                            text,
+                            meta={
+                                "source": rel_path,
+                                "filename": filename,
+                            },
+                        )
+                        elapsed = time.time() - t0
+                        chunks_added = len(_rag._rows) - chunks_before
+                        if chunks_added == 0:
+                            print(f"[RAG JOB] WARNING: '{filename}' produced 0 chunks (all filtered or empty text)")
+                            failed_files.append({"file": filename, "error": "produced 0 insertable chunks"})
+                            continue
+                        stats = _rag.stats()
+                        print(
+                            f"[RAG JOB] '{filename}' done in {elapsed:.1f}s — "
+                            f"DB: {stats['chunk_count']} chunks, "
+                            f"{stats['entity_count']} entities, "
+                            f"{stats['relation_count']} relations"
+                        )
+                        print(f"[RAG JOB] progress: {file_num}/{total_files} files processed")
+
+                        processed_files.append(filename)
+
+                    except Exception as file_error:
+                        err_msg = str(file_error)
+                        print(f"[RAG JOB] FAILED on '{filename}': {err_msg}")
+                        print(traceback.format_exc())
+                        failed_files.append({
+                            "file": filename,
+                            "error": err_msg,
+                        })
                         continue
 
-                    if self.rag_system is None:
-                        raise RuntimeError("LightRAG is not initialized")
-
-                    print(f"[RAG JOB] vectorizing '{filename}' (this may take several minutes)...")
-                    t0 = time.time()
-                    await self.rag_system.ainsert(
-                        text,
-                        meta={
-                            "source": rel_path,
-                            "filename": filename,
-                        },
+                if not processed_files:
+                    raise RuntimeError(
+                        "No PDFs were successfully inserted into LightRAG. "
+                        f"Skipped={len(skipped_files)}, Failed={len(failed_files)}"
                     )
-                    elapsed = time.time() - t0
-                    stats = self.rag_system.stats()
-                    print(
-                        f"[RAG JOB] '{filename}' done in {elapsed:.1f}s — "
-                        f"DB: {stats['chunk_count']} chunks, "
-                        f"{stats['entity_count']} entities, "
-                        f"{stats['relation_count']} relations"
-                    )
-                    print(f"[RAG JOB] progress: {file_num}/{total_files} files processed")
 
-                    processed_files.append(filename)
-
-                except Exception as file_error:
-                    err_msg = str(file_error)
-                    print(f"[RAG JOB] FAILED on '{filename}': {err_msg}")
-                    print(traceback.format_exc())
-                    failed_files.append({
-                        "file": filename,
-                        "error": err_msg,
-                    })
-                    continue
-
-            if not processed_files:
-                raise RuntimeError(
-                    "No PDFs were successfully inserted into LightRAG. "
-                    f"Skipped={len(skipped_files)}, Failed={len(failed_files)}"
+                manifest = self.write_manifest(
+                    db_name=db_name,
+                    source_paths=document_paths,
+                    processed_files=processed_files,
+                    skipped_files=skipped_files,
+                    failed_files=failed_files,
                 )
 
-            manifest = self.write_manifest(
-                db_name=db_name,
-                source_paths=document_paths,
-                processed_files=processed_files,
-                skipped_files=skipped_files,
-                failed_files=failed_files,
-            )
+                print("[RAG JOB] flushing vector DB files to disk")
+                await asyncio.to_thread(_rag.flush)
 
-            if self.rag_system is None:
-                raise RuntimeError("LightRAG became unavailable before flush")
+                # Ensure rag_manager points to the fully built instance even if
+                # command_loop replaced self.rag_system during the build.
+                self.rag_system = _rag
+                self.active_db_name = db_name
+                self.active_db_path = db_dir
 
-            print("[RAG JOB] flushing vector DB files to disk")
-            await asyncio.to_thread(self.rag_system.flush)
+                print("[RAG JOB] deleting temporary PDFs from Jetson")
+                shutil.rmtree(temp_pdf_dir, ignore_errors=True)
 
-            print("[RAG JOB] deleting temporary PDFs from Jetson")
-            shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+                print(f"[RAG JOB] local vector DB saved in: {db_dir}")
+                print(f"[RAG JOB] sending vector DB copy back to website for '{db_name}'")
 
-            print(f"[RAG JOB] local vector DB saved in: {db_dir}")
-            print(f"[RAG JOB] sending vector DB copy back to website for '{db_name}'")
+                upload_result = await asyncio.to_thread(
+                    api_client.upload_vector_db,
+                    db_name,
+                    str(db_dir),
+                )
 
-            upload_result = await asyncio.to_thread(
-                api_client.upload_vector_db,
-                db_name,
-                str(db_dir),
-            )
+                print(f"[RAG JOB] vector DB sync complete for '{db_name}'")
 
-            print(f"[RAG JOB] vector DB sync complete for '{db_name}'")
+                return {
+                    "ok": True,
+                    "db_name": db_name,
+                    "db_dir": str(db_dir),
+                    "processed_count": len(processed_files),
+                    "skipped_count": len(skipped_files),
+                    "failed_count": len(failed_files),
+                    "processed_files": processed_files,
+                    "skipped_files": skipped_files,
+                    "failed_files": failed_files,
+                    "manifest": manifest,
+                    "upload_result": upload_result,
+                }
 
-            return {
-                "ok": True,
-                "db_name": db_name,
-                "db_dir": str(db_dir),
-                "processed_count": len(processed_files),
-                "skipped_count": len(skipped_files),
-                "failed_count": len(failed_files),
-                "processed_files": processed_files,
-                "skipped_files": skipped_files,
-                "failed_files": failed_files,
-                "manifest": manifest,
-                "upload_result": upload_result,
-            }
+            finally:
+                if temp_pdf_dir.exists():
+                    try:
+                        print("[RAG JOB] cleaning any remaining temporary PDFs")
+                        shutil.rmtree(temp_pdf_dir, ignore_errors=True)
+                    except Exception:
+                        pass
 
         finally:
-            if temp_pdf_dir.exists():
-                try:
-                    print("[RAG JOB] cleaning any remaining temporary PDFs")
-                    shutil.rmtree(temp_pdf_dir, ignore_errors=True)
-                except Exception:
-                    pass
+            self.build_in_progress = False
 
     async def load_remote_db(self, db_name: str, api_client) -> bool:
         db_dir = self.get_db_dir(db_name)

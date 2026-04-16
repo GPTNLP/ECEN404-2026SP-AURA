@@ -1037,6 +1037,11 @@ async def command_loop():
                             chat_manager.set_session(session_id)
 
                         if db_name:
+                            if rag_manager.build_in_progress:
+                                raise RuntimeError(
+                                    f"Build in progress for '{rag_manager.active_db_name or db_name}' — "
+                                    "please wait for vectorization to finish and try again."
+                                )
                             rag_sys = rag_manager.rag_system
                             cached_empty = (rag_sys is not None and not rag_sys._rows)
                             needs_load = (
@@ -1046,21 +1051,24 @@ async def command_loop():
                             )
                             if needs_load:
                                 if cached_empty:
-                                    print(f"[CHAT] cached DB '{db_name}' has 0 chunks — reloading")
+                                    print(f"[CHAT] cached DB '{db_name}' has 0 chunks — reloading from disk")
                                 local_db_dir = rag_manager.get_db_dir(db_name)
                                 local_meta   = local_db_dir / "meta.json"
                                 if local_db_dir.exists() and local_meta.exists():
-                                    # DB already on Jetson disk — load without downloading
                                     print(f"[CHAT] loading DB '{db_name}' from local disk")
                                     ok = rag_manager.initialize_db(db_name, reset=False)
                                 else:
-                                    # Not on disk — download from cloud
                                     print(f"[CHAT] downloading DB '{db_name}' from cloud (not found locally)")
                                     ok = await rag_manager.load_remote_db(db_name, api)
                                 if not ok:
                                     raise RuntimeError(f"Failed to load DB '{db_name}'")
                                 loaded_chunks = len(rag_manager.rag_system._rows) if rag_manager.rag_system else 0
                                 print(f"[CHAT] DB '{db_name}' loaded — {loaded_chunks} chunk(s)")
+                                if loaded_chunks == 0:
+                                    raise RuntimeError(
+                                        f"DB '{db_name}' loaded but has 0 chunks. "
+                                        "Run a fresh build from the Database page."
+                                    )
                             else:
                                 chunk_count = len(rag_sys._rows) if rag_sys else 0
                                 print(f"[CHAT] reusing already loaded DB: {db_name} ({chunk_count} chunks)")
