@@ -28,6 +28,7 @@ ALLOWED_COMMANDS = {
     "camera_activate_raw",
     "camera_activate_detection",
     "camera_deactivate",
+    "flush_models",
 }
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
@@ -59,6 +60,10 @@ def _save_commands(commands: list[dict]) -> None:
 
 def _require_admin(request: Request) -> None:
     require_role(request, "admin")
+
+
+def _require_admin_or_ta(request: Request) -> None:
+    require_role(request, "admin", "ta")
 
 
 def _require_device_secret(x_device_secret: str | None) -> None:
@@ -235,3 +240,30 @@ def chat_via_jetson(payload: DeviceCommandIn, request: Request):
         time.sleep(0.3)
 
     raise HTTPException(status_code=504, detail="Jetson did not respond in time")
+
+
+@router.post("/device/admin/flush_models")
+def flush_jetson_models(payload: DeviceCommandIn, request: Request):
+    """Queue a flush_models command to clear LLM + STT from Jetson VRAM/RAM.
+    Accessible by admin and TA roles.
+    """
+    _require_admin_or_ta(request)
+
+    commands = _load_commands()
+    now_ms = int(time.time() * 1000)
+    now_s = int(time.time())
+
+    entry = {
+        "id": f"{payload.device_id}-{now_ms}",
+        "device_id": payload.device_id,
+        "command": "flush_models",
+        "payload": {},
+        "created_at": now_s,
+        "status": "pending",
+    }
+
+    commands.append(entry)
+    _save_commands(commands)
+
+    print(f"[DEVICE_COMMANDS] queued flush_models for {payload.device_id}")
+    return {"ok": True, "queued": entry}

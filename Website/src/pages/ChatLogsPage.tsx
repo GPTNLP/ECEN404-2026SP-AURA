@@ -109,6 +109,8 @@ export default function ChatLogsPage() {
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [sessDetailLoading, setSessDetailLoading] = useState(false);
   const [sessionSearch, setSessionSearch] = useState("");
+  const [deletingSession, setDeletingSession] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
 
   const canFetch = !!token && isAdmin;
 
@@ -196,6 +198,7 @@ export default function ChatLogsPage() {
 
   const openSession = async (sessionId: string) => {
     if (!token) return;
+    setDeleteConfirm(false);
     setSessDetailLoading(true);
     setSessError(null);
 
@@ -228,6 +231,32 @@ export default function ChatLogsPage() {
   const openInSimulator = (sessionId: string) => {
     localStorage.setItem("aura_active_session_id", sessionId);
     window.location.href = `/simulator?session_id=${encodeURIComponent(sessionId)}`;
+  };
+
+  const deleteSession = async (sessionId: string) => {
+    if (!token) return;
+    setDeletingSession(true);
+    setSessError(null);
+
+    try {
+      const res = await fetch(
+        `${API_BASE}/logs/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: "include",
+        }
+      );
+
+      if (!res.ok) throw new Error(await res.text());
+      setSelectedSession(null);
+      setDeleteConfirm(false);
+      setSessions((prev) => prev.filter((s) => s.session_id !== sessionId));
+    } catch (e: any) {
+      setSessError(e?.message || "Failed to delete session");
+    } finally {
+      setDeletingSession(false);
+    }
   };
 
   useEffect(() => {
@@ -389,13 +418,46 @@ export default function ChatLogsPage() {
                       </div>
                     </div>
 
-                    <button
-                      className="btn btn-primary"
-                      onClick={() => openInSimulator(selectedSession.session_id)}
-                      type="button"
-                    >
-                      Open in Simulator
-                    </button>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => openInSimulator(selectedSession.session_id)}
+                        type="button"
+                      >
+                        Open in Simulator
+                      </button>
+
+                      {!deleteConfirm ? (
+                        <button
+                          className="btn"
+                          style={{ color: "var(--status-bad, #f87171)" }}
+                          onClick={() => setDeleteConfirm(true)}
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="btn"
+                            style={{ color: "var(--status-bad, #f87171)" }}
+                            disabled={deletingSession}
+                            onClick={() => void deleteSession(selectedSession.session_id)}
+                            type="button"
+                          >
+                            {deletingSession ? "Deleting..." : "Confirm Delete"}
+                          </button>
+                          <button
+                            className="btn"
+                            onClick={() => setDeleteConfirm(false)}
+                            disabled={deletingSession}
+                            type="button"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
 
                   <div className="chatlogs-thread-body">

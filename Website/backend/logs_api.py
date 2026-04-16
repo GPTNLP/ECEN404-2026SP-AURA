@@ -493,3 +493,13 @@ def get_session(
             raise HTTPException(status_code=403, detail="Admin only")
 
     return _get_session_or_404(session_id)
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, request: Request):
+    require_admin(request)
+    path = _session_path(session_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    path.unlink()
+    return {"ok": True, "deleted": session_id}

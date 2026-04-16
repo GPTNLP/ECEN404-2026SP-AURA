@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "../styles/dashboard.css";
 import robotImage from "../assets/robot.png";
+import { useAuth } from "../services/authService";
 
 type HealthStatus = "OK" | "WARN" | "BAD";
 
@@ -96,9 +97,14 @@ function staleHealth(): HealthStatus {
 }
 
 export default function DashboardPage() {
+  const { token, user } = useAuth();
+  const canFlush = user?.role === "admin" || user?.role === "ta";
+
   const [device, setDevice] = useState<DeviceRecord | null>(null);
   const [error, setError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
+  const [flushState, setFlushState] = useState<"idle" | "pending" | "ok" | "err">("idle");
+  const [flushNote, setFlushNote] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -183,6 +189,29 @@ export default function DashboardPage() {
   const gpuValue = isOnline ? fmt(extra?.gpu_percent, "%", 1) : "Unknown";
   const uptimeValue = isOnline ? formatUptime(extra?.uptime_seconds) : "Unknown";
 
+  const flushModels = async () => {
+    if (!token || !device) return;
+    setFlushState("pending");
+    setFlushNote("");
+    try {
+      const res = await fetch(`${API_BASE}/device/admin/flush_models`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ device_id: device.device_id, command: "flush_models" }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setFlushState("ok");
+      setFlushNote("Flush queued — Jetson will unload models on next poll.");
+    } catch (err) {
+      setFlushState("err");
+      setFlushNote(err instanceof Error ? err.message : "Flush failed");
+    }
+  };
+
   const esp32 = extra?.esp32;
 
   const esp32Value = !isOnline
@@ -248,6 +277,30 @@ export default function DashboardPage() {
       </div>
 
       {error ? <div className="dash-error">Dashboard load failed: {error}</div> : null}
+
+      {canFlush && (
+        <section className="dashboard-section">
+          <div className="dash-title-row">
+            <h2 className="dash-title">Jetson Maintenance</h2>
+            <div className="dash-subtitle">Free VRAM/RAM by unloading idle models</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <button
+              className="btn btn-primary"
+              onClick={() => void flushModels()}
+              disabled={flushState === "pending" || !device}
+              type="button"
+            >
+              {flushState === "pending" ? "Queuing..." : "Flush Models"}
+            </button>
+            {flushNote && (
+              <span style={{ color: flushState === "err" ? "var(--status-bad, #f87171)" : "var(--status-good, #4ade80)", fontSize: "0.85rem" }}>
+                {flushNote}
+              </span>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="dashboard-section">
         <div className="dash-title-row">

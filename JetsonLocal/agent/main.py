@@ -1155,6 +1155,65 @@ async def command_loop():
                             },
                         )
 
+                elif cmd == "flush_models":
+                    try:
+                        set_ui_state("READY", "Flushing models")
+                        flushed = []
+
+                        # Unload LLM from Ollama by setting keep_alive=0
+                        try:
+                            _flush_ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
+                            from core.config import DEFAULT_MODEL as _flush_model
+                            requests.post(
+                                f"{_flush_ollama_url}/api/generate",
+                                json={
+                                    "model": _flush_model,
+                                    "prompt": "",
+                                    "stream": False,
+                                    "keep_alive": 0,
+                                },
+                                timeout=15.0,
+                            )
+                            flushed.append("llm")
+                            print(f"[FLUSH] LLM '{_flush_model}' unloaded from Ollama VRAM")
+                        except Exception as _fe:
+                            print(f"[FLUSH] LLM unload skipped: {_fe}")
+
+                        # Unload Whisper STT model
+                        if stt_service is not None:
+                            try:
+                                await asyncio.to_thread(stt_service.unload_model)
+                                flushed.append("stt")
+                                print("[FLUSH] Whisper STT model unloaded")
+                            except Exception as _fe:
+                                print(f"[FLUSH] STT unload skipped: {_fe}")
+
+                        note = f"Flushed: {', '.join(flushed)}" if flushed else "Nothing to flush"
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": note,
+                                "result": {"flushed": flushed},
+                            },
+                        )
+                        quiet_print("command", f"[COMMAND] flush_models ok: {flushed}")
+                        set_ui_state("READY", "Models flushed")
+                    except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"flush_models failed: {e}",
+                            },
+                        )
+                        quiet_print("command", f"[COMMAND] flush_models failed: {e}")
+
                 else:
                     await asyncio.to_thread(
                         api.ack_command,

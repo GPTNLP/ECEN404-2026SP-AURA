@@ -127,6 +127,10 @@ class ApiClient:
             "meta.json",
             "db.json",
             "entities.json",
+            "graph.json",
+            "entity_list.json",
+            "entity_emb.npy",
+            "entity_faiss.index",
         ]
 
         files_to_send = []
@@ -169,6 +173,10 @@ class ApiClient:
             "meta.json",
             "db.json",
             "entities.json",
+            "graph.json",
+            "entity_list.json",
+            "entity_emb.npy",
+            "entity_faiss.index",
         ]
 
         os.makedirs(dest_dir, exist_ok=True)
