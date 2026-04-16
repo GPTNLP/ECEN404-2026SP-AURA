@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 import io
 import json
@@ -24,6 +25,7 @@ SERVICE_NAME = "aura-agent.service"
 API_BASE = "http://127.0.0.1:8000"
 
 MAX_LOG_LINES = 220
+MAX_RAW_LOG_LINES = 600
 POLL_MS = 150
 FRAME_MS = 70
 DETECTION_EVERY_N_POLLS = 2
@@ -81,9 +83,10 @@ class AuraConsoleApp:
         self.running = True
         self.reader_process = None
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self._reboot_armed_until = None
 
         self.ui_mode = "home"
-        self.view_mode = "console"
+        self.view_mode = "home"
         self.active_vision_mode = None
         self.voice_should_resume = False
         self.current_frame_image = None
@@ -107,7 +110,7 @@ class AuraConsoleApp:
 
         self._llm_thinking = False
         self._llm_history = []
-        self._osk_shift = False   # tracks whether OSK is in uppercase (default) or lower
+        self._osk_shift = False
 
         self._vision_poll_counter = 0
         self._camera_fail_count = 0
@@ -161,8 +164,11 @@ class AuraConsoleApp:
         )
         self.header.pack(fill="x", pady=(0, 10))
 
+        header_inner = tk.Frame(self.header, bg="#0b0f14")
+        header_inner.pack(fill="x")
+
         self.header_label = tk.Label(
-            self.header,
+            header_inner,
             textvariable=self.banner_text,
             fg="#14f195",
             bg="#0b0f14",
@@ -171,7 +177,27 @@ class AuraConsoleApp:
             padx=10,
             pady=10,
         )
-        self.header_label.pack(fill="x")
+        self.header_label.pack(side="left", fill="x", expand=True)
+
+        self.reboot_button = tk.Button(
+            header_inner,
+            text="⏻",
+            command=self._tap_reboot,
+            font=tkfont.Font(family="Courier", size=max(18, int(sw * 0.024)), weight="bold"),
+            bg="#0b0f14",
+            fg="#14f195",
+            activebackground="#052e1c",
+            activeforeground="#eafff3",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=14,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.reboot_button.pack(side="right", padx=10, pady=8)
 
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
@@ -194,7 +220,7 @@ class AuraConsoleApp:
             return bottom >= (1.0 - threshold)
         except Exception:
             return True
-    
+
     def _outline_button(
         self,
         parent,
@@ -204,6 +230,9 @@ class AuraConsoleApp:
         *,
         fg=BTN_FG,
         highlight=BTN_GREEN,
+        bg=BTN_BG,
+        active_bg=BTN_ACTIVE_BG,
+        active_fg=BTN_ACTIVE_FG,
         padx=20,
         pady=12,
         fill=False,
@@ -213,10 +242,10 @@ class AuraConsoleApp:
             text=text,
             command=command,
             font=font,
-            bg=BTN_BG,
+            bg=bg,
             fg=fg,
-            activebackground=BTN_ACTIVE_BG,
-            activeforeground=BTN_ACTIVE_FG,
+            activebackground=active_bg,
+            activeforeground=active_fg,
             relief="flat",
             bd=0,
             cursor="hand2",
@@ -239,28 +268,43 @@ class AuraConsoleApp:
         )
         mode_card.pack(fill="x", pady=(0, 10))
 
-        btn_row = tk.Frame(mode_card, bg="#0b0f14")
-        btn_row.pack(side="left", padx=12, pady=10)
+        tabs_wrap = tk.Frame(mode_card, bg="#0b0f14")
+        tabs_wrap.pack(side="left", fill="x", expand=True, padx=12, pady=10)
 
-        self.console_btn = self._outline_button(
-            btn_row,
-            "CONSOLE",
-            lambda: self._switch_view("console"),
+        self.home_btn = self._outline_button(
+            tabs_wrap,
+            "HOME",
+            lambda: self._switch_view("home"),
             button_font,
             fg="#ffffff",
             highlight=BTN_GREEN,
+            padx=10,
+            pady=14,
         )
-        self.console_btn.pack(side="left", padx=(0, 8))
-
+        self.live_btn = self._outline_button(
+            tabs_wrap,
+            "LIVE",
+            lambda: self._switch_view("live"),
+            button_font,
+            fg=BTN_FG,
+            highlight="#94a3b8",
+            padx=10,
+            pady=14,
+        )
         self.llm_btn = self._outline_button(
-            btn_row,
+            tabs_wrap,
             "LLM CHAT",
             lambda: self._switch_view("llm"),
             button_font,
             fg=BTN_FG,
             highlight="#94a3b8",
+            padx=10,
+            pady=14,
         )
-        self.llm_btn.pack(side="left")
+
+        for idx, btn in enumerate((self.home_btn, self.live_btn, self.llm_btn)):
+            btn.grid(row=0, column=idx, sticky="nsew", padx=5)
+            tabs_wrap.grid_columnconfigure(idx, weight=1)
 
         self.status_mini_label = tk.Label(
             mode_card,
@@ -273,16 +317,21 @@ class AuraConsoleApp:
         )
         self.status_mini_label.pack(side="right", fill="y")
 
-        camera_card = tk.Frame(
-            parent,
+        self.home_dashboard = tk.Frame(parent, bg="#05070a")
+        self.live_panel = tk.Frame(parent, bg="#05070a")
+        self.llm_panel = tk.Frame(parent, bg="#05070a")
+
+        # HOME cards
+        self.camera_card = tk.Frame(
+            self.home_dashboard,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        camera_card.pack(fill="x", pady=(0, 10))
+        self.camera_card.pack(fill="x", pady=(0, 10))
 
         self.camera_home_button = self._outline_button(
-            camera_card,
+            self.camera_card,
             "CAMERA",
             lambda: self.enter_vision_mode("face"),
             button_font,
@@ -292,15 +341,15 @@ class AuraConsoleApp:
             fill=True,
         )
 
-        voice_card = tk.Frame(
-            parent,
+        self.voice_card = tk.Frame(
+            self.home_dashboard,
             bg="#0b0f14",
             highlightbackground="#14f195",
             highlightthickness=1,
         )
-        voice_card.pack(fill="x", pady=(0, 10))
+        self.voice_card.pack(fill="x", pady=(0, 10))
 
-        voice_top = tk.Frame(voice_card, bg="#0b0f14")
+        voice_top = tk.Frame(self.voice_card, bg="#0b0f14")
         voice_top.pack(fill="x", padx=12, pady=(12, 8))
 
         tk.Label(
@@ -328,7 +377,7 @@ class AuraConsoleApp:
         )
 
         tk.Label(
-            voice_card,
+            self.voice_card,
             textvariable=self.voice_status_text,
             fg="#cbd5e1",
             bg="#0b0f14",
@@ -340,7 +389,7 @@ class AuraConsoleApp:
         ).pack(fill="x")
 
         tk.Label(
-            voice_card,
+            self.voice_card,
             textvariable=self.voice_result_text,
             fg="#94a3b8",
             bg="#0b0f14",
@@ -352,18 +401,16 @@ class AuraConsoleApp:
             pady=0,
         ).pack(fill="x", pady=(0, 12))
 
-        self.content_stack = tk.Frame(parent, bg="#05070a")
-        self.content_stack.pack(fill="both", expand=True)
+        self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
+        self.home_console_panel.pack(fill="both", expand=True)
+        self._build_console_panel(self.home_console_panel, section_font, log_font, title="LIVE FEED", raw=False)
 
-        self.console_panel = tk.Frame(self.content_stack, bg="#05070a")
-        self.llm_panel = tk.Frame(self.content_stack, bg="#05070a")
-
-        self._build_console_panel(self.console_panel, section_font, log_font)
+        self._build_live_panel(self.live_panel, section_font)
         self._build_llm_panel(self.llm_panel, section_font, log_font, button_font)
 
-        self._switch_view("console")
+        self._switch_view("home")
 
-    def _build_console_panel(self, parent, section_font, log_font):
+    def _build_console_panel(self, parent, section_font, log_font, *, title="LIVE FEED", raw=False):
         logs_card = tk.Frame(
             parent,
             bg="#0b0f14",
@@ -374,7 +421,7 @@ class AuraConsoleApp:
 
         tk.Label(
             logs_card,
-            text="LIVE FEED",
+            text=title,
             fg="#14f195",
             bg="#0b0f14",
             font=section_font,
@@ -389,8 +436,23 @@ class AuraConsoleApp:
             weight="bold",
         )
 
-        self.log_text = tk.Text(
-            logs_card,
+        log_body = tk.Frame(logs_card, bg="#0b0f14")
+        log_body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        scroll = tk.Scrollbar(
+            log_body,
+            orient="vertical",
+            width=26,
+            troughcolor="#05070a",
+            activebackground="#14f195",
+            bg="#111827",
+            highlightthickness=0,
+            relief="flat",
+        )
+        scroll.pack(side="right", fill="y")
+
+        text_widget = tk.Text(
+            log_body,
             bg="#05070a",
             fg="#9effc7",
             insertbackground="#9effc7",
@@ -403,8 +465,20 @@ class AuraConsoleApp:
             spacing1=3,
             spacing2=3,
             spacing3=3,
+            yscrollcommand=scroll.set,
         )
-        self.log_text.pack(fill="both", expand=True)
+        text_widget.pack(side="left", fill="both", expand=True)
+        scroll.config(command=text_widget.yview)
+
+        if raw:
+            self.raw_log_scroll = scroll
+            self.raw_log_text = text_widget
+        else:
+            self.log_scroll = scroll
+            self.log_text = text_widget
+
+    def _build_live_panel(self, parent, section_font):
+        self._build_console_panel(parent, section_font, None, title="LIVE TERMINAL", raw=True)
 
     def _build_llm_panel(self, parent, section_font, log_font, button_font):
         chat_card = tk.Frame(
@@ -429,11 +503,10 @@ class AuraConsoleApp:
             pady=10,
         ).pack(side="left")
 
-        # Dataset info bubble — right-aligned in the title row
         dataset_bubble = tk.Frame(
             title_row,
             bg="#0b0f14",
-            highlightbackground="#1e293b",
+            highlightbackground="#14532d",
             highlightthickness=1,
             padx=8,
             pady=4,
@@ -448,7 +521,7 @@ class AuraConsoleApp:
         tk.Label(
             dataset_bubble,
             text="Dataset: ",
-            fg="#64748b",
+            fg="#86efac",
             bg="#0b0f14",
             font=ds_info_font,
             anchor="w",
@@ -464,8 +537,23 @@ class AuraConsoleApp:
         )
         self._dataset_label.pack(side="left")
 
+        chat_history_wrap = tk.Frame(chat_card, bg="#0b0f14")
+        chat_history_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+
+        self.llm_chat_scroll = tk.Scrollbar(
+            chat_history_wrap,
+            orient="vertical",
+            width=26,
+            troughcolor="#05070a",
+            activebackground="#14f195",
+            bg="#111827",
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.llm_chat_scroll.pack(side="right", fill="y")
+
         self.llm_chat_text = tk.Text(
-            chat_card,
+            chat_history_wrap,
             bg="#05070a",
             fg="#e2e8f0",
             insertbackground="#e2e8f0",
@@ -475,8 +563,10 @@ class AuraConsoleApp:
             padx=12,
             pady=12,
             state="disabled",
+            yscrollcommand=self.llm_chat_scroll.set,
         )
-        self.llm_chat_text.pack(fill="both", expand=True)
+        self.llm_chat_text.pack(side="left", fill="both", expand=True)
+        self.llm_chat_scroll.config(command=self.llm_chat_text.yview)
 
         bold_log = tkfont.Font(
             family="Courier",
@@ -486,24 +576,24 @@ class AuraConsoleApp:
 
         self.llm_chat_text.tag_configure("user_label", foreground="#14f195", font=bold_log)
         self.llm_chat_text.tag_configure("user_text", foreground="#ffffff")
-        self.llm_chat_text.tag_configure("aura_label", foreground="#fcd34d", font=bold_log)
-        self.llm_chat_text.tag_configure("aura_text", foreground="#cbd5e1")
+        self.llm_chat_text.tag_configure("aura_label", foreground="#86efac", font=bold_log)
+        self.llm_chat_text.tag_configure("aura_text", foreground="#d1fae5")
         self.llm_chat_text.tag_configure("thinking", foreground="#64748b")
         self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
         self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
 
-        input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=6, padx=8)
+        input_frame = tk.Frame(chat_card, bg="#07130b", pady=8, padx=8)
         input_frame.pack(fill="x")
 
         self.llm_entry = tk.Entry(
             input_frame,
-            bg="#111827",
+            bg="#0b1a11",
             fg="#ffffff",
             insertbackground="#ffffff",
             relief="flat",
             font=button_font,
         )
-        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=10)
+        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=12)
         self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
 
         self.llm_send_btn = tk.Button(
@@ -511,37 +601,24 @@ class AuraConsoleApp:
             text="Ask",
             command=self._llm_submit,
             font=button_font,
-            bg="#111827",
-            fg="#ecfeff",
-            activebackground="#0f172a",
-            activeforeground="#ffffff",
+            bg="#14f195",
+            fg="#04130b",
+            activebackground="#22c55e",
+            activeforeground="#04130b",
             relief="flat",
             bd=0,
             cursor="hand2",
             padx=20,
             pady=10,
             highlightthickness=1,
-            highlightbackground="#94a3b8",
+            highlightbackground="#14532d",
             highlightcolor="#14f195",
         )
         self.llm_send_btn.pack(side="right")
 
-        # On-screen keyboard — always shown in LLM CHAT mode so the touchscreen
-        # can be used without a physical keyboard or the voice/diction model.
         self._build_osk(chat_card, button_font)
 
     def _build_osk(self, parent, button_font):
-        """
-        On-screen QWERTY keyboard for touchscreen-only use.
-
-        Layout (3 letter rows + 1 action row):
-          Q W E R T Y U I O P
-          A S D F G H J K L  ⌫
-          Z X C V B N M  [abc/ABC]
-          [     SPACE     ] [CLR] [↩ SEND]
-
-        Keys insert into self.llm_entry. SHIFT toggles case.
-        """
         sw = self.root.winfo_screenwidth()
         key_font = tkfont.Font(
             family="Courier",
@@ -549,14 +626,14 @@ class AuraConsoleApp:
             weight="bold",
         )
 
-        _KBG   = "#0f172a"   # keyboard background
-        _BTN   = "#1e293b"   # regular key background
-        _BTN_A = "#334155"   # active/hover key background
-        _FG    = "#e2e8f0"   # key label colour
-        _HL    = "#334155"   # highlight border
+        keyboard_bg = "#06150d"
+        key_bg = "#0d2618"
+        key_active = "#14532d"
+        key_fg = "#d1fae5"
+        key_border = "#14f195"
 
-        osk_outer = tk.Frame(parent, bg=_KBG, pady=4, padx=4)
-        osk_outer.pack(fill="x")
+        osk_outer = tk.Frame(parent, bg=keyboard_bg, pady=6, padx=6, highlightbackground=key_border, highlightthickness=1)
+        osk_outer.pack(fill="x", side="bottom")
 
         rows_upper = [
             ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
@@ -569,9 +646,9 @@ class AuraConsoleApp:
             ["z", "x", "c", "v", "b", "n", "m", "⇧"],
         ]
 
-        self._osk_key_buttons: list = []
         self._osk_rows_upper = rows_upper
         self._osk_rows_lower = rows_lower
+        self._osk_row_frames = []
 
         def _make_key(parent_frame, label, cmd, wide=False, accent=False):
             btn = tk.Button(
@@ -579,33 +656,31 @@ class AuraConsoleApp:
                 text=label,
                 command=cmd,
                 font=key_font,
-                bg=_BTN if not accent else "#14f195",
-                fg=_FG if not accent else "#05070a",
-                activebackground=_BTN_A if not accent else "#22c55e",
-                activeforeground="#ffffff" if not accent else "#05070a",
+                bg="#14f195" if accent else key_bg,
+                fg="#04130b" if accent else key_fg,
+                activebackground="#22c55e" if accent else key_active,
+                activeforeground="#04130b" if accent else "#ffffff",
                 relief="flat",
                 bd=0,
                 cursor="hand2",
                 padx=0,
-                pady=8,
+                pady=10,
                 highlightthickness=1,
-                highlightbackground=_HL,
-                highlightcolor="#14f195",
+                highlightbackground=key_border,
+                highlightcolor=key_border,
             )
             if wide:
-                btn.pack(side="left", fill="x", expand=True, padx=2, pady=2)
+                btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
             else:
-                btn.pack(side="left", expand=True, fill="x", padx=2, pady=2)
+                btn.pack(side="left", expand=True, fill="x", padx=3, pady=3)
             return btn
 
-        # Build the 3 letter rows
-        self._osk_row_frames: list = []
         for row_letters in rows_upper:
-            rf = tk.Frame(osk_outer, bg=_KBG)
+            rf = tk.Frame(osk_outer, bg=keyboard_bg)
             rf.pack(fill="x", pady=1)
             self._osk_row_frames.append(rf)
             for letter in row_letters:
-                ltr = letter  # capture
+                ltr = letter
                 if ltr == "⌫":
                     _make_key(rf, "⌫", lambda: self._osk_key("⌫"))
                 elif ltr == "⇧":
@@ -613,16 +688,14 @@ class AuraConsoleApp:
                 else:
                     _make_key(rf, ltr, lambda c=ltr: self._osk_key(c))
 
-        # Action row: SPACE | CLR | SEND
-        action_row = tk.Frame(osk_outer, bg=_KBG)
+        action_row = tk.Frame(osk_outer, bg=keyboard_bg)
         action_row.pack(fill="x", pady=1)
 
         _make_key(action_row, "SPACE", lambda: self._osk_key(" "), wide=True)
-        _make_key(action_row, "CLR",   lambda: self._osk_key("CLR"))
+        _make_key(action_row, "CLR", lambda: self._osk_key("CLR"))
         _make_key(action_row, "SEND ↩", lambda: self._osk_key("↩"), accent=True)
 
     def _osk_key(self, key: str):
-        """Handle an OSK key tap."""
         if key == "⌫":
             cur = self.llm_entry.get()
             if cur:
@@ -631,7 +704,6 @@ class AuraConsoleApp:
 
         if key == "⇧":
             self._osk_shift = not self._osk_shift
-            # shift=False → uppercase (default), shift=True → lowercase
             rows = self._osk_rows_lower if self._osk_shift else self._osk_rows_upper
             for rf, row_letters in zip(self._osk_row_frames, rows):
                 btns = [w for w in rf.winfo_children() if isinstance(w, tk.Button)]
@@ -793,17 +865,65 @@ class AuraConsoleApp:
 
     def _switch_view(self, mode: str):
         self.view_mode = mode
+        self.home_dashboard.pack_forget()
+        self.live_panel.pack_forget()
+        self.llm_panel.pack_forget()
+
+        self.home_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
+        self.live_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
+        self.llm_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
+
         if mode == "llm":
-            self.console_panel.pack_forget()
             self.llm_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
             self.llm_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
             self.llm_entry.focus_set()
+        elif mode == "live":
+            self.live_panel.pack(fill="both", expand=True)
+            self.live_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
         else:
-            self.llm_panel.pack_forget()
-            self.console_panel.pack(fill="both", expand=True)
-            self.console_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
-            self.llm_btn.configure(bg="#111827", fg="#ecfeff", highlightbackground="#94a3b8")
+            self.home_dashboard.pack(fill="both", expand=True)
+            self.home_btn.configure(bg="#111827", fg="#ffffff", highlightbackground="#14f195")
+
+    # =========================
+    # Reboot button
+    # =========================
+
+    def _tap_reboot(self):
+        now_ms = int(datetime.now().timestamp() * 1000)
+        if self._reboot_armed_until and now_ms <= self._reboot_armed_until:
+            self._reboot_now()
+            return
+
+        self._reboot_armed_until = now_ms + 4000
+        self.sub_text.set("Tap power again within 4s to reboot")
+        self.reboot_button.configure(text="⏻!")
+
+        def _clear_reboot_arm():
+            current_ms = int(datetime.now().timestamp() * 1000)
+            if self._reboot_armed_until and current_ms > self._reboot_armed_until:
+                self._reboot_armed_until = None
+                self.reboot_button.configure(text="⏻")
+
+        self.root.after(4100, _clear_reboot_arm)
+
+    def _reboot_now(self):
+        self.reboot_button.configure(text="...")
+        self.sub_text.set("Rebooting system")
+
+        def _worker():
+            commands = [
+                ["systemctl", "reboot"],
+                ["sudo", "systemctl", "reboot"],
+                ["reboot"],
+            ]
+            for cmd in commands:
+                try:
+                    subprocess.Popen(cmd)
+                    return
+                except Exception:
+                    continue
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # =========================
     # LLM chat
@@ -816,7 +936,7 @@ class AuraConsoleApp:
 
         self.llm_entry.delete(0, "end")
         self._llm_thinking = True
-        self.llm_send_btn.configure(state="disabled", bg="#111827")
+        self.llm_send_btn.configure(state="disabled", bg="#0d2618")
         self.llm_entry.configure(state="disabled")
 
         self._llm_history.append(("user", query))
@@ -839,7 +959,7 @@ class AuraConsoleApp:
         else:
             self._llm_history.append(("assistant", answer))
         self._llm_redraw()
-        self.llm_send_btn.configure(state="normal", bg="#111827")
+        self.llm_send_btn.configure(state="normal", bg="#14f195")
         self.llm_entry.configure(state="normal")
         self.llm_entry.focus_set()
 
@@ -1026,7 +1146,6 @@ class AuraConsoleApp:
         if "[UI]" in line or "[UI ERROR]" in line:
             return line
 
-        # RAG vectorization progress — [RAG JOB] from rag_manager, [LightRAG] from lightrag_local
         if "[RAG JOB]" in line:
             text = line.split("[RAG JOB]", 1)[-1].strip()
             return f"[RAG] {text}"[:120]
@@ -1050,6 +1169,7 @@ class AuraConsoleApp:
             return line[:120]
 
         return None
+
     # =========================
     # Journal reader
     # =========================
@@ -1098,7 +1218,6 @@ class AuraConsoleApp:
                 "[UI ERROR] Could not attach to journalctl. "
                 "If you launched agent/main.py manually, the UI will not see those logs here."
             )
-            
 
     def _poll_logs(self):
         processed = 0
@@ -1108,6 +1227,7 @@ class AuraConsoleApp:
             except queue.Empty:
                 break
             self._append_log(line)
+            self._append_raw_log(line)
             self._update_state_from_line(line)
             processed += 1
 
@@ -1133,6 +1253,22 @@ class AuraConsoleApp:
         if should_follow:
             self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _append_raw_log(self, line: str):
+        if not getattr(self, "raw_log_text", None):
+            return
+
+        should_follow = self._is_scrolled_near_bottom(self.raw_log_text)
+        self.raw_log_text.configure(state="normal")
+        self.raw_log_text.insert("end", line.rstrip() + "\n")
+
+        line_count = int(self.raw_log_text.index("end-1c").split(".")[0])
+        if line_count > MAX_RAW_LOG_LINES:
+            self.raw_log_text.delete("1.0", f"{line_count - MAX_RAW_LOG_LINES}.0")
+
+        if should_follow:
+            self.raw_log_text.see("end")
+        self.raw_log_text.configure(state="disabled")
 
     # =========================
     # Status
@@ -1342,7 +1478,6 @@ class AuraConsoleApp:
                 )
                 self.current_frame_image = None
             else:
-                # keep last good frame instead of blanking immediately
                 self.vision_status_text.set("Camera reconnecting...")
 
     def _refresh_detections(self):
