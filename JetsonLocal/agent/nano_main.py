@@ -189,30 +189,9 @@ class AuraConsoleApp:
             family="Courier", size=max(16, int(sw * 0.020)), weight="bold"
         )
 
-        self.refresh_button = tk.Button(
-            header_actions,
-            text="↻",
-            command=self._refresh_ui_data,
-            font=icon_font,
-            bg="#0b0f14",
-            fg="#14f195",
-            activebackground="#052e1c",
-            activeforeground="#eafff3",
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            width=3,
-            padx=8,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground="#14f195",
-            highlightcolor="#14f195",
-        )
-        self.refresh_button.pack(side="left", padx=(0, 8))
-
         self.reboot_button = tk.Button(
             header_actions,
-            text="⏻",
+            text="↻",
             command=self._tap_reboot,
             font=icon_font,
             bg="#0b0f14",
@@ -965,13 +944,13 @@ class AuraConsoleApp:
             return
 
         self._reboot_armed_until = now_ms + 4000
-        self.reboot_button.configure(text="⏻!")
+        self.reboot_button.configure(text="↻!")
 
         def _clear_reboot_arm():
             current_ms = int(datetime.now().timestamp() * 1000)
             if self._reboot_armed_until and current_ms > self._reboot_armed_until:
                 self._reboot_armed_until = None
-                self.reboot_button.configure(text="⏻")
+                self.reboot_button.configure(text="↻")
 
         self.root.after(4100, _clear_reboot_arm)
 
