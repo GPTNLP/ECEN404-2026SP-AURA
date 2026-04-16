@@ -107,6 +107,7 @@ class AuraConsoleApp:
         self._llm_thinking = False
         self._llm_history = []
         self._osk_shift = False
+        self._osk_caps = False
         self._osk_mode = "alpha"
 
         self._vision_poll_counter = 0
@@ -601,15 +602,27 @@ class AuraConsoleApp:
         input_frame = tk.Frame(chat_card, bg="#07130b", pady=8, padx=8)
         input_frame.pack(fill="x")
 
-        self.llm_entry = tk.Entry(
+        entry_wrap = tk.Frame(
             input_frame,
+            bg="#052e1c",
+            highlightbackground="#14f195",
+            highlightthickness=2,
+            bd=0,
+            padx=3,
+            pady=3,
+        )
+        entry_wrap.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.llm_entry = tk.Entry(
+            entry_wrap,
             bg="#0b1a11",
             fg="#ffffff",
             insertbackground="#ffffff",
             relief="flat",
             font=button_font,
+            bd=0,
         )
-        self.llm_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), ipady=12)
+        self.llm_entry.pack(fill="x", expand=True, ipady=12)
         self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
         self.llm_entry.bind("<Button-1>", lambda _e: self._best_effort_disable_system_keyboard())
         self.llm_entry.bind("<FocusIn>", lambda _e: self.root.after(50, self._best_effort_disable_system_keyboard))
@@ -703,26 +716,35 @@ class AuraConsoleApp:
 
     def _make_osk_key(self, parent_frame, label):
         wide = label in {"SPACE", "ENTER"}
+        extra_wide = label in {"TAB", "SHIFT", "CAPS"}
         accent = label in {"↩", "ENTER"}
+        toggle_on = (label == "SHIFT" and self._osk_shift) or (label == "CAPS" and self._osk_caps)
+
+        bg = "#14f195" if accent else ("#14532d" if toggle_on else self._osk_key_bg)
+        fg = "#04130b" if accent else self._osk_key_fg
+        active_bg = "#22c55e" if accent else self._osk_key_active
+
         btn = tk.Button(
             parent_frame,
             text=label,
             command=lambda k=label: self._osk_key(k),
             font=self._osk_key_font,
-            bg="#14f195" if accent else self._osk_key_bg,
-            fg="#04130b" if accent else self._osk_key_fg,
-            activebackground="#22c55e" if accent else self._osk_key_active,
+            bg=bg,
+            fg=fg,
+            activebackground=active_bg,
             activeforeground="#04130b" if accent else "#ffffff",
             relief="flat",
             bd=0,
             cursor="hand2",
             padx=0,
-            pady=10,
+            pady=8,
             highlightthickness=1,
             highlightbackground=self._osk_key_border,
             highlightcolor=self._osk_key_border,
         )
         if wide:
+            btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
+        elif extra_wide:
             btn.pack(side="left", fill="x", expand=True, padx=3, pady=3)
         else:
             btn.pack(side="left", expand=True, fill="x", padx=3, pady=3)
@@ -735,16 +757,22 @@ class AuraConsoleApp:
             if cur:
                 self.llm_entry.delete(len(cur) - 1, "end")
             return
-        if key == "⇧":
+        if key == "SHIFT":
             self._osk_shift = not self._osk_shift
+            self._render_osk()
+            return
+        if key == "CAPS":
+            self._osk_caps = not self._osk_caps
             self._render_osk()
             return
         if key == "123":
             self._osk_mode = "num"
+            self._osk_shift = False
             self._render_osk()
             return
         if key == "SYM":
             self._osk_mode = "sym"
+            self._osk_shift = False
             self._render_osk()
             return
         if key == "ABC":
@@ -766,6 +794,9 @@ class AuraConsoleApp:
             return
 
         self.llm_entry.insert("end", key)
+        if self._osk_mode == "alpha" and self._osk_shift and not self._osk_caps:
+            self._osk_shift = False
+            self._render_osk()
 
     def _build_vision_ui(self, parent, button_font, title_font, info_font):
         topbar = tk.Frame(parent, bg="#05070a")
