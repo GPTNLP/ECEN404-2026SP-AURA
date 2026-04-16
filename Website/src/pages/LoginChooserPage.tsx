@@ -2,7 +2,6 @@ import { useNavigate } from "react-router-dom";
 import "../styles/login.css";
 import logo from "../assets/robot.png";
 
-import React from 'react';
 import '../styles/home.css';
 import tamuLogo from '../assets/logos/tamu.png';
 import columbiaLogo from '../assets/logos/columbia.png';
