@@ -111,9 +111,13 @@ class AuraConsoleApp:
         self._vision_poll_counter = 0
         self._camera_fail_count = 0
 
+        self._rag_dataset_var = tk.StringVar(value="None")
+        self._rag_dataset_loaded = False
+
         self._build_ui()
         self._start_reader()
         self._poll_logs()
+        self._poll_rag_dataset()
         self._poll_vision()
 
     # =========================
@@ -410,8 +414,11 @@ class AuraConsoleApp:
         )
         chat_card.pack(fill="both", expand=True)
 
+        title_row = tk.Frame(chat_card, bg="#0b0f14")
+        title_row.pack(fill="x")
+
         tk.Label(
-            chat_card,
+            title_row,
             text="LLM CHAT",
             fg="#14f195",
             bg="#0b0f14",
@@ -419,7 +426,42 @@ class AuraConsoleApp:
             anchor="w",
             padx=14,
             pady=10,
-        ).pack(fill="x")
+        ).pack(side="left")
+
+        # Dataset info bubble — right-aligned in the title row
+        dataset_bubble = tk.Frame(
+            title_row,
+            bg="#0b0f14",
+            highlightbackground="#1e293b",
+            highlightthickness=1,
+            padx=8,
+            pady=4,
+        )
+        dataset_bubble.pack(side="right", padx=12, pady=6)
+
+        ds_info_font = tkfont.Font(
+            family="Courier",
+            size=max(9, int(self.root.winfo_screenwidth() * 0.012)),
+        )
+
+        tk.Label(
+            dataset_bubble,
+            text="Dataset: ",
+            fg="#64748b",
+            bg="#0b0f14",
+            font=ds_info_font,
+            anchor="w",
+        ).pack(side="left")
+
+        self._dataset_label = tk.Label(
+            dataset_bubble,
+            textvariable=self._rag_dataset_var,
+            fg="#fca5a5",
+            bg="#0b0f14",
+            font=ds_info_font,
+            anchor="w",
+        )
+        self._dataset_label.pack(side="left")
 
         self.llm_chat_text = tk.Text(
             chat_card,
@@ -697,6 +739,36 @@ class AuraConsoleApp:
         if should_follow:
             self.llm_chat_text.see("end")
         self.llm_chat_text.configure(state="disabled")
+
+    # =========================
+    # RAG dataset polling
+    # =========================
+
+    def _poll_rag_dataset(self):
+        def _fetch():
+            try:
+                result = self._http_json("GET", "/rag/stats", timeout=2.0)
+                db_name = result.get("active_db_name") or None
+                ready = bool(result.get("ready"))
+                self.root.after(0, lambda: self._update_dataset_label(db_name, ready))
+            except Exception:
+                self.root.after(0, lambda: self._update_dataset_label(None, False))
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        if self.running:
+            self.root.after(3000, self._poll_rag_dataset)
+
+    def _update_dataset_label(self, db_name: str, ready: bool):
+        if db_name and ready:
+            self._rag_dataset_var.set(db_name)
+            self._rag_dataset_loaded = True
+            if hasattr(self, "_dataset_label"):
+                self._dataset_label.configure(fg="#a7f3d0")
+        else:
+            self._rag_dataset_var.set("None")
+            self._rag_dataset_loaded = False
+            if hasattr(self, "_dataset_label"):
+                self._dataset_label.configure(fg="#fca5a5")
 
     # =========================
     # Voice

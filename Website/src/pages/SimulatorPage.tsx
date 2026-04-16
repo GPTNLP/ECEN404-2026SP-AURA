@@ -61,10 +61,9 @@ function fmtShortTime(ts?: number) {
   }
 }
 
-function buildSessionTitle(query: string) {
-  const trimmed = query.trim().replace(/\s+/g, " ");
-  if (!trimmed) return "New chat";
-  return trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed;
+function buildSessionTitle(db: string) {
+  const dateStr = new Date().toISOString().split("T")[0];
+  return `Simulator ${db || "no_dataset"} ${dateStr}`;
 }
 
 function normalizeHistory(history: SessionDetail["history"] | undefined | null): ChatMsg[] {
@@ -328,7 +327,7 @@ export default function SimulatorPage() {
 
     const t0 = performance.now();
     let sessionId = activeSessionId;
-    const inferredTitle = activeSessionId ? activeSessionTitle : buildSessionTitle(q);
+    const inferredTitle = activeSessionId ? activeSessionTitle : buildSessionTitle(loadedDb);
 
     try {
       if (!sessionId) {

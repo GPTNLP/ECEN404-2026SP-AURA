@@ -2,6 +2,8 @@ import sys
 import time
 import asyncio
 import os
+import re as _re
+from datetime import datetime as _datetime
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Iterator, List, Optional
@@ -1439,6 +1441,26 @@ async def lifespan(app_instance: FastAPI):
         quiet_print("rag_ready", "[STARTUP] RAG build worker ready")
     except Exception as e:
         quiet_print("rag", f"[RAG] init warning: {e}")
+
+    # ── Generate a descriptive session ID for this boot ──────────────────────
+    # Format: "{device_name}_{dataset_name}_{YYYY-MM-DD}"
+    # Title (for website display): "{device_name} {dataset_name} {YYYY-MM-DD}"
+    try:
+        _date_str = _datetime.now().strftime("%Y-%m-%d")
+        _db_raw = rag_manager.active_db_name or "no_dataset"
+        _dev_safe = _re.sub(r"[^a-zA-Z0-9]", "_", DEVICE_NAME).strip("_") or "jetson"
+        _db_safe = _re.sub(r"[^a-zA-Z0-9]", "_", _db_raw).strip("_") or "no_dataset"
+        _session_id = f"{_dev_safe}_{_db_safe}_{_date_str}"
+        _session_title = f"{DEVICE_NAME} {_db_raw} {_date_str}"
+        chat_manager.set_session(
+            _session_id,
+            title=_session_title,
+            db_name=rag_manager.active_db_name,
+        )
+        quiet_print("session_init", f"[STARTUP] local device id={DEVICE_ID} session={_session_id}")
+    except Exception as _e:
+        quiet_print("session_init", f"[STARTUP] session init warning: {_e}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     try:
         await register_device()

@@ -236,6 +236,8 @@ class ApiClient:
         payload = {
             "session_id": (log_data or {}).get("session_id"),
             "device_id": device_id,
+            "title": (log_data or {}).get("title"),
+            "db_name": (log_data or {}).get("db_name"),
             "history": (log_data or {}).get("history", []),
         }
 

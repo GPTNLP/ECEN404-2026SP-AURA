@@ -9,12 +9,24 @@ class ChatSessionManager:
         self.session_dir = os.path.join(STORAGE_DIR, "sessions")
         os.makedirs(self.session_dir, exist_ok=True)
         self.active_session_id = "default"
+        self._session_title = "Jetson session"
+        self._session_db_name = None
         self.history = []
         self._load_local()
 
-    def set_session(self, session_id: str, remote_history: list = None):
+    def set_session(
+        self,
+        session_id: str,
+        remote_history: list = None,
+        title: str = None,
+        db_name: str = None,
+    ):
         """Switch to a different chat session."""
         self.active_session_id = session_id
+        if title is not None:
+            self._session_title = title
+        if db_name is not None:
+            self._session_db_name = db_name
         if remote_history is not None:
             self.history = remote_history
             self._save_local()
@@ -34,6 +46,8 @@ class ChatSessionManager:
                     device_id,
                     {
                         "session_id": self.active_session_id,
+                        "title": self._session_title,
+                        "db_name": self._session_db_name,
                         "history": self.history,
                     },
                 )
@@ -47,7 +61,12 @@ class ChatSessionManager:
     def _save_local(self):
         with open(self._get_filepath(), "w", encoding="utf-8") as f:
             json.dump(
-                {"session_id": self.active_session_id, "history": self.history},
+                {
+                    "session_id": self.active_session_id,
+                    "title": self._session_title,
+                    "db_name": self._session_db_name,
+                    "history": self.history,
+                },
                 f,
                 ensure_ascii=False,
                 indent=2,
@@ -59,6 +78,8 @@ class ChatSessionManager:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.history = data.get("history", [])
+                self._session_title = data.get("title") or "Jetson session"
+                self._session_db_name = data.get("db_name")
         else:
             self.history = []
 
