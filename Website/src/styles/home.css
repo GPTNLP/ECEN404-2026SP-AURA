@@ -62,16 +62,16 @@
   flex-wrap: wrap;
   justify-content: center;
   align-items: center;
-  gap: 40px; 
+  gap: 25px 50px; /* 25px vertical gap, 50px horizontal gap */
   max-width: 1200px;
   margin: 0 auto;
 }
 
-/* 2. THE LOGO SCALING FIX */
+/* 2. THE LOGO SCALING FIX (UPDATED) */
 .affiliates-grid img {
-  height: 35px; /* Force uniform height across all logos */
-  width: auto; /* Let the width adapt naturally */
-  max-width: 280px; /* Give wide logos like Lockheed room to stretch horizontally */
+  max-height: 55px; /* Bumped up significantly to make all logos larger */
+  width: auto; 
+  max-width: 240px; /* Allows Lockheed to stretch out horizontally */
   object-fit: contain;
   
   /* Styling */
@@ -87,7 +87,7 @@
   transform: scale(1.05);
 }
 
-/* Mobile Responsiveness (Allows scrolling only on tiny phone screens) */
+/* Mobile Responsiveness */
 @media (max-width: 768px) {
   .home-container {
     height: auto; 
@@ -98,6 +98,6 @@
     gap: 20px;
   }
   .affiliates-grid img {
-    height: 25px; 
+    max-height: 35px; /* Slightly smaller on phones to prevent wrapping issues */
   }
 }
