@@ -107,6 +107,7 @@ class AuraConsoleApp:
 
         self._llm_thinking = False
         self._llm_history = []
+        self._osk_shift = False   # tracks whether OSK is in uppercase (default) or lower
 
         self._vision_poll_counter = 0
         self._camera_fail_count = 0
@@ -491,7 +492,7 @@ class AuraConsoleApp:
         self.llm_chat_text.tag_configure("error_label", foreground="#fca5a5", font=bold_log)
         self.llm_chat_text.tag_configure("error_text", foreground="#fca5a5")
 
-        input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=8, padx=8)
+        input_frame = tk.Frame(chat_card, bg="#0b0f14", pady=6, padx=8)
         input_frame.pack(fill="x")
 
         self.llm_entry = tk.Entry(
@@ -524,6 +525,131 @@ class AuraConsoleApp:
             highlightcolor="#14f195",
         )
         self.llm_send_btn.pack(side="right")
+
+        # On-screen keyboard — always shown in LLM CHAT mode so the touchscreen
+        # can be used without a physical keyboard or the voice/diction model.
+        self._build_osk(chat_card, button_font)
+
+    def _build_osk(self, parent, button_font):
+        """
+        On-screen QWERTY keyboard for touchscreen-only use.
+
+        Layout (3 letter rows + 1 action row):
+          Q W E R T Y U I O P
+          A S D F G H J K L  ⌫
+          Z X C V B N M  [abc/ABC]
+          [     SPACE     ] [CLR] [↩ SEND]
+
+        Keys insert into self.llm_entry. SHIFT toggles case.
+        """
+        sw = self.root.winfo_screenwidth()
+        key_font = tkfont.Font(
+            family="Courier",
+            size=max(12, int(sw * 0.016)),
+            weight="bold",
+        )
+
+        _KBG   = "#0f172a"   # keyboard background
+        _BTN   = "#1e293b"   # regular key background
+        _BTN_A = "#334155"   # active/hover key background
+        _FG    = "#e2e8f0"   # key label colour
+        _HL    = "#334155"   # highlight border
+
+        osk_outer = tk.Frame(parent, bg=_KBG, pady=4, padx=4)
+        osk_outer.pack(fill="x")
+
+        rows_upper = [
+            ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+            ["A", "S", "D", "F", "G", "H", "J", "K", "L", "⌫"],
+            ["Z", "X", "C", "V", "B", "N", "M", "⇧"],
+        ]
+        rows_lower = [
+            ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"],
+            ["a", "s", "d", "f", "g", "h", "j", "k", "l", "⌫"],
+            ["z", "x", "c", "v", "b", "n", "m", "⇧"],
+        ]
+
+        self._osk_key_buttons: list = []
+        self._osk_rows_upper = rows_upper
+        self._osk_rows_lower = rows_lower
+
+        def _make_key(parent_frame, label, cmd, wide=False, accent=False):
+            btn = tk.Button(
+                parent_frame,
+                text=label,
+                command=cmd,
+                font=key_font,
+                bg=_BTN if not accent else "#14f195",
+                fg=_FG if not accent else "#05070a",
+                activebackground=_BTN_A if not accent else "#22c55e",
+                activeforeground="#ffffff" if not accent else "#05070a",
+                relief="flat",
+                bd=0,
+                cursor="hand2",
+                padx=0,
+                pady=8,
+                highlightthickness=1,
+                highlightbackground=_HL,
+                highlightcolor="#14f195",
+            )
+            if wide:
+                btn.pack(side="left", fill="x", expand=True, padx=2, pady=2)
+            else:
+                btn.pack(side="left", expand=True, fill="x", padx=2, pady=2)
+            return btn
+
+        # Build the 3 letter rows
+        self._osk_row_frames: list = []
+        for row_letters in rows_upper:
+            rf = tk.Frame(osk_outer, bg=_KBG)
+            rf.pack(fill="x", pady=1)
+            self._osk_row_frames.append(rf)
+            for letter in row_letters:
+                ltr = letter  # capture
+                if ltr == "⌫":
+                    _make_key(rf, "⌫", lambda: self._osk_key("⌫"))
+                elif ltr == "⇧":
+                    _make_key(rf, "⇧", lambda: self._osk_key("⇧"))
+                else:
+                    _make_key(rf, ltr, lambda c=ltr: self._osk_key(c))
+
+        # Action row: SPACE | CLR | SEND
+        action_row = tk.Frame(osk_outer, bg=_KBG)
+        action_row.pack(fill="x", pady=1)
+
+        _make_key(action_row, "SPACE", lambda: self._osk_key(" "), wide=True)
+        _make_key(action_row, "CLR",   lambda: self._osk_key("CLR"))
+        _make_key(action_row, "SEND ↩", lambda: self._osk_key("↩"), accent=True)
+
+    def _osk_key(self, key: str):
+        """Handle an OSK key tap."""
+        if key == "⌫":
+            cur = self.llm_entry.get()
+            if cur:
+                self.llm_entry.delete(len(cur) - 1, "end")
+            return
+
+        if key == "⇧":
+            self._osk_shift = not self._osk_shift
+            # shift=False → uppercase (default), shift=True → lowercase
+            rows = self._osk_rows_lower if self._osk_shift else self._osk_rows_upper
+            for rf, row_letters in zip(self._osk_row_frames, rows):
+                btns = [w for w in rf.winfo_children() if isinstance(w, tk.Button)]
+                for btn, ltr in zip(btns, row_letters):
+                    btn.configure(text=ltr)
+                    if ltr not in ("⌫", "⇧"):
+                        btn.configure(command=lambda c=ltr: self._osk_key(c))
+            return
+
+        if key == "CLR":
+            self.llm_entry.delete(0, "end")
+            return
+
+        if key == "↩":
+            self._llm_submit()
+            return
+
+        self.llm_entry.insert("end", key)
 
     def _build_vision_ui(self, parent, button_font, title_font, info_font):
         topbar = tk.Frame(parent, bg="#05070a")

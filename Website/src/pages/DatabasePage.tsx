@@ -122,6 +122,7 @@ export default function DatabasePage() {
   const isAdmin = user?.role === "admin";
   const isTA = user?.role === "ta";
 
+  const [loadedDb, setLoadedDb] = useState(() => localStorage.getItem("aura_loaded_db") || "");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<
     | ""
@@ -251,10 +252,18 @@ export default function DatabasePage() {
       setBuildStatus(nextStatus || "idle");
 
       if (nextStatus === "completed") {
-        setStatus(`✅ Vectorization complete! Files are ready.`);
+        // Mark this DB as loaded on Jetson — the Jetson built it locally and it's ready to query
+        localStorage.setItem("aura_loaded_db", name);
+        window.dispatchEvent(new Event("aura:loaded-db"));
+        setLoadedDb(name);
+        setStatus(`✅ Vectorization complete! "${name}" is ready on Jetson.`);
         return true;
       }
       if (nextStatus === "synced") {
+        // Jetson also synced the vectors back — DB is live on Jetson
+        localStorage.setItem("aura_loaded_db", name);
+        window.dispatchEvent(new Event("aura:loaded-db"));
+        setLoadedDb(name);
         setStatus(`✅ Jetson synced "${name}" back to website.`);
         return true;
       }
@@ -285,6 +294,17 @@ export default function DatabasePage() {
   useEffect(() => {
     refreshTree();
     refreshDatabases();
+  }, []);
+
+  // Keep loadedDb in sync when the Database page sets or clears it
+  useEffect(() => {
+    const sync = () => setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
+    window.addEventListener("storage", sync);
+    window.addEventListener("aura:loaded-db", sync as EventListener);
+    return () => {
+      window.removeEventListener("storage", sync);
+      window.removeEventListener("aura:loaded-db", sync as EventListener);
+    };
   }, []);
 
   useEffect(() => {
@@ -1285,6 +1305,45 @@ export default function DatabasePage() {
               </div>
               <div className="db-mini">
                 Build status: <b>{prettyBuildStatus(buildStatus)}</b>
+              </div>
+              <div
+                className="db-mini"
+                style={{
+                  marginTop: 8,
+                  padding: "6px 10px",
+                  borderRadius: 6,
+                  background: loadedDb ? "rgba(20,241,149,0.08)" : "rgba(148,163,184,0.08)",
+                  border: `1px solid ${loadedDb ? "#14f195" : "#334155"}`,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                }}
+              >
+                <span
+                  style={{
+                    width: 9,
+                    height: 9,
+                    borderRadius: "50%",
+                    background: loadedDb ? "#14f195" : "#475569",
+                    flexShrink: 0,
+                    display: "inline-block",
+                  }}
+                />
+                <span>
+                  {loadedDb ? (
+                    <>
+                      Jetson active:{" "}
+                      <b style={{ color: "#14f195" }}>{loadedDb}</b>
+                      {loadedDb !== activeDb && activeDb && (
+                        <span style={{ color: "#f59e0b", marginLeft: 6 }}>
+                          (differs from selection)
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span style={{ color: "#64748b" }}>Nothing loaded on Jetson yet</span>
+                  )}
+                </span>
               </div>
             </div>
 
