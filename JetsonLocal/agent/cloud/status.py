@@ -7,22 +7,17 @@ from core.config import (
     LOCAL_DB_NAME,
 )
 from device_info import collect_device_info
-from battery import read_battery_status
 from hardware.camera import get_camera_status
 
 
 def build_status_payload() -> Dict[str, Any]:
     info = collect_device_info()
-    batt = read_battery_status()
     cam = get_camera_status()
 
     gpu_percent = info.get("gpu_percent")
 
     return {
         "device_id": DEVICE_ID,
-        "battery_percent": batt["battery_percent"],
-        "battery_voltage": batt["battery_voltage"],
-        "charging": batt["charging"],
         "cpu_percent": info["cpu_percent"],
         "gpu_percent": gpu_percent,
         "ram_percent": info["ram_percent"],
