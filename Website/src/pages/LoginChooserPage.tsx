@@ -2,11 +2,29 @@ import { useNavigate } from "react-router-dom";
 import "../styles/login.css";
 import logo from "../assets/robot.png";
 
+import React from 'react';
+import '../styles/home.css';
+import tamuLogo from '../assets/logos/tamu.png';
+import columbiaLogo from '../assets/logos/columbia.png';
+import jhuaplLogo from '../assets/logos/jhuapl.png';
+import intelLogo from '../assets/logos/intel.png';
+import capitalOneLogo from '../assets/logos/capitalone.png';
+import hpeLogo from '../assets/logos/hpe.png';
+import upennLogo from '../assets/logos/upenn.png';
+import samsungLogo from '../assets/logos/samsung.png';
+import lockheedLogo from '../assets/logos/lockheed.png';
+
 export default function LoginChooserPage() {
   const navigate = useNavigate();
 
   return (
-    <div className="aura-login login-page">
+    <div className="home-container">
+      {/* TOP: Texas A&M Logo */}
+      <header className="home-header">
+        <img src={tamuLogo} alt="Texas A&M University" className="tamu-logo" />
+      </header>
+
+    <div className="aura-login login-page home-content">
       <div className="login-card">
         <div className="login-brand">
           <img src={logo} alt="AURA" className="login-logo" />
@@ -38,6 +56,21 @@ export default function LoginChooserPage() {
           </div>
         </div>
       </div>
+    </div>
+
+    <footer className="affiliates-section">
+        <h3>In collaboration with affiliates of:</h3>
+        <div className="affiliates-grid">
+          <img src={columbiaLogo} alt="Columbia University" />
+          <img src={jhuaplLogo} alt="Johns Hopkins APL" />
+          <img src={intelLogo} alt="Intel" />
+          <img src={capitalOneLogo} alt="Capital One" />
+          <img src={hpeLogo} alt="HPE" />
+          <img src={upennLogo} alt="University of Pennsylvania" />
+          <img src={samsungLogo} alt="Samsung" />
+          <img src={lockheedLogo} alt="Lockheed Martin" />
+        </div>
+      </footer>
     </div>
   );
 }

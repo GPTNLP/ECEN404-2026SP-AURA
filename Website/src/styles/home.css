@@ -1,0 +1,83 @@
+/* Container to push the footer to the very bottom of the screen */
+.home-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* TOP HEADER: Texas A&M */
+.home-header {
+  width: 100%;
+  display: flex;
+  justify-content: center; /* Change to flex-start if you want it on the left */
+  padding: 20px 40px;
+  background-color: var(--bg-color, #ffffff);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.tamu-logo {
+  max-height: 70px;
+  width: auto;
+  object-fit: contain;
+}
+
+/* MAIN CONTENT */
+.home-content {
+  flex: 1; /* This forces the footer to sit at the bottom */
+  padding: 40px;
+}
+
+/* BOTTOM FOOTER: Affiliates */
+.affiliates-section {
+  background-color: var(--card-bg, #f4f4f9);
+  padding: 50px 20px;
+  text-align: center;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.affiliates-section h3 {
+  color: var(--text-muted, #666666);
+  font-size: 1.1rem;
+  margin-bottom: 35px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+.affiliates-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 50px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.affiliates-grid img {
+  max-height: 45px;
+  max-width: 160px;
+  object-fit: contain;
+  /* Pro styling: start faded & grayscale, light up on hover */
+  opacity: 0.55; 
+  filter: grayscale(100%);
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.affiliates-grid img:hover {
+  opacity: 1;
+  filter: grayscale(0%);
+  transform: scale(1.05);
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+  .affiliates-grid {
+    gap: 30px;
+  }
+  .affiliates-grid img {
+    max-height: 35px;
+    max-width: 120px;
+  }
+}
