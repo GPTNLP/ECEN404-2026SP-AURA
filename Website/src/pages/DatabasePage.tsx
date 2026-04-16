@@ -250,12 +250,16 @@ export default function DatabasePage() {
 
       setBuildStatus(nextStatus || "idle");
 
-      if (nextStatus === "failed") {
-        setStatus(`❌ ${msg || "Jetson build failed."}`);
+      if (nextStatus === "completed") {
+        setStatus(`✅ Vectorization complete! Files are ready.`);
         return true;
       }
       if (nextStatus === "synced") {
         setStatus(`✅ Jetson synced "${name}" back to website.`);
+        return true;
+      }
+      if (nextStatus === "failed") {
+        setStatus(`❌ ${msg || "Jetson build failed."}`);
         return true;
       }
       if (nextStatus === "timed_out") {
@@ -349,17 +353,20 @@ export default function DatabasePage() {
       .then((r) => r.json().catch(() => null))
       .then((data) => {
         if (cancelled || !data) return;
-        const status = String(data?.build?.status || "") as BuildStatus;
-        if (!status) return;
-        setBuildStatus(status);
-        if (isActiveBuildStatus(status)) {
+        const s = String(data?.build?.status || "") as BuildStatus;
+        if (!s) return;
+        setBuildStatus(s);
+        if (isActiveBuildStatus(s)) {
           // Resume the polling loop so the admin sees live progress/timeout.
           setBuildMonitorActive(true);
-        } else if (status === "timed_out") {
+        } else if (s === "timed_out") {
           setStatus(
             `⚠️ Build timed out — Jetson stopped responding. ` +
             `Click "Force Reset" below to unblock.`
           );
+        } else if (s === "completed" || s === "synced") {
+          // Show a clear success message so the admin knows they can act.
+          setStatus(`✅ "${activeDb}" is built and ready. Build or load as needed.`);
         }
       })
       .catch(() => { /* silently ignore initial fetch errors */ });

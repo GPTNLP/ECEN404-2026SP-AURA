@@ -625,9 +625,12 @@ class LightRAG:
                 temperature=0.0,   # deterministic extraction
                 fast=True,
             )
-            return _parse_json_from_llm(raw)
+            result = _parse_json_from_llm(raw)
+            if not result:
+                print(f"[LightRAG]  graph extraction returned empty JSON (non-fatal)")
+            return result
         except Exception as e:
-            print(f"[LightRAG] Graph extraction skipped for chunk (non-fatal): {e}")
+            print(f"[LightRAG]  graph extraction skipped (non-fatal): {e}")
             return {}
 
     async def _rebuild_entity_index(self):
@@ -643,12 +646,15 @@ class LightRAG:
             for name, info in entities.items()
         ]
 
-        print(f"[LightRAG] Embedding {len(texts)} entities (batch size {AURA_EMBED_BATCH_SIZE})...")
+        n = len(texts)
+        print(f"[LightRAG]  rebuilding entity index: {n} entities (batch size {AURA_EMBED_BATCH_SIZE})...")
         all_embs: List[np.ndarray] = []
-        for i in range(0, len(texts), AURA_EMBED_BATCH_SIZE):
+        for i in range(0, n, AURA_EMBED_BATCH_SIZE):
             batch = texts[i : i + AURA_EMBED_BATCH_SIZE]
             embs = await self.client.embed_batch(batch)
             all_embs.extend(embs)
+            if n > AURA_EMBED_BATCH_SIZE:
+                print(f"[LightRAG]  entity embed {min(i + len(batch), n)}/{n}")
 
         emb_matrix = np.vstack([_normalize(e).reshape(1, -1) for e in all_embs]).astype(np.float32)
 
@@ -663,7 +669,7 @@ class LightRAG:
         self._entity_index.add(emb_matrix)
         self._entity_index_dirty = False
 
-        print(f"[LightRAG] Entity index ready — {len(self._entity_rows)} entities")
+        print(f"[LightRAG]  entity index ready — {n} entities")
 
     # ── insert ────────────────────────────────────────────────────────────────
 
@@ -732,14 +738,96 @@ class LightRAG:
             return
 
         total = len(chunks)
-        for idx, chunk in enumerate(chunks):
-            await self._insert_one_chunk(
-                chunk, meta={**(meta or {}), "chunk_index": idx, "chunk_count": total}
-            )
+        source = (meta or {}).get("source", f"doc_{_now_ms()}")
+        print(f"[LightRAG] insert: {total} chunk(s) from '{source}'")
 
-        # Rebuild entity FAISS after all chunks for this document
-        if AURA_GRAPH_EXTRACT and self._entity_index_dirty:
+        # ── 1. Batch-embed ALL chunks in one round-trip ───────────────────────
+        # This is the main speed win vs one embed call per chunk.
+        print(f"[LightRAG]  batch-embedding {total} chunk(s)...")
+        all_embs: List[np.ndarray] = []
+        for b_start in range(0, total, AURA_EMBED_BATCH_SIZE):
+            batch = chunks[b_start : b_start + AURA_EMBED_BATCH_SIZE]
+            batch_embs = await self.client.embed_batch(batch)
+            all_embs.extend(batch_embs)
+            end = min(b_start + len(batch), total)
+            if total > AURA_EMBED_BATCH_SIZE:
+                print(f"[LightRAG]  embedded chunks {b_start + 1}–{end}/{total}")
+        print(f"[LightRAG]  all {total} chunk embeddings ready")
+
+        # ── 2. Store chunks + embeddings ──────────────────────────────────────
+        chunk_start_idx = len(self._rows)
+        for idx, (chunk, emb) in enumerate(zip(chunks, all_embs)):
+            emb_norm = _normalize(emb)
+            _id = f"chunk_{_now_ms()}_{len(self._rows)}"
+            self._rows.append({
+                "id": _id,
+                "text": chunk,
+                "meta": {**(meta or {}), "chunk_index": idx, "chunk_count": total},
+            })
+            if self._emb is None:
+                self._emb = emb_norm.reshape(1, -1)
+                self._index = faiss.IndexFlatIP(int(self._emb.shape[1]))
+                self._index.add(self._emb)
+            else:
+                self._emb = np.vstack([self._emb, emb_norm.reshape(1, -1)])
+                self._index.add(emb_norm.reshape(1, -1))  # type: ignore[union-attr]
+            self._bm25_tokens.append(_tokenize(chunk))
+            self._inserts_since_bm25 += 1
+
+        if self._inserts_since_bm25 >= BM25_REBUILD_EVERY:
+            self._bm25 = BM25Okapi(self._bm25_tokens)
+            self._inserts_since_bm25 = 0
+
+        # ── 3. Graph extraction (sequential — single GPU can't parallelize) ──
+        if AURA_GRAPH_EXTRACT:
+            kw_list = self._graph["chunk_keywords"]
+            # Pre-fill keyword list so indices are aligned with self._rows
+            while len(kw_list) < len(self._rows):
+                kw_list.append([])
+
+            for idx, chunk in enumerate(chunks):
+                row_idx = chunk_start_idx + idx
+                print(f"[LightRAG]  graph extract chunk {idx + 1}/{total}...")
+                extracted = await self._extract_graph(chunk, source=source)
+
+                n_ent = len(extracted.get("entities", []))
+                n_rel = len(extracted.get("relations", []))
+                print(f"[LightRAG]  chunk {idx + 1}/{total}: {n_ent} entities, {n_rel} relations")
+
+                for ent in extracted.get("entities", []):
+                    name = str(ent.get("name", "")).strip()
+                    if name:
+                        self._merge_entity(
+                            name=name,
+                            etype=str(ent.get("type", "concept")),
+                            description=str(ent.get("description", "")),
+                            source=source,
+                        )
+
+                for rel in extracted.get("relations", []):
+                    src = str(rel.get("src", "")).strip()
+                    tgt = str(rel.get("tgt", "")).strip()
+                    if src and tgt:
+                        self._add_relation(
+                            src=src, tgt=tgt,
+                            description=str(rel.get("description", "")),
+                            keywords=[str(k) for k in rel.get("keywords", [])],
+                            strength=int(rel.get("strength", 5)),
+                            source=source,
+                        )
+
+                kw_list[row_idx] = [
+                    str(k) for k in extracted.get("high_level_keywords", [])
+                ]
+
+            total_ent = len(self._graph["entities"])
+            total_rel = len(self._graph["relations"])
+            print(f"[LightRAG]  graph totals: {total_ent} entities, {total_rel} relations")
+
+            self._entity_index_dirty = True
             await self._rebuild_entity_index()
+
+        print(f"[LightRAG] insert done — DB now has {len(self._rows)} chunk(s)")
 
     # ── search helpers ────────────────────────────────────────────────────────
 
@@ -986,12 +1074,18 @@ class LightRAG:
         # ── 5. Build context + generate answer ───────────────────────────
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
-            "You are AURA, a helpful lab assistant. "
-            "Answer ONLY using the provided context. "
-            "Be concise and accurate. "
-            "If the context does not contain the answer, say so clearly."
+            "You are AURA, a knowledgeable lab assistant with access to research documents. "
+            "Use the provided context — which includes entity descriptions, relationships, "
+            "and source passages — to answer the question as helpfully as possible. "
+            "When a concept, system, or technique is mentioned by name in the context, "
+            "explain it based on what the context says about it. "
+            "Be informative and accurate. "
+            "If the context is genuinely insufficient, say what you found and note the gap."
         )
-        prompt  = f"CONTEXT:\n{context}\n\nQUESTION:\n{query}\n\nANSWER:"
+        prompt = (
+            f"Context information from the knowledge base:\n{context}\n\n"
+            f"Using the context above, answer this question: {query}\n\nAnswer:"
+        )
         answer  = await self.client.generate(
             prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S
         )

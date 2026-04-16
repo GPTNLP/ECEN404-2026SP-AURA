@@ -162,13 +162,16 @@ class RagManager:
         skipped_files: List[str] = []
         failed_files: List[Dict[str, str]] = []
 
+        total_files = len(document_paths)
         try:
-            for rel_path in document_paths:
+            for file_idx, rel_path in enumerate(document_paths):
                 filename = os.path.basename(rel_path) or "document.pdf"
                 local_pdf_path = temp_pdf_dir / filename
+                file_num = file_idx + 1
 
                 try:
-                    print(f"[RAG JOB] received PDF: {filename}")
+                    print(f"[RAG JOB] ── file {file_num}/{total_files}: '{filename}' ──")
+                    print(f"[RAG JOB] downloading '{filename}' from website...")
                     await asyncio.to_thread(
                         api_client.download_document,
                         rel_path,
@@ -179,22 +182,23 @@ class RagManager:
                         raise RuntimeError("Downloaded file does not exist after download")
 
                     file_size = local_pdf_path.stat().st_size
-                    print(f"[RAG JOB] downloaded '{filename}' ({file_size} bytes)")
+                    print(f"[RAG JOB] downloaded '{filename}' ({file_size:,} bytes)")
 
-                    print(f'[RAG JOB] vectorizing "{filename}"')
+                    print(f"[RAG JOB] extracting text from '{filename}'...")
                     text = await asyncio.to_thread(self.extract_text, str(local_pdf_path))
                     text_len = len(text.strip())
-                    print(f"[RAG JOB] extracted {text_len} chars from '{filename}'")
+                    print(f"[RAG JOB] extracted {text_len:,} chars from '{filename}'")
 
                     if not text.strip():
-                        print(f'[RAG JOB] skipped "{filename}" (no extractable text)')
+                        print(f"[RAG JOB] skipped '{filename}' — no extractable text")
                         skipped_files.append(filename)
                         continue
 
                     if self.rag_system is None:
                         raise RuntimeError("LightRAG is not initialized")
 
-                    print(f"[RAG JOB] inserting '{filename}' into LightRAG")
+                    print(f"[RAG JOB] vectorizing '{filename}' (this may take several minutes)...")
+                    t0 = time.time()
                     await self.rag_system.ainsert(
                         text,
                         meta={
@@ -202,13 +206,21 @@ class RagManager:
                             "filename": filename,
                         },
                     )
-                    print(f"[RAG JOB] inserted '{filename}' successfully")
+                    elapsed = time.time() - t0
+                    stats = self.rag_system.stats()
+                    print(
+                        f"[RAG JOB] '{filename}' done in {elapsed:.1f}s — "
+                        f"DB: {stats['chunk_count']} chunks, "
+                        f"{stats['entity_count']} entities, "
+                        f"{stats['relation_count']} relations"
+                    )
+                    print(f"[RAG JOB] progress: {file_num}/{total_files} files processed")
 
                     processed_files.append(filename)
 
                 except Exception as file_error:
                     err_msg = str(file_error)
-                    print(f"[RAG JOB] failed on '{filename}': {err_msg}")
+                    print(f"[RAG JOB] FAILED on '{filename}': {err_msg}")
                     print(traceback.format_exc())
                     failed_files.append({
                         "file": filename,

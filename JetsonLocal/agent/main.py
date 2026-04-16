@@ -1191,62 +1191,88 @@ async def rag_build_loop():
 
             quiet_print(
                 "rag_job_claimed",
-                f"[RAG JOB] claimed '{db_name}' with {len(document_paths)} PDF(s)",
+                f"[RAG JOB] claimed job '{job_id}' for db='{db_name}' "
+                f"({len(document_paths)} PDF(s))",
             )
             set_ui_state("VECTORIZING", f"{db_name} ({len(document_paths)} PDF(s))")
 
-            await asyncio.to_thread(
-                api.ack_rag_build_job,
-                job_id,
-                DEVICE_ID,
-                "running",
-                f"Jetson started vectorizing '{db_name}'",
-                {
-                    "db_name": db_name,
-                    "file_count": len(document_paths),
-                },
-            )
+            # ACK "running" — tell the website we've started
+            try:
+                await asyncio.to_thread(
+                    api.ack_rag_build_job,
+                    job_id,
+                    DEVICE_ID,
+                    "running",
+                    f"Jetson started vectorizing '{db_name}'",
+                    {"db_name": db_name, "file_count": len(document_paths)},
+                )
+                print(f"[RAG JOB] ACK 'running' sent to website for '{db_name}'")
+            except Exception as ack_err:
+                print(f"[RAG JOB] WARNING: 'running' ACK failed (continuing anyway): {ack_err}")
+
+            # ── Run the build ────────────────────────────────────────────────
+            build_error: Optional[Exception] = None
+            build_result: dict = {}
 
             try:
+                print(f"[RAG JOB] starting vectorization for '{db_name}'...")
                 build_result = await rag_manager.build_database_from_document_paths(
                     db_name=db_name,
                     document_paths=document_paths,
                     api_client=api,
                 )
-
-                await asyncio.to_thread(
-                    api.ack_rag_build_job,
-                    job_id,
-                    DEVICE_ID,
-                    "completed",
-                    f"Jetson finished vectorizing '{db_name}' and synced it back to website",
-                    build_result,
+                print(
+                    f"[RAG JOB] vectorization complete for '{db_name}' — "
+                    f"{build_result.get('processed_count', 0)} file(s) processed, "
+                    f"{build_result.get('failed_count', 0)} failed"
                 )
+            except Exception as e:
+                build_error = e
+                build_result = {"db_name": db_name, "error": str(e)}
+                print(f"[RAG JOB] build FAILED for '{db_name}': {e}")
+                import traceback as _tb
+                print(_tb.format_exc())
 
-                quiet_print(
-                    "rag_job_completed",
-                    f"[RAG JOB] completed '{db_name}'",
-                )
-                set_ui_state("READY", f"{db_name} ready")
+            # ── ACK final status — retry up to 3 times so the website unblocks ──
+            ack_status = "failed" if build_error else "completed"
+            ack_note = (
+                f"Jetson build failed for '{db_name}': {build_error}"
+                if build_error
+                else f"Jetson finished vectorizing '{db_name}' and synced back to website"
+            )
 
-            except Exception as build_error:
-                await asyncio.to_thread(
-                    api.ack_rag_build_job,
-                    job_id,
-                    DEVICE_ID,
-                    "failed",
-                    f"Jetson build failed for '{db_name}': {build_error}",
-                    {
-                        "db_name": db_name,
-                        "error": str(build_error),
-                    },
-                )
+            print(f"[RAG JOB] sending ACK '{ack_status}' to website for '{db_name}'...")
+            for attempt in range(3):
+                try:
+                    await asyncio.to_thread(
+                        api.ack_rag_build_job,
+                        job_id,
+                        DEVICE_ID,
+                        ack_status,
+                        ack_note,
+                        build_result,
+                    )
+                    print(f"[RAG JOB] ACK '{ack_status}' confirmed by website for '{db_name}'")
+                    break
+                except Exception as ack_err:
+                    if attempt < 2:
+                        print(
+                            f"[RAG JOB] ACK attempt {attempt + 1}/3 failed, retrying in 5s: {ack_err}"
+                        )
+                        await asyncio.sleep(5.0)
+                    else:
+                        print(
+                            f"[RAG JOB] WARNING: all 3 ACK attempts failed for job '{job_id}'. "
+                            f"Website may stay blocked until the 60-min stale timeout expires. "
+                            f"Error: {ack_err}"
+                        )
 
-                quiet_print(
-                    "rag_job_failed",
-                    f"[RAG JOB] failed '{db_name}': {build_error}",
-                )
+            if build_error:
+                quiet_print("rag_job_failed", f"[RAG JOB] FAILED '{db_name}': {build_error}")
                 set_ui_state("ERROR", truncate_for_ui(str(build_error)))
+            else:
+                quiet_print("rag_job_completed", f"[RAG JOB] DONE '{db_name}'")
+                set_ui_state("READY", f"{db_name} ready")
 
         except Exception as poll_error:
             quiet_print("rag_job_poll_error", f"[RAG JOB] poll failed: {poll_error}")
