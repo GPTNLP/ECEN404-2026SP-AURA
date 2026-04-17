@@ -57,7 +57,7 @@ AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 # time is not a concern and the richer entity graph is needed.
 AURA_GRAPH_EXTRACT       = os.getenv("AURA_GRAPH_EXTRACT", "false").lower() == "true"
 AURA_GRAPH_TIMEOUT_S     = float(os.getenv("AURA_GRAPH_TIMEOUT_S", "90"))
-AURA_GRAPH_NUM_PREDICT   = int(os.getenv("AURA_GRAPH_NUM_PREDICT", "512"))
+AURA_GRAPH_NUM_PREDICT   = int(os.getenv("AURA_GRAPH_NUM_PREDICT", "768"))
 AURA_GRAPH_NUM_CTX       = int(os.getenv("AURA_GRAPH_NUM_CTX", "3072"))
 
 # Retrieval
@@ -70,13 +70,17 @@ BM25_REBUILD_EVERY  = int(os.getenv("AURA_BM25_REBUILD_EVERY", "50"))
 AURA_LOCAL_TOP_K    = int(os.getenv("AURA_LOCAL_TOP_K", "4"))   # entity matches
 AURA_GLOBAL_TOP_K   = int(os.getenv("AURA_GLOBAL_TOP_K", "4"))  # entity FAISS hits
 
-# Chunking — paper uses 1200 chars
-AURA_INSERT_CHUNK_SIZE    = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "1200"))
-AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "200"))
-# Minimum chunk length: filters single-word headers and stray punctuation
-# that pypdf emits from some PDFs. Set low (30) to avoid silently dropping
-# content from column-heavy or table-heavy documents. Set AURA_MIN_CHUNK_CHARS
-# in .env to tune; was 100 but that dropped all content from dense-layout PDFs.
+# Chunking — reference LightRAG uses chunk_token_size=1200 TOKENS.
+# nomic-embed-text averages ~4 chars/token for English technical text, so
+# 1200 tokens ≈ 4800 chars per chunk. The previous default of 1200 chars
+# was only ~300 tokens — 4× too small, causing far too many tiny chunks and
+# degrading retrieval quality. This was the primary cause of "1 chunk" results
+# for multi-page academic PDFs.
+AURA_INSERT_CHUNK_SIZE    = int(os.getenv("AURA_INSERT_CHUNK_SIZE", "4800"))
+# Overlap: reference uses 100 tokens → ~400 chars
+AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "400"))
+# Minimum chunk length: filters stray punctuation / arXiv stamps from PDF
+# extraction. Kept low so dense tables and short-paragraph PDFs aren't dropped.
 AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "30"))
 
 # Batch embedding
@@ -139,17 +143,11 @@ def _tokenize(s: str) -> List[str]:
     return out
 
 
-def _chunk_text(
-    text: str,
-    max_chars: int = AURA_INSERT_CHUNK_SIZE,
-    overlap: int = AURA_INSERT_CHUNK_OVERLAP,
-) -> List[str]:
-    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not text:
-        return []
+def _chunk_text_chars(text: str, max_chars: int, overlap: int) -> List[str]:
+    """Pure character-based sliding-window split (used for oversized paragraphs)."""
     chunks: List[str] = []
-    i = 0
     n = len(text)
+    i = 0
     while i < n:
         j = min(n, i + max_chars)
         chunk = text[i:j].strip()
@@ -157,7 +155,66 @@ def _chunk_text(
             chunks.append(chunk)
         if j >= n:
             break
-        i = max(0, j - overlap)
+        step = max_chars - overlap
+        i += max(1, step)  # guard against zero/negative step
+    return chunks
+
+
+def _chunk_text(
+    text: str,
+    max_chars: int = AURA_INSERT_CHUNK_SIZE,
+    overlap: int = AURA_INSERT_CHUNK_OVERLAP,
+) -> List[str]:
+    """
+    Paragraph-aware chunking (follows the reference LightRAG approach).
+
+    Groups consecutive paragraphs into chunks up to max_chars, keeping
+    paragraph boundaries intact wherever possible. A single paragraph that
+    exceeds max_chars alone is split with the character-based fallback.
+    Overlap is achieved by carrying the last paragraph of the previous
+    chunk into the start of the next one.
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+
+    # Split into paragraphs (double newline boundary)
+    paragraphs = [p.strip() for p in re.split(r'\n{2,}', text) if p.strip()]
+    if not paragraphs:
+        return []
+
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for para in paragraphs:
+        para_len = len(para)
+
+        if para_len > max_chars:
+            # Flush accumulated paragraphs first
+            if current:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            # Split the oversized paragraph with character overlap
+            for sub in _chunk_text_chars(para, max_chars, overlap):
+                chunks.append(sub)
+            continue
+
+        sep = 2 if current else 0  # "\n\n" separator cost
+        if current_len + sep + para_len > max_chars and current:
+            chunks.append("\n\n".join(current))
+            # Carry the last paragraph as overlap into the next chunk
+            carry = current[-1]
+            current = [carry]
+            current_len = len(carry)
+
+        current.append(para)
+        current_len += (2 if len(current) > 1 else 0) + para_len
+
+    if current:
+        chunks.append("\n\n".join(current))
+
     return chunks
 
 
@@ -204,29 +261,26 @@ def _parse_json_from_llm(text: str) -> dict:
 
 _GRAPH_EXTRACT_SYSTEM = (
     "You are a knowledge graph extractor. "
-    "Extract structured information from text. "
-    "Always output only valid JSON. No explanations, no markdown fences."
+    "Output only valid JSON. No explanations, no markdown fences."
 )
 
 _GRAPH_EXTRACT_PREFIX = """\
-Extract entities and relationships from the following text.
+Extract entities and relationships from the text below.
+Return ONLY a JSON object with this exact structure (no extra text):
 
-Output JSON with EXACTLY this structure:
 {
   "entities": [
-    {"name": "EntityName", "type": "concept|person|organization|equipment|process|location", "description": "brief description"}
+    {"name": "LightRAG", "type": "concept", "description": "a graph-enhanced RAG system combining vector and graph retrieval"}
   ],
   "relations": [
-    {"src": "EntityA", "tgt": "EntityB", "description": "how they relate", "keywords": ["keyword1", "keyword2"], "strength": 7}
+    {"src": "LightRAG", "tgt": "FAISS", "description": "uses FAISS for vector similarity search", "keywords": ["retrieval", "index"], "strength": 8}
   ],
-  "high_level_keywords": ["theme1", "theme2", "theme3"]
+  "high_level_keywords": ["information retrieval", "knowledge graphs"]
 }
 
-Rules:
-- entity_name: key term, capitalized
-- strength: integer 1-10
-- high_level_keywords: 2-5 overarching concepts/themes
-- If nothing meaningful found, return {"entities": [], "relations": [], "high_level_keywords": []}
+entity types: concept, person, organization, equipment, process, location
+strength: 1-10 integer (importance of the relationship)
+If nothing meaningful is found, return: {"entities": [], "relations": [], "high_level_keywords": []}
 
 Text:
 """
@@ -1102,12 +1156,13 @@ class LightRAG:
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
             "You are AURA, a helpful lab assistant. "
-            "Use the provided context as your primary source to answer the question. "
-            "When the context contains relevant information, explain it clearly and in full. "
-            "If the context is sparse or incomplete, supplement freely with your own knowledge "
-            "to give a complete and useful answer — always prioritizing what is in the context "
-            "but never refusing to answer just because the context is thin. "
-            "Be direct and informative. Do not apologize or explain what the context lacks."
+            "Answer the question using the provided context from the knowledge base. "
+            "When the context contains relevant information, explain it clearly and completely. "
+            "If the context only partially covers the question, answer from what is present "
+            "and note what is missing. "
+            "If the context does not contain a relevant answer, say exactly: "
+            "'The loaded documents do not cover this topic.' "
+            "Do not invent definitions, acronym expansions, or facts not found in the context."
         )
         prompt = (
             f"Context from the knowledge base:\n{context}\n\n"

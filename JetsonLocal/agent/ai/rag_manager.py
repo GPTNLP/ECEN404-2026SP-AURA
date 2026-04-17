@@ -10,6 +10,15 @@ from typing import Any, Dict, List, Optional
 
 from pypdf import PdfReader
 
+
+def _clean_pdf_text(text: str) -> str:
+    """Remove extraction artifacts common in LaTeX/arXiv PDFs."""
+    # Strip arXiv margin stamps (e.g. "arXiv:2410.05779v3 [cs.IR] 15 Jan 2025")
+    text = re.sub(r'arXiv:\S+\s*\[[\w.]+\]\s*\d+\s+\w+\s+\d{4}', '', text)
+    # Collapse 3+ blank lines to 2
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
 from ai.lightrag_local import LightRAG
 from core.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR, LOCAL_DB_NAME
 
@@ -106,14 +115,71 @@ class RagManager:
         }
 
     def extract_text(self, pdf_path: str) -> str:
+        """
+        Extract text from a PDF using the best available method.
+
+        Strategy:
+          1. pdfminer.six  — handles complex font encodings in LaTeX/arXiv PDFs;
+                             far more reliable than pypdf for academic papers.
+          2. pypdf layout  — fallback; extraction_mode="layout" handles multi-column
+                             layouts better than the default "plain" mode.
+
+        The root cause of the "1 chunk" bug was that pypdf's plain extractor
+        returned only the arXiv margin stamp (~100 chars) from LaTeX-compiled
+        PDFs that use Type1/Type3 fonts without full ToUnicode maps.
+        pdfminer.six resolves CMap tables correctly and recovers the full text.
+        """
+        name = os.path.basename(pdf_path)
+
+        # ── Primary: pdfminer.six ─────────────────────────────────────────────
+        try:
+            from pdfminer.high_level import extract_text as _pm_extract
+            text = _clean_pdf_text(_pm_extract(pdf_path) or "")
+            if len(text.strip()) > 200:
+                print(f"[RAG JOB] pdfminer.six extracted {len(text):,} chars from '{name}'")
+                return text
+            if text.strip():
+                print(
+                    f"[RAG JOB] pdfminer.six returned only {len(text.strip())} chars "
+                    f"from '{name}' — trying pypdf as well"
+                )
+                pdfminer_text = text
+            else:
+                pdfminer_text = ""
+        except ImportError:
+            print("[RAG JOB] pdfminer.six not installed — falling back to pypdf "
+                  "(run: pip install pdfminer.six)")
+            pdfminer_text = ""
+        except Exception as e:
+            print(f"[RAG JOB] pdfminer.six failed for '{name}': {e}")
+            pdfminer_text = ""
+
+        # ── Fallback: pypdf with layout mode ──────────────────────────────────
         try:
             reader = PdfReader(pdf_path)
-            parts = [page.extract_text() or "" for page in reader.pages]
-            return "\n\n".join(part for part in parts if part.strip())
+            parts: List[str] = []
+            for page in reader.pages:
+                try:
+                    # layout mode reconstructs reading order in columnar PDFs
+                    t = page.extract_text(extraction_mode="layout") or ""
+                except Exception:
+                    t = page.extract_text() or ""
+                if t.strip():
+                    parts.append(t)
+            pypdf_text = _clean_pdf_text("\n\n".join(parts))
         except Exception as e:
-            print(f"[RAG JOB] PDF extract failed for '{pdf_path}': {e}")
+            print(f"[RAG JOB] pypdf failed for '{name}': {e}")
             print(traceback.format_exc())
-            return ""
+            pypdf_text = ""
+
+        # Return whichever produced more content
+        result = pypdf_text if len(pypdf_text) >= len(pdfminer_text) else pdfminer_text
+        if result:
+            method = "pypdf" if result is pypdf_text else "pdfminer.six"
+            print(f"[RAG JOB] {method} extracted {len(result):,} chars from '{name}'")
+        else:
+            print(f"[RAG JOB] all extractors returned empty text for '{name}'")
+        return result
 
     def write_manifest(
         self,

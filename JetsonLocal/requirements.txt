@@ -12,6 +12,7 @@ pyserial==3.5
 faster-whisper
 pyaudio==0.2.14
 pypdf==4.2.0
+pdfminer.six>=20221105
 opencv-python
 sounddevice
 Pillow
