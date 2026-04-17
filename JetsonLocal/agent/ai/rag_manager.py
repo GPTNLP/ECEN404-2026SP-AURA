@@ -8,16 +8,77 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from collections import Counter
+
 from pypdf import PdfReader
 
 
 def _clean_pdf_text(text: str) -> str:
-    """Remove extraction artifacts common in LaTeX/arXiv PDFs."""
+    """Remove extraction artifacts from both LaTeX/arXiv and Word PDFs."""
     # Strip arXiv margin stamps (e.g. "arXiv:2410.05779v3 [cs.IR] 15 Jan 2025")
     text = re.sub(r'arXiv:\S+\s*\[[\w.]+\]\s*\d+\s+\w+\s+\d{4}', '', text)
+    # Remove "Page X of Y" / "Page X" lines (Word lab manual headers/footers)
+    text = re.sub(r'(?m)^\s*[Pp]age\s+\d+(\s+of\s+\d+)?\s*$', '', text)
+    # Remove standalone page numbers (bare integer on its own line)
+    text = re.sub(r'(?m)^\s*\d{1,4}\s*$', '', text)
+    # Collapse runs of spaces/tabs within lines (multi-column spacing artifacts)
+    text = re.sub(r'[ \t]{3,}', '  ', text)
     # Collapse 3+ blank lines to 2
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+
+def _deduplicate_progressive_slides(pages: List[str]) -> List[str]:
+    """
+    Drop pages whose content is largely subsumed by a later page within a small
+    look-ahead window.  Targets LaTeX Beamer decks where each exported PDF page
+    is a cumulative superset of the previous (progressive bullet reveals), which
+    would otherwise produce near-duplicate chunks that degrade retrieval quality.
+    """
+    if len(pages) < 2:
+        return pages
+
+    LOOK_AHEAD = 6   # how many pages ahead to search for a superset
+    THRESHOLD = 0.80  # fraction of meaningful lines that must match
+
+    def sig_lines(text: str) -> set:
+        return {ln.strip() for ln in text.split('\n') if len(ln.strip()) > 15}
+
+    keep = [True] * len(pages)
+    for i in range(len(pages) - 1):
+        lines_i = sig_lines(pages[i])
+        if len(lines_i) < 2:
+            continue
+        for j in range(i + 1, min(i + LOOK_AHEAD + 1, len(pages))):
+            lines_j = sig_lines(pages[j])
+            if lines_j and len(lines_i & lines_j) / len(lines_i) >= THRESHOLD:
+                keep[i] = False
+                break
+
+    result = [p for p, k in zip(pages, keep) if k]
+    return result if result else pages
+
+
+def _remove_repeated_header_footer(pages: List[str]) -> List[str]:
+    """Remove lines that appear on ≥50 % of pages (Word lab manual headers/footers)."""
+    if len(pages) < 3:
+        return pages
+    candidate_counts: Counter = Counter()
+    for page_text in pages:
+        lines = [ln.strip() for ln in page_text.split('\n') if ln.strip()]
+        # Check only the first 2 and last 2 lines of each page
+        for ln in lines[:2] + lines[-2:]:
+            if len(ln) > 3:
+                candidate_counts[ln] += 1
+    threshold = max(2, len(pages) * 0.5)
+    repeated = {ln for ln, cnt in candidate_counts.items() if cnt >= threshold}
+    if not repeated:
+        return pages
+    result = []
+    for page_text in pages:
+        filtered = [ln for ln in page_text.split('\n') if ln.strip() not in repeated]
+        result.append('\n'.join(filtered))
+    return result
 
 from ai.lightrag_local import LightRAG
 from core.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR, LOCAL_DB_NAME
@@ -114,72 +175,81 @@ class RagManager:
             "files_present": existing_files,
         }
 
+    def _extract_with_fitz(self, pdf_path: str, name: str) -> str:
+        """PyMuPDF — best overall for both LaTeX and Word PDFs."""
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        pages: List[str] = []
+        for page in doc:
+            t = page.get_text("text", sort=True) or ""
+            if t.strip():
+                pages.append(t)
+        doc.close()
+        pages = _deduplicate_progressive_slides(pages)
+        pages = _remove_repeated_header_footer(pages)
+        return _clean_pdf_text("\n\n".join(pages))
+
+    def _extract_with_pdfminer(self, pdf_path: str, name: str) -> str:
+        """pdfminer.six — resolves Type1/Type3 CMap tables; strong on LaTeX."""
+        from pdfminer.high_level import extract_text as _pm_extract
+        from pdfminer.layout import LAParams
+        params = LAParams(detect_vertical=False)
+        text = _pm_extract(pdf_path, laparams=params) or ""
+        return _clean_pdf_text(text)
+
+    def _extract_with_pypdf(self, pdf_path: str, name: str) -> str:
+        """pypdf layout mode — fallback when the other two fail."""
+        reader = PdfReader(pdf_path)
+        pages: List[str] = []
+        for page in reader.pages:
+            try:
+                t = page.extract_text(extraction_mode="layout") or ""
+            except Exception:
+                t = page.extract_text() or ""
+            if t.strip():
+                pages.append(t)
+        pages = _remove_repeated_header_footer(pages)
+        return _clean_pdf_text("\n\n".join(pages))
+
     def extract_text(self, pdf_path: str) -> str:
         """
-        Extract text from a PDF using the best available method.
+        Three-tier waterfall for maximum PDF coverage:
+          1. PyMuPDF  — handles both LaTeX (complex fonts) and Word (rich layout)
+          2. pdfminer.six — resolves CMap tables; strong backup for LaTeX
+          3. pypdf layout — last resort
 
-        Strategy:
-          1. pdfminer.six  — handles complex font encodings in LaTeX/arXiv PDFs;
-                             far more reliable than pypdf for academic papers.
-          2. pypdf layout  — fallback; extraction_mode="layout" handles multi-column
-                             layouts better than the default "plain" mode.
-
-        The root cause of the "1 chunk" bug was that pypdf's plain extractor
-        returned only the arXiv margin stamp (~100 chars) from LaTeX-compiled
-        PDFs that use Type1/Type3 fonts without full ToUnicode maps.
-        pdfminer.six resolves CMap tables correctly and recovers the full text.
+        The first tier to return ≥200 chars wins.  If all three produce short
+        results, we fall back to whichever returned the most content.
         """
         name = os.path.basename(pdf_path)
+        candidates: List[str] = []
 
-        # ── Primary: pdfminer.six ─────────────────────────────────────────────
-        try:
-            from pdfminer.high_level import extract_text as _pm_extract
-            text = _clean_pdf_text(_pm_extract(pdf_path) or "")
-            if len(text.strip()) > 200:
-                print(f"[RAG JOB] pdfminer.six extracted {len(text):,} chars from '{name}'")
-                return text
-            if text.strip():
-                print(
-                    f"[RAG JOB] pdfminer.six returned only {len(text.strip())} chars "
-                    f"from '{name}' — trying pypdf as well"
-                )
-                pdfminer_text = text
-            else:
-                pdfminer_text = ""
-        except ImportError:
-            print("[RAG JOB] pdfminer.six not installed — falling back to pypdf "
-                  "(run: pip install pdfminer.six)")
-            pdfminer_text = ""
-        except Exception as e:
-            print(f"[RAG JOB] pdfminer.six failed for '{name}': {e}")
-            pdfminer_text = ""
+        for label, extractor in [
+            ("PyMuPDF", self._extract_with_fitz),
+            ("pdfminer.six", self._extract_with_pdfminer),
+            ("pypdf", self._extract_with_pypdf),
+        ]:
+            try:
+                text = extractor(pdf_path, name)
+                char_count = len(text.strip())
+                print(f"[RAG JOB] {label}: {char_count:,} chars from '{name}'")
+                if char_count >= 200:
+                    return text
+                candidates.append(text)
+            except ImportError as e:
+                print(f"[RAG JOB] {label} not installed ({e}) — skipping")
+            except Exception as e:
+                print(f"[RAG JOB] {label} failed for '{name}': {e}")
 
-        # ── Fallback: pypdf with layout mode ──────────────────────────────────
-        try:
-            reader = PdfReader(pdf_path)
-            parts: List[str] = []
-            for page in reader.pages:
-                try:
-                    # layout mode reconstructs reading order in columnar PDFs
-                    t = page.extract_text(extraction_mode="layout") or ""
-                except Exception:
-                    t = page.extract_text() or ""
-                if t.strip():
-                    parts.append(t)
-            pypdf_text = _clean_pdf_text("\n\n".join(parts))
-        except Exception as e:
-            print(f"[RAG JOB] pypdf failed for '{name}': {e}")
-            print(traceback.format_exc())
-            pypdf_text = ""
+        # All tiers short — return whichever produced the most
+        if candidates:
+            best = max(candidates, key=lambda t: len(t.strip()))
+            if best.strip():
+                print(f"[RAG JOB] using best short result ({len(best.strip())} chars) for '{name}'")
+                return best
 
-        # Return whichever produced more content
-        result = pypdf_text if len(pypdf_text) >= len(pdfminer_text) else pdfminer_text
-        if result:
-            method = "pypdf" if result is pypdf_text else "pdfminer.six"
-            print(f"[RAG JOB] {method} extracted {len(result):,} chars from '{name}'")
-        else:
-            print(f"[RAG JOB] all extractors returned empty text for '{name}'")
-        return result
+        print(f"[RAG JOB] all extractors returned empty text for '{name}'")
+        return ""
 
     def write_manifest(
         self,
