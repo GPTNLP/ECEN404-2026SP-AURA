@@ -82,8 +82,8 @@ runtime_config = {
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 CAMERA_MODE_PATTERN = "^(raw|detection|colorcode|face)$"
 
-VOICE_RAG_TIMEOUT_SECONDS = 120.0
-CHAT_RAG_TIMEOUT_SECONDS = 120.0
+VOICE_RAG_TIMEOUT_SECONDS = 180.0
+CHAT_RAG_TIMEOUT_SECONDS = 180.0
 VOICE_TTS_TIMEOUT_SECONDS = 20.0
 
 _last_messages = {}
@@ -1438,7 +1438,7 @@ async def _warmup_llm():
         method="POST",
     )
     try:
-        await asyncio.to_thread(_ur.urlopen, req, 120.0)
+        await asyncio.to_thread(_ur.urlopen, req, 240.0)
         quiet_print("llm_warmup", f"[STARTUP] LLM '{DEFAULT_MODEL}' loaded into GPU VRAM (keep_alive={keep_alive})")
     except Exception as exc:
         quiet_print("llm_warmup", f"[STARTUP] LLM warmup skipped (non-fatal): {exc}")
