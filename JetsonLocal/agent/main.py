@@ -988,10 +988,8 @@ async def command_loop():
                             shutil.rmtree(db_dir, ignore_errors=True)
 
                         if rag_manager.active_db_name == db_name:
-                            rag_manager.rag_system = None
-                            rag_manager.active_db_name = None
-                            rag_manager.active_db_path = None
-                            print(f"[JETSON DB] active database '{db_name}' cleared from memory")
+                            rag_manager.unload()
+                            print(f"[JETSON DB] active database '{db_name}' cleared from memory and state file")
 
                         await asyncio.to_thread(
                             api.ack_command,

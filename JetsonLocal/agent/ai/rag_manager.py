@@ -556,6 +556,16 @@ class RagManager:
             print(traceback.format_exc())
             return False
 
+    def unload(self):
+        """Clear the active DB from memory and erase the persisted state file."""
+        self.rag_system = None
+        self.active_db_name = None
+        self.active_db_path = None
+        try:
+            _ACTIVE_DB_STATE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
     async def query(self, prompt: str) -> str:
         if not self.rag_system:
             return "RAG system is offline."

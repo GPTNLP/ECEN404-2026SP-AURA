@@ -1054,8 +1054,8 @@ class LightRAG:
 
         if chunk_hits:
             parts.append("=== Source Passages ===")
-            for hit in chunk_hits:
-                parts.append(hit.get("text", ""))
+            for i, hit in enumerate(chunk_hits, 1):
+                parts.append(f"--- Passage {i} ---\n{hit.get('text', '')}")
 
         context = "\n\n".join(parts)
         if len(context) > MAX_CTX_CHARS:
@@ -1080,14 +1080,13 @@ class LightRAG:
         has_graph = bool(self._graph.get("entities"))
 
         # ── 1. Embed query + extract keywords concurrently ────────────────
-        if has_graph and mode in ("local", "hybrid"):
-            q_emb, keywords = await asyncio.gather(
-                self.client.embed(query),
-                self._extract_query_keywords(query),
-            )
-        else:
-            q_emb    = await self.client.embed(query)
-            keywords = {"high": [], "low": []}
+        # Keywords run regardless of graph: they expand the BM25 query so
+        # retrieval still works when the raw query term appears in every chunk
+        # (near-zero IDF).  Graph-retrieval steps below still guard on has_graph.
+        q_emb, keywords = await asyncio.gather(
+            self.client.embed(query),
+            self._extract_query_keywords(query),
+        )
 
         # ── 2. Low-level (local) entity retrieval ─────────────────────────
         local_entity_hits:   List[Dict] = []
@@ -1130,7 +1129,13 @@ class LightRAG:
             candidates.setdefault(idx, {})["vec"] = score
 
         if mode in ("bm25", "hybrid", "global"):
-            for idx, score in self._search_bm25(query, top_k=top_k * 2):
+            # Expand BM25 query with extracted keywords: when the raw query term
+            # appears in every chunk its IDF → 0, making BM25 useless. Injecting
+            # semantically related keywords (from the keyword-extraction LLM call)
+            # gives BM25 non-zero signal via those alternative terms.
+            kw_terms = (keywords.get("low") or []) + (keywords.get("high") or [])
+            bm25_q = query + (" " + " ".join(kw_terms) if kw_terms else "")
+            for idx, score in self._search_bm25(bm25_q, top_k=top_k * 2):
                 candidates.setdefault(idx, {})["bm25"] = score
 
         scored: List[Tuple[float, int]] = []
@@ -1162,19 +1167,19 @@ class LightRAG:
         # ── 5. Build context + generate answer ───────────────────────────
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
-            "You are AURA, a helpful lab assistant. "
-            "Answer the question using the provided context from the knowledge base whenever possible. "
-            "When the context contains relevant information, explain it clearly and completely. "
-            "If the context only partially covers the question, answer from what is present "
-            "and note what is missing. "
-            "If the context does not contain a relevant answer, you may draw on your general "
-            "knowledge — but you MUST begin your response with exactly: "
-            "'[Note: This answer is based on general knowledge, not the loaded documents.]' "
-            "Never invent specific facts, numbers, or citations not present in the context "
-            "or your verified general knowledge."
+            "You are AURA, a helpful lab assistant robot. "
+            "The passages below were retrieved from the uploaded knowledge base documents. "
+            "Read ALL passages carefully before answering. "
+            "If the answer is in the passages, give a complete and accurate answer — "
+            "synthesize information across passages if needed. "
+            "If the passages only partially answer the question, answer what you can "
+            "and briefly note what is missing. "
+            "Only if the passages contain no relevant information at all, respond with: "
+            "'The loaded documents do not cover this topic.' "
+            "Never invent facts, definitions, or details not found in the passages."
         )
         prompt = (
-            f"Context from the knowledge base:\n{context}\n\n"
+            f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
             f"Question: {query}\n\nAnswer:"
         )
         answer  = await self.client.generate(

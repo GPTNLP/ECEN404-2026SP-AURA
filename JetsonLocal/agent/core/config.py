@@ -20,7 +20,9 @@ STATE_DIR = STORAGE_DIR / "state"
 
 ENV_PATH = JETSONLOCAL_DIR / ".env"
 if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
+    # override=True: .env values always win over systemd Environment= lines, making
+    # the .env file the single authoritative place for all tunable settings.
+    load_dotenv(ENV_PATH, override=True)
 
 API_BASE_URL = os.getenv("AZURE_BACKEND_URL", "").rstrip("/")
 
