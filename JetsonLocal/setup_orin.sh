@@ -59,7 +59,8 @@ sudo apt-get install -y \
   python3-pyaudio \
   libasound2-dev \
   flac \
-  x11-xserver-utils
+  x11-xserver-utils \
+  tesseract-ocr
 
 echo "System dependencies installed"
 

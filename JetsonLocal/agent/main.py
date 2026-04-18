@@ -1474,16 +1474,13 @@ async def _warmup_llm():
     - By warming up during the quieter startup window we pin the model in VRAM
       and shorten the first-response latency to pure inference time.
     """
-    import urllib.request as _ur
-    import json as _json
-
     await asyncio.sleep(8.0)   # let other startup tasks settle first
 
     ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
     num_gpu    = int(os.getenv("AURA_NUM_GPU", "99"))
     keep_alive = os.getenv("AURA_KEEP_ALIVE", "2h")
 
-    payload = _json.dumps({
+    body = {
         "model":      DEFAULT_MODEL,
         "prompt":     "Hi",
         "stream":     False,
@@ -1495,16 +1492,16 @@ async def _warmup_llm():
             "temperature": 0.0,
             "mirostat":    0,
         },
-    }).encode()
+    }
 
-    req = _ur.Request(
-        f"{ollama_url}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        await asyncio.to_thread(_ur.urlopen, req, timeout=1000.0)
+        await asyncio.to_thread(
+            lambda: requests.post(
+                f"{ollama_url}/api/generate",
+                json=body,
+                timeout=180.0,
+            )
+        )
         quiet_print("llm_warmup", f"[STARTUP] LLM '{DEFAULT_MODEL}' loaded into GPU VRAM (keep_alive={keep_alive})")
     except Exception as exc:
         quiet_print("llm_warmup", f"[STARTUP] LLM warmup skipped (non-fatal): {exc}")
