@@ -59,7 +59,8 @@ sudo apt-get install -y \
   python3-pyaudio \
   libasound2-dev \
   flac \
-  x11-xserver-utils
+  x11-xserver-utils \
+  tesseract-ocr
 
 echo "System dependencies installed"
 
@@ -193,7 +194,7 @@ RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 Environment=AURA_NUM_GPU=99
 Environment=AURA_INTENT_MODEL=llama3.2:1b
-Environment=AURA_GRAPH_EXTRACT=true
+Environment=AURA_GRAPH_EXTRACT=false
 Environment=AURA_KEEP_ALIVE=2h
 Environment=AURA_NUM_CTX=2048
 Environment=AURA_MAX_CTX_CHARS=4000

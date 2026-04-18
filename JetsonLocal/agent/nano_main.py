@@ -1338,9 +1338,10 @@ class AuraConsoleApp:
         if not hasattr(self, "raw_log_text"):
             return
 
+        timestamp = datetime.now().strftime("%H:%M:%S")
         should_follow = self._is_scrolled_near_bottom(self.raw_log_text)
         self.raw_log_text.configure(state="normal")
-        self.raw_log_text.insert("end", line.rstrip() + "\n")
+        self.raw_log_text.insert("end", f"[{timestamp}] {line.rstrip()}\n")
 
         line_count = int(self.raw_log_text.index("end-1c").split(".")[0])
         if line_count > MAX_RAW_LOG_LINES:

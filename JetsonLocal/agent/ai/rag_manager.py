@@ -242,24 +242,68 @@ class RagManager:
         pages = _remove_repeated_header_footer(pages)
         return _clean_pdf_text("\n\n".join(pages))
 
+    def _extract_with_ocr(self, pdf_path: str, name: str) -> str:
+        """
+        OCR fallback via PyMuPDF page rendering + pytesseract.
+        Used only when all text-extraction tiers return <200 chars — e.g. for
+        arXiv LaTeX PDFs whose fonts are not embedded in a way pdfminer can decode.
+        """
+        import fitz
+        import pytesseract
+        from PIL import Image
+        import io
+
+        doc = fitz.open(pdf_path)
+        pages: List[str] = []
+        for page in doc:
+            mat = fitz.Matrix(2.0, 2.0)  # 2× scale → ~144 DPI
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            text = pytesseract.image_to_string(img, config="--psm 1")
+            if text.strip():
+                pages.append(text)
+        doc.close()
+        pages = _remove_repeated_header_footer(pages)
+        return _clean_pdf_text("\n\n".join(pages))
+
     def extract_text(self, pdf_path: str) -> str:
         """
-        Three-tier waterfall for maximum PDF coverage:
+        Four-tier waterfall for maximum PDF coverage:
           1. PyMuPDF  — handles both LaTeX (complex fonts) and Word (rich layout)
           2. pdfminer.six — resolves CMap tables; strong backup for LaTeX
-          3. pypdf layout — last resort
+          3. pypdf layout — last resort text extraction
+          4. OCR (pytesseract) — fallback for PDFs with undecodable font encodings
 
-        The first tier to return ≥200 chars wins.  If all three produce short
-        results, we fall back to whichever returned the most content.
+        Early-exit optimisation: if PyMuPDF returns <100 chars from a multi-page
+        PDF, the fonts are almost certainly undecodable and pdfminer/pypdf will
+        waste 30-60 seconds also failing — skip straight to OCR in that case.
+
+        The first tier to return ≥200 chars wins.  If OCR is also unavailable,
+        we return whichever extractor produced the most content.
         """
         name = os.path.basename(pdf_path)
         candidates: List[str] = []
+
+        # Cheap page-count check so we can detect multi-page undecodable PDFs
+        try:
+            import fitz as _fitz_pc
+            _doc_pc = _fitz_pc.open(pdf_path)
+            _page_count = len(_doc_pc)
+            _doc_pc.close()
+        except Exception:
+            _page_count = 0
+
+        skip_slow_tiers = False  # set True when PyMuPDF signals undecodable fonts
 
         for label, extractor in [
             ("PyMuPDF", self._extract_with_fitz),
             ("pdfminer.six", self._extract_with_pdfminer),
             ("pypdf", self._extract_with_pypdf),
         ]:
+            if skip_slow_tiers and label in ("pdfminer.six", "pypdf"):
+                print(f"[RAG JOB] skipping {label} — PyMuPDF near-empty on {_page_count}-page PDF, jumping to OCR")
+                continue
+
             try:
                 text = extractor(pdf_path, name)
                 char_count = len(text.strip())
@@ -267,12 +311,31 @@ class RagManager:
                 if char_count >= 200:
                     return text
                 candidates.append(text)
+
+                # PyMuPDF near-empty on a real multi-page doc → fonts are undecodable
+                if label == "PyMuPDF" and char_count < 100 and _page_count > 3:
+                    skip_slow_tiers = True
+
             except ImportError as e:
                 print(f"[RAG JOB] {label} not installed ({e}) — skipping")
             except Exception as e:
                 print(f"[RAG JOB] {label} failed for '{name}': {e}")
 
-        # All tiers short — return whichever produced the most
+        # All text tiers short (or skipped) — try OCR
+        try:
+            print(f"[RAG JOB] text extractors yielded <200 chars for '{name}', trying OCR...")
+            text = self._extract_with_ocr(pdf_path, name)
+            char_count = len(text.strip())
+            print(f"[RAG JOB] OCR: {char_count:,} chars from '{name}'")
+            if char_count >= 200:
+                return text
+            candidates.append(text)
+        except ImportError as e:
+            print(f"[RAG JOB] OCR not available ({e}) — install tesseract-ocr + pytesseract")
+        except Exception as e:
+            print(f"[RAG JOB] OCR failed for '{name}': {e}")
+
+        # Return whichever produced the most
         if candidates:
             best = max(candidates, key=lambda t: len(t.strip()))
             if best.strip():

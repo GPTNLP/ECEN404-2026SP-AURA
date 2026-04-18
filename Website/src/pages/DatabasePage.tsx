@@ -229,6 +229,8 @@ export default function DatabasePage() {
       setDbList(list);
       setActiveDb((prev) => {
         if (prev && list.includes(prev)) return prev;
+        const loaded = localStorage.getItem("aura_loaded_db") || "";
+        if (loaded && list.includes(loaded)) return loaded;
         return list[0] || "";
       });
     } catch {
