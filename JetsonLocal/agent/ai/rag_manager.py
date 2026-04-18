@@ -566,12 +566,12 @@ class RagManager:
         except Exception:
             pass
 
-    async def query(self, prompt: str) -> str:
+    async def query(self, prompt: str, on_token=None) -> str:
         if not self.rag_system:
             return "RAG system is offline."
 
         try:
-            result = await self.rag_system.aquery(prompt)
+            result = await self.rag_system.aquery(prompt, on_token=on_token)
             if isinstance(result, dict):
                 return result.get("answer", "No context found in local database.")
             return str(result)

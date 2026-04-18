@@ -211,6 +211,20 @@ async def refresh_config():
 # -------------------------------------------------------------------
 # VOICE HELPERS
 # -------------------------------------------------------------------
+
+# Matches a sentence-ending punctuation followed by whitespace or end-of-string.
+# Used by the streaming TTS logic to detect when a speakable sentence is ready.
+_SENTENCE_BOUNDARY = _re.compile(r'(?<=[.!?])\s+|(?<=[.!?])$')
+
+
+def _pop_sentence(buf: str, min_len: int = 25) -> tuple:
+    """Return (sentence, remainder) when a complete sentence is ready, else ('', buf)."""
+    for m in _SENTENCE_BOUNDARY.finditer(buf):
+        if m.start() >= min_len:
+            return buf[:m.start() + 1].strip(), buf[m.end():]
+    return "", buf
+
+
 def extract_speak_payload(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
@@ -399,10 +413,49 @@ async def handle_voice_text(
         chat_manager.add_message("user", text, api, DEVICE_ID)
         set_ui_state("THINKING", "Running local RAG query")
 
-        try:
-            answer = await query_rag_with_timeout(text, VOICE_RAG_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            answer = "I timed out while thinking. Please ask again."
+        if speak_response:
+            # Streaming TTS: speak sentence-by-sentence as tokens arrive so the
+            # user hears the first sentence ~5s after asking rather than waiting
+            # for the full answer (~20-30s with the 3b model).
+            tts_q: asyncio.Queue = asyncio.Queue()
+            sentence_buf: List[str] = []
+
+            async def _tts_worker() -> None:
+                while True:
+                    item = await tts_q.get()
+                    if item is None:
+                        break
+                    await speak_with_timeout(item, truncate_for_ui(item))
+
+            async def _on_token(tok: str) -> None:
+                sentence_buf.append(tok)
+                sentence, remainder = _pop_sentence("".join(sentence_buf))
+                if sentence:
+                    sentence_buf.clear()
+                    sentence_buf.append(remainder)
+                    await tts_q.put(sentence)
+
+            tts_task = asyncio.create_task(_tts_worker())
+            try:
+                answer = await asyncio.wait_for(
+                    rag_manager.query(text, on_token=_on_token),
+                    timeout=VOICE_RAG_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                answer = "I timed out while thinking. Please ask again."
+            finally:
+                # Speak any text left in the buffer after the stream ends
+                leftover = "".join(sentence_buf).strip()
+                if leftover:
+                    await tts_q.put(leftover)
+                await tts_q.put(None)  # sentinel
+                await tts_task
+            result["spoken"] = True
+        else:
+            try:
+                answer = await query_rag_with_timeout(text, VOICE_RAG_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                answer = "I timed out while thinking. Please ask again."
 
         if isinstance(answer, dict):
             answer = answer.get("answer") or answer.get("response") or str(answer)
@@ -415,9 +468,6 @@ async def handle_voice_text(
 
         result["action"] = "llm"
         result["response_text"] = answer
-
-        if speak_response:
-            result["spoken"] = await speak_with_timeout(answer, truncate_for_ui(answer))
 
         quiet_print("voice_chat", f"[VOICE] answered: {text}")
         send_or_queue_log(

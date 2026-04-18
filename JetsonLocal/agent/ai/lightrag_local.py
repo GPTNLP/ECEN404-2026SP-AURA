@@ -24,10 +24,10 @@ import json
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-import urllib.request
+import requests
 
 import faiss
 from rank_bm25 import BM25Okapi
@@ -305,16 +305,13 @@ class OllamaClient:
     def _post_json(
         self, path: str, payload: Dict[str, Any], timeout_s: float
     ) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        resp = requests.post(
+            f"{self.base_url}{path}",
+            json=payload,
+            timeout=timeout_s,
         )
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8", errors="ignore")
-            return json.loads(raw) if raw else {}
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
 
     async def embed_batch(self, texts: List[str], timeout_s: float = 120.0) -> List[np.ndarray]:
         """
@@ -400,28 +397,80 @@ class OllamaClient:
         num_ctx: int = AURA_NUM_CTX,
         temperature: float = AURA_TEMPERATURE,
         fast: bool = False,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> str:
+        """
+        Generate a response.  When on_token is provided, streams the response
+        token-by-token and calls on_token(token) as each arrives — allows the
+        caller to pipe tokens to TTS sentence-by-sentence instead of waiting
+        for the full answer.  Returns the complete answer string regardless.
+        """
+        streaming = on_token is not None
         payload: Dict[str, Any] = {
             "model": self.llm_model,
             "prompt": prompt,
             "system": system,
-            "stream": False,
+            "stream": streaming,
             "keep_alive": AURA_KEEP_ALIVE,
             "options": self._make_options(num_predict, num_ctx, temperature, fast),
         }
-        try:
-            out = await asyncio.to_thread(
-                self._post_json, "/api/generate", payload, timeout_s
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Ollama generate failed at {self.base_url}. "
-                f"Is Ollama running? ({e})"
-            )
-        txt = out.get("response")
-        if not isinstance(txt, str):
-            raise RuntimeError("Ollama generate returned no response text.")
-        return txt.strip()
+
+        if not streaming:
+            try:
+                out = await asyncio.to_thread(
+                    self._post_json, "/api/generate", payload, timeout_s
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Ollama generate failed at {self.base_url}. "
+                    f"Is Ollama running? ({e})"
+                )
+            txt = out.get("response")
+            if not isinstance(txt, str):
+                raise RuntimeError("Ollama generate returned no response text.")
+            return txt.strip()
+
+        # Streaming path: run the blocking HTTP stream in a thread, feed tokens
+        # back to the event loop via a queue so on_token() can be awaited safely.
+        loop = asyncio.get_running_loop()
+        token_q: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=1024)
+
+        def _stream_worker() -> None:
+            try:
+                with requests.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    stream=True,
+                    timeout=timeout_s,
+                ) as resp:
+                    resp.raise_for_status()
+                    for raw_line in resp.iter_lines():
+                        if not raw_line:
+                            continue
+                        try:
+                            obj = json.loads(raw_line)
+                        except Exception:
+                            continue
+                        tok = obj.get("response", "")
+                        if tok:
+                            loop.call_soon_threadsafe(token_q.put_nowait, tok)
+                        if obj.get("done", False):
+                            break
+            except Exception:
+                pass
+            finally:
+                loop.call_soon_threadsafe(token_q.put_nowait, None)  # sentinel
+
+        worker = loop.run_in_executor(None, _stream_worker)
+        tokens: List[str] = []
+        while True:
+            tok = await token_q.get()
+            if tok is None:
+                break
+            tokens.append(tok)
+            await on_token(tok)
+        await worker
+        return "".join(tokens).strip()
 
 
 # ─── LightRAG ────────────────────────────────────────────────────────────────
@@ -1067,7 +1116,10 @@ class LightRAG:
     # ── query ─────────────────────────────────────────────────────────────────
 
     async def aquery(
-        self, query: str, param: Optional[QueryParam] = None
+        self,
+        query: str,
+        param: Optional[QueryParam] = None,
+        on_token: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         param = param or QueryParam()
 
@@ -1192,8 +1244,9 @@ class LightRAG:
             f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
             f"Question: {query}\n\nAnswer:"
         )
-        answer  = await self.client.generate(
-            prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S
+        answer = await self.client.generate(
+            prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S,
+            on_token=on_token,
         )
 
         return {
