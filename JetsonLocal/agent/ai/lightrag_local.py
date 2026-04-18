@@ -46,7 +46,7 @@ AURA_NUM_GPU       = int(os.getenv("AURA_NUM_GPU", "99"))   # offload all layers
 # num_ctx=4096: with 4800-char chunks and MAX_CTX_CHARS=12000, actual prompts are
 # ~3200 tokens (context + query + system). llama3.2:1b KV cache at q8_0 is ~200 MB
 # at 4096 tokens — well within the Jetson's 8 GB alongside camera/YOLO.
-AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "256"))
+AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "512"))
 AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "4096"))
 AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
@@ -1172,11 +1172,16 @@ class LightRAG:
             "Read ALL passages carefully before answering. "
             "If the answer is in the passages, give a complete and accurate answer — "
             "synthesize information across passages if needed. "
+            "If a topic is mentioned in the passages even as a comparison, baseline, or reference, "
+            "use that information — do not say the topic is not covered. "
             "If the passages only partially answer the question, answer what you can "
             "and briefly note what is missing. "
-            "Only if the passages contain no relevant information at all, respond with: "
+            "Only if the passages contain absolutely no mention of the topic, respond with: "
             "'The loaded documents do not cover this topic.' "
-            "Never invent facts, definitions, or details not found in the passages."
+            "Never invent facts, definitions, or details not found in the passages. "
+            "Never expand an acronym unless its full form is explicitly written out in the passages. "
+            "Do not create numbered lists, bullet points, or headers unless the passages themselves use that structure. "
+            "Stop after answering the question — do not continue generating beyond the answer."
         )
         prompt = (
             f"Retrieved passages from the knowledge base:\n\n{context}\n\n"

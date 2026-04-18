@@ -47,7 +47,7 @@ else:
 os.makedirs(DOCUMENTS_DIR, exist_ok=True)
 os.makedirs(RAG_ROOT_DIR, exist_ok=True)
 
-DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2:1b")
+DEFAULT_LLM = os.getenv("AURA_LLM_MODEL", "llama3.2")
 DEFAULT_EMBED = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
 

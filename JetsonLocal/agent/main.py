@@ -43,6 +43,7 @@ from core.config import (
     OFFLINE_RETRY_SECONDS,
     LOCAL_DB_NAME,
     DEFAULT_MODEL,
+    EMBEDDING_MODEL,
 )
 
 from cloud.api_client import ApiClient
@@ -1503,6 +1504,27 @@ async def _warmup_llm():
         quiet_print("llm_warmup", f"[STARTUP] LLM '{DEFAULT_MODEL}' loaded into GPU VRAM (keep_alive={keep_alive})")
     except Exception as exc:
         quiet_print("llm_warmup", f"[STARTUP] LLM warmup skipped (non-fatal): {exc}")
+
+    # Warm up the embedding model so it loads on GPU before the first RAG build/query.
+    # Without this, Ollama loads nomic-embed-text on CPU the first time embed() is called,
+    # and per-request num_gpu options cannot move an already-loaded model to GPU.
+    embed_body = {
+        "model":      EMBEDDING_MODEL,
+        "input":      "warmup",
+        "keep_alive": keep_alive,
+        "options": {"num_gpu": num_gpu},
+    }
+    try:
+        await asyncio.to_thread(
+            lambda: requests.post(
+                f"{ollama_url}/api/embed",
+                json=embed_body,
+                timeout=60.0,
+            )
+        )
+        quiet_print("llm_warmup", f"[STARTUP] Embed model '{EMBEDDING_MODEL}' loaded into GPU VRAM")
+    except Exception as exc:
+        quiet_print("llm_warmup", f"[STARTUP] Embed warmup skipped (non-fatal): {exc}")
 
 
 # -------------------------------------------------------------------

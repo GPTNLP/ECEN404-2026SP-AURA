@@ -6,7 +6,7 @@ from core.config import DEFAULT_MODEL, EMBEDDING_MODEL
 # Separate lightweight model for intent classification.
 # llama3.2:1b is ~2x faster than 3b for single-word outputs.
 # Set AURA_INTENT_MODEL=llama3.2:3b to reuse the main model.
-_INTENT_MODEL = os.getenv("AURA_INTENT_MODEL", "llama3.2:1b")
+_INTENT_MODEL = os.getenv("AURA_INTENT_MODEL", "llama3.2")
 
 _SYSTEM = (
     "Classify the user input. "

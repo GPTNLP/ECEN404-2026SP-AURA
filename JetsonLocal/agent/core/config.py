@@ -49,7 +49,7 @@ SERIAL_DRY_RUN = os.getenv("SERIAL_DRY_RUN", "true").strip().lower() == "true"
 
 INPUT_MODE = os.getenv("INPUT_MODE", "keyboard").strip().lower()
 
-DEFAULT_MODEL = os.getenv("AURA_LLM_MODEL", "llama3.2:1b")
+DEFAULT_MODEL = os.getenv("AURA_LLM_MODEL", "llama3.2")
 EMBEDDING_MODEL = os.getenv("AURA_EMBED_MODEL", "nomic-embed-text")
 LOCAL_DB_NAME = os.getenv("LOCAL_DB_NAME", "jetson_local_db")
 
