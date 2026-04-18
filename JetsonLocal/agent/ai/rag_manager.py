@@ -81,7 +81,26 @@ def _remove_repeated_header_footer(pages: List[str]) -> List[str]:
     return result
 
 from ai.lightrag_local import LightRAG
-from core.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR, LOCAL_DB_NAME
+from core.config import DEFAULT_MODEL, EMBEDDING_MODEL, STORAGE_DIR, LOCAL_DB_NAME, STATE_DIR
+
+_ACTIVE_DB_STATE = Path(STATE_DIR) / "active_db.json"
+
+
+def _save_active_db_state(db_name: str):
+    try:
+        with open(_ACTIVE_DB_STATE, "w", encoding="utf-8") as f:
+            json.dump({"active_db": db_name}, f)
+    except Exception:
+        pass
+
+
+def _load_active_db_state() -> Optional[str]:
+    try:
+        with open(_ACTIVE_DB_STATE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("active_db") or None
+    except Exception:
+        return None
 
 
 def _safe_name(value: str) -> str:
@@ -109,9 +128,20 @@ class RagManager:
         return self.get_db_dir(db_name) / "build_manifest.json"
 
     def initialize(self) -> bool:
+        # Restore the last active DB so the Jetson is ready immediately on reboot,
+        # even without WiFi.  Falls back to LOCAL_DB_NAME if the state file is absent
+        # or the saved directory no longer exists on disk.
+        saved_name = _load_active_db_state()
+        if saved_name:
+            saved_dir = self.get_db_dir(saved_name)
+            if saved_dir.exists():
+                try:
+                    return self.initialize_db(saved_name, reset=False)
+                except Exception:
+                    pass
+
         default_name = LOCAL_DB_NAME or "default_db"
         default_dir = self.get_db_dir(default_name)
-
         if default_dir.exists():
             try:
                 return self.initialize_db(default_name, reset=False)
@@ -139,6 +169,7 @@ class RagManager:
             )
             self.active_db_name = db_name
             self.active_db_path = db_dir
+            _save_active_db_state(db_name)
             chunk_count = len(self.rag_system._rows)
             print(f"[RAG JOB] local LightRAG ready at {db_dir} — {chunk_count} chunk(s) loaded")
             return True

@@ -43,11 +43,11 @@ AURA_KEEP_ALIVE    = os.getenv("AURA_KEEP_ALIVE", "2h")
 AURA_NUM_GPU       = int(os.getenv("AURA_NUM_GPU", "99"))   # offload all layers to Jetson GPU
 
 # Answer generation
-# num_ctx=2048: actual prompts are ~1100 tokens (4000-char context + query + system).
-# Halving from 4096 cuts KV-cache VRAM by ~50%, keeping the model on GPU when
-# camera/YOLO also compete for the Jetson's unified 8 GB.
+# num_ctx=4096: with 4800-char chunks and MAX_CTX_CHARS=12000, actual prompts are
+# ~3200 tokens (context + query + system). llama3.2:1b KV cache at q8_0 is ~200 MB
+# at 4096 tokens — well within the Jetson's 8 GB alongside camera/YOLO.
 AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "256"))
-AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "2048"))
+AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "4096"))
 AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 
@@ -61,10 +61,9 @@ AURA_GRAPH_NUM_PREDICT   = int(os.getenv("AURA_GRAPH_NUM_PREDICT", "768"))
 AURA_GRAPH_NUM_CTX       = int(os.getenv("AURA_GRAPH_NUM_CTX", "3072"))
 
 # Retrieval
-# MAX_CTX_CHARS=5000: ~1250 tokens. More context improves answerability without
-# blowing the 2048-token KV budget (system + context + query + answer all fit).
-# top_k=6: retrieve more candidate chunks so sparse-content docs still get good hits.
-MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "5000"))
+# MAX_CTX_CHARS=12000: ~3000 tokens; fits 2-3 full 4800-char chunks in context.
+# With AURA_NUM_CTX=4096, total prompt (system+context+query+answer) stays within budget.
+MAX_CTX_CHARS       = int(os.getenv("AURA_MAX_CTX_CHARS", "12000"))
 DEFAULT_TOP_K       = int(os.getenv("AURA_TOP_K", "8"))
 BM25_REBUILD_EVERY  = int(os.getenv("AURA_BM25_REBUILD_EVERY", "50"))
 AURA_LOCAL_TOP_K    = int(os.getenv("AURA_LOCAL_TOP_K", "4"))   # entity matches
@@ -328,7 +327,11 @@ class OllamaClient:
 
         # Try new batch endpoint
         try:
-            payload = {"model": self.embed_model, "input": texts}
+            payload = {
+                "model": self.embed_model,
+                "input": texts,
+                "options": {"num_gpu": AURA_NUM_GPU},
+            }
             out = await asyncio.to_thread(
                 self._post_json, "/api/embed", payload, timeout_s
             )
@@ -346,7 +349,11 @@ class OllamaClient:
                 out = await asyncio.to_thread(
                     self._post_json,
                     "/api/embeddings",
-                    {"model": self.embed_model, "prompt": text},
+                    {
+                        "model": self.embed_model,
+                        "prompt": text,
+                        "options": {"num_gpu": AURA_NUM_GPU},
+                    },
                     per_call,
                 )
                 emb = out.get("embedding")
