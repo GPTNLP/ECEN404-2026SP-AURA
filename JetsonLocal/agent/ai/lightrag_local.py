@@ -41,6 +41,12 @@ AURA_OLLAMA_TIMEOUT_S = float(os.getenv("AURA_OLLAMA_TIMEOUT_S", "180"))
 # Without this, a 30-min gap causes a GPU→CPU fallback on the next call.
 AURA_KEEP_ALIVE    = os.getenv("AURA_KEEP_ALIVE", "2h")
 AURA_NUM_GPU       = int(os.getenv("AURA_NUM_GPU", "99"))   # offload all layers to Jetson GPU
+# Lightweight model for keyword extraction — runs in parallel with the embed call.
+# Using the 1b intent model here (not 3b) means: (a) it finishes faster so the
+# parallel phase takes ~600ms instead of ~2s, and (b) the 3b model's KV cache is
+# NOT evicted between keyword extraction and answer generation, so Ollama can reuse
+# any cached prefix KV from the previous query.
+AURA_FAST_LLM      = os.getenv("AURA_INTENT_MODEL", "llama3.2:1b")
 
 # Answer generation
 # num_ctx=4096: with 4800-char chunks and MAX_CTX_CHARS=12000, actual prompts are
@@ -374,7 +380,6 @@ class OllamaClient:
         num_predict: int,
         num_ctx: int,
         temperature: float,
-        fast: bool = False,
     ) -> Dict[str, Any]:
         opts: Dict[str, Any] = {
             "temperature": temperature,
@@ -384,8 +389,10 @@ class OllamaClient:
         }
         if AURA_NUM_THREAD > 0:
             opts["num_thread"] = AURA_NUM_THREAD
-        if fast:
-            opts["mirostat"] = 0  # disable mirostat for deterministic fast output
+        # mirostat=0 disables adaptive perplexity-targeting sampling.  At
+        # temperature=0.2 the distribution is already sharp enough that mirostat
+        # adds overhead (~5-10% per token) without measurable quality gain.
+        opts["mirostat"] = 0
         return opts
 
     async def generate(
@@ -396,7 +403,6 @@ class OllamaClient:
         num_predict: int = AURA_NUM_PREDICT,
         num_ctx: int = AURA_NUM_CTX,
         temperature: float = AURA_TEMPERATURE,
-        fast: bool = False,
         on_token: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> str:
         """
@@ -412,7 +418,7 @@ class OllamaClient:
             "system": system,
             "stream": streaming,
             "keep_alive": AURA_KEEP_ALIVE,
-            "options": self._make_options(num_predict, num_ctx, temperature, fast),
+            "options": self._make_options(num_predict, num_ctx, temperature),
         }
 
         if not streaming:
@@ -525,6 +531,13 @@ class LightRAG:
             base_url=ollama_base_url or AURA_OLLAMA_URL,
             embed_model=embed_model_name,
             llm_model=llm_model_name,
+        )
+        # Separate lightweight client for keyword extraction — uses 1b model so
+        # the 3b answer model's KV cache is never touched during retrieval prep.
+        self._fast_client = OllamaClient(
+            base_url=ollama_base_url or AURA_OLLAMA_URL,
+            embed_model=embed_model_name,
+            llm_model=AURA_FAST_LLM,
         )
 
         # chunk runtime state
@@ -742,7 +755,7 @@ class LightRAG:
                 num_predict=AURA_GRAPH_NUM_PREDICT,
                 num_ctx=AURA_GRAPH_NUM_CTX,
                 temperature=0.0,   # deterministic extraction
-                fast=True,
+
             )
             result = _parse_json_from_llm(raw)
             if not result:
@@ -1057,14 +1070,13 @@ class LightRAG:
         """
         prompt = _KEYWORD_EXTRACT_PREFIX + query
         try:
-            raw = await self.client.generate(
+            raw = await self._fast_client.generate(
                 prompt=prompt,
                 system=_KEYWORD_EXTRACT_SYSTEM,
                 timeout_s=15.0,
-                num_predict=60,   # keyword JSON is short; was 80
-                num_ctx=256,      # query + prefix fits in 256; was 512 (halves KV alloc)
+                num_predict=60,
+                num_ctx=256,
                 temperature=0.0,
-                fast=True,
             )
             parsed = _parse_json_from_llm(raw)
             return {
@@ -1103,15 +1115,22 @@ class LightRAG:
 
         if chunk_hits:
             parts.append("=== Source Passages ===")
+            # Track chars used so far (joining with \n\n between each part).
+            # Stop adding passages once the next one would push past MAX_CTX_CHARS
+            # so the LLM always sees complete passages — a mid-cut paragraph is
+            # worse than one fewer complete paragraph.
+            used = len("\n\n".join(parts))
             for i, hit in enumerate(chunk_hits, 1):
                 src = (hit.get("meta") or {}).get("source", "")
                 label = f"--- Passage {i} (from: {src}) ---" if src else f"--- Passage {i} ---"
-                parts.append(f"{label}\n{hit.get('text', '')}")
+                passage = f"{label}\n{hit.get('text', '')}"
+                needed = len(passage) + 2  # +2 for the \n\n joiner
+                if used + needed > MAX_CTX_CHARS:
+                    break
+                parts.append(passage)
+                used += needed
 
-        context = "\n\n".join(parts)
-        if len(context) > MAX_CTX_CHARS:
-            context = context[:MAX_CTX_CHARS] + "\n\n[...truncated...]"
-        return context
+        return "\n\n".join(parts)
 
     # ── query ─────────────────────────────────────────────────────────────────
 
