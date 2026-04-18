@@ -1156,13 +1156,15 @@ class LightRAG:
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
             "You are AURA, a helpful lab assistant. "
-            "Answer the question using the provided context from the knowledge base. "
+            "Answer the question using the provided context from the knowledge base whenever possible. "
             "When the context contains relevant information, explain it clearly and completely. "
             "If the context only partially covers the question, answer from what is present "
             "and note what is missing. "
-            "If the context does not contain a relevant answer, say exactly: "
-            "'The loaded documents do not cover this topic.' "
-            "Do not invent definitions, acronym expansions, or facts not found in the context."
+            "If the context does not contain a relevant answer, you may draw on your general "
+            "knowledge — but you MUST begin your response with exactly: "
+            "'[Note: This answer is based on general knowledge, not the loaded documents.]' "
+            "Never invent specific facts, numbers, or citations not present in the context "
+            "or your verified general knowledge."
         )
         prompt = (
             f"Context from the knowledge base:\n{context}\n\n"

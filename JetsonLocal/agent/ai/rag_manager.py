@@ -243,18 +243,36 @@ class RagManager:
           3. pypdf layout — last resort text extraction
           4. OCR (pytesseract) — fallback for PDFs with undecodable font encodings
 
-        The first tier to return ≥200 chars wins.  If all text tiers produce
-        short results, OCR is attempted.  If OCR is also unavailable, we return
-        whichever produced the most content.
+        Early-exit optimisation: if PyMuPDF returns <100 chars from a multi-page
+        PDF, the fonts are almost certainly undecodable and pdfminer/pypdf will
+        waste 30-60 seconds also failing — skip straight to OCR in that case.
+
+        The first tier to return ≥200 chars wins.  If OCR is also unavailable,
+        we return whichever extractor produced the most content.
         """
         name = os.path.basename(pdf_path)
         candidates: List[str] = []
+
+        # Cheap page-count check so we can detect multi-page undecodable PDFs
+        try:
+            import fitz as _fitz_pc
+            _doc_pc = _fitz_pc.open(pdf_path)
+            _page_count = len(_doc_pc)
+            _doc_pc.close()
+        except Exception:
+            _page_count = 0
+
+        skip_slow_tiers = False  # set True when PyMuPDF signals undecodable fonts
 
         for label, extractor in [
             ("PyMuPDF", self._extract_with_fitz),
             ("pdfminer.six", self._extract_with_pdfminer),
             ("pypdf", self._extract_with_pypdf),
         ]:
+            if skip_slow_tiers and label in ("pdfminer.six", "pypdf"):
+                print(f"[RAG JOB] skipping {label} — PyMuPDF near-empty on {_page_count}-page PDF, jumping to OCR")
+                continue
+
             try:
                 text = extractor(pdf_path, name)
                 char_count = len(text.strip())
@@ -262,12 +280,17 @@ class RagManager:
                 if char_count >= 200:
                     return text
                 candidates.append(text)
+
+                # PyMuPDF near-empty on a real multi-page doc → fonts are undecodable
+                if label == "PyMuPDF" and char_count < 100 and _page_count > 3:
+                    skip_slow_tiers = True
+
             except ImportError as e:
                 print(f"[RAG JOB] {label} not installed ({e}) — skipping")
             except Exception as e:
                 print(f"[RAG JOB] {label} failed for '{name}': {e}")
 
-        # All text tiers short — try OCR
+        # All text tiers short (or skipped) — try OCR
         try:
             print(f"[RAG JOB] text extractors yielded <200 chars for '{name}', trying OCR...")
             text = self._extract_with_ocr(pdf_path, name)
