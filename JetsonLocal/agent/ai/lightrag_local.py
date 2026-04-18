@@ -1055,7 +1055,9 @@ class LightRAG:
         if chunk_hits:
             parts.append("=== Source Passages ===")
             for i, hit in enumerate(chunk_hits, 1):
-                parts.append(f"--- Passage {i} ---\n{hit.get('text', '')}")
+                src = (hit.get("meta") or {}).get("source", "")
+                label = f"--- Passage {i} (from: {src}) ---" if src else f"--- Passage {i} ---"
+                parts.append(f"{label}\n{hit.get('text', '')}")
 
         context = "\n\n".join(parts)
         if len(context) > MAX_CTX_CHARS:
@@ -1083,8 +1085,13 @@ class LightRAG:
         # Keywords run regardless of graph: they expand the BM25 query so
         # retrieval still works when the raw query term appears in every chunk
         # (near-zero IDF).  Graph-retrieval steps below still guard on has_graph.
+        # Lowercase query before embedding: nomic-embed-text is case-sensitive and
+        # produces different vectors for "LightRAG" vs "lightrag", causing different
+        # chunks to rank first depending on casing — the same conceptual query then
+        # hits different sections and gets different answers. Lowercase normalizes
+        # this. BM25 already lowercases via _tokenize, so this makes FAISS consistent.
         q_emb, keywords = await asyncio.gather(
-            self.client.embed(query),
+            self.client.embed(query.lower()),
             self._extract_query_keywords(query),
         )
 
@@ -1168,20 +1175,18 @@ class LightRAG:
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
         system = (
             "You are AURA, a helpful lab assistant robot. "
-            "The passages below were retrieved from the uploaded knowledge base documents. "
-            "Read ALL passages carefully before answering. "
-            "If the answer is in the passages, give a complete and accurate answer — "
-            "synthesize information across passages if needed. "
-            "If a topic is mentioned in the passages even as a comparison, baseline, or reference, "
-            "use that information — do not say the topic is not covered. "
-            "If the passages only partially answer the question, answer what you can "
-            "and briefly note what is missing. "
-            "Only if the passages contain absolutely no mention of the topic, respond with: "
-            "'The loaded documents do not cover this topic.' "
-            "Never invent facts, definitions, or details not found in the passages. "
-            "Never expand an acronym unless its full form is explicitly written out in the passages. "
-            "Do not create numbered lists, bullet points, or headers unless the passages themselves use that structure. "
-            "Stop after answering the question — do not continue generating beyond the answer."
+            "Answer the question using the retrieved passages as your primary source. "
+            "If the passages directly answer the question, answer from them. "
+            "If the passages only partially answer or mention the topic indirectly, "
+            "combine what the passages say with your general knowledge to give a complete answer — "
+            "briefly note which parts come from the documents vs. your general knowledge. "
+            "If the passages contain no relevant information at all, answer from your general knowledge "
+            "and say 'The loaded documents do not cover this topic, but generally:' before your answer. "
+            "Never invent specific measurements, values, formulas, or technical specifications "
+            "not stated in the passages. "
+            "Never expand an acronym unless its full form is explicitly written in the passages. "
+            "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
+            "Stop after fully answering the question."
         )
         prompt = (
             f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
