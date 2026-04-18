@@ -29,6 +29,7 @@ ALLOWED_COMMANDS = {
     "camera_activate_detection",
     "camera_deactivate",
     "flush_models",
+    "reload_llm",
 }
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
@@ -266,4 +267,32 @@ def flush_jetson_models(payload: DeviceCommandIn, request: Request):
     _save_commands(commands)
 
     print(f"[DEVICE_COMMANDS] queued flush_models for {payload.device_id}")
+    return {"ok": True, "queued": entry}
+
+
+@router.post("/device/admin/reload_llm")
+def reload_jetson_llm(payload: DeviceCommandIn, request: Request):
+    """Queue a reload_llm command: unloads the LLM then reloads it onto the GPU.
+    Use this when Ollama silently fell back to CPU inference.
+    Accessible by admin and TA roles.
+    """
+    _require_admin_or_ta(request)
+
+    commands = _load_commands()
+    now_ms = int(time.time() * 1000)
+    now_s = int(time.time())
+
+    entry = {
+        "id": f"{payload.device_id}-{now_ms}",
+        "device_id": payload.device_id,
+        "command": "reload_llm",
+        "payload": {},
+        "created_at": now_s,
+        "status": "pending",
+    }
+
+    commands.append(entry)
+    _save_commands(commands)
+
+    print(f"[DEVICE_COMMANDS] queued reload_llm for {payload.device_id}")
     return {"ok": True, "queued": entry}

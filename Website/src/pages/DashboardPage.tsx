@@ -105,6 +105,8 @@ export default function DashboardPage() {
   const [nowMs, setNowMs] = useState(Date.now());
   const [flushState, setFlushState] = useState<"idle" | "pending" | "ok" | "err">("idle");
   const [flushNote, setFlushNote] = useState("");
+  const [reloadState, setReloadState] = useState<"idle" | "pending" | "ok" | "err">("idle");
+  const [reloadNote, setReloadNote] = useState("");
 
   useEffect(() => {
     let alive = true;
@@ -212,6 +214,29 @@ export default function DashboardPage() {
     }
   };
 
+  const reloadLlm = async () => {
+    if (!token || !device) return;
+    setReloadState("pending");
+    setReloadNote("");
+    try {
+      const res = await fetch(`${API_BASE}/device/admin/reload_llm`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ device_id: device.device_id, command: "reload_llm" }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setReloadState("ok");
+      setReloadNote("Reload queued — Jetson will unload then reload LLM onto GPU (~3 min).");
+    } catch (err) {
+      setReloadState("err");
+      setReloadNote(err instanceof Error ? err.message : "Reload failed");
+    }
+  };
+
   const esp32 = extra?.esp32;
 
   const esp32Value = !isOnline
@@ -293,9 +318,23 @@ export default function DashboardPage() {
             >
               {flushState === "pending" ? "Queuing..." : "Flush Models"}
             </button>
+            <button
+              className="btn btn-primary"
+              onClick={() => void reloadLlm()}
+              disabled={reloadState === "pending" || !device}
+              type="button"
+              title="Unload then force-reload the LLM onto the Jetson GPU. Use when Ollama silently fell back to CPU."
+            >
+              {reloadState === "pending" ? "Queuing..." : "Reload LLM to GPU"}
+            </button>
             {flushNote && (
               <span style={{ color: flushState === "err" ? "var(--status-bad, #f87171)" : "var(--status-good, #4ade80)", fontSize: "0.85rem" }}>
                 {flushNote}
+              </span>
+            )}
+            {reloadNote && (
+              <span style={{ color: reloadState === "err" ? "var(--status-bad, #f87171)" : "var(--status-good, #4ade80)", fontSize: "0.85rem" }}>
+                {reloadNote}
               </span>
             )}
           </div>

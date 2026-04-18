@@ -1185,6 +1185,72 @@ async def command_loop():
                         )
                         quiet_print("command", f"[COMMAND] flush_models failed: {e}")
 
+                elif cmd == "reload_llm":
+                    try:
+                        set_ui_state("READY", "Reloading LLM to GPU")
+                        _reload_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
+                        _num_gpu    = int(os.getenv("AURA_NUM_GPU", "99"))
+                        _keep_alive = os.getenv("AURA_KEEP_ALIVE", "2h")
+
+                        # Step 1: unload from VRAM
+                        try:
+                            requests.post(
+                                f"{_reload_url}/api/generate",
+                                json={"model": DEFAULT_MODEL, "prompt": "", "stream": False, "keep_alive": 0},
+                                timeout=15.0,
+                            )
+                            print(f"[RELOAD_LLM] unloaded '{DEFAULT_MODEL}' from VRAM")
+                        except Exception as _ue:
+                            print(f"[RELOAD_LLM] unload step skipped: {_ue}")
+
+                        # Step 2: reload onto GPU
+                        try:
+                            requests.post(
+                                f"{_reload_url}/api/generate",
+                                json={
+                                    "model": DEFAULT_MODEL,
+                                    "prompt": "Hi",
+                                    "stream": False,
+                                    "keep_alive": _keep_alive,
+                                    "options": {
+                                        "num_predict": 1,
+                                        "num_ctx": 128,
+                                        "num_gpu": _num_gpu,
+                                        "temperature": 0.0,
+                                        "mirostat": 0,
+                                    },
+                                },
+                                timeout=180.0,
+                            )
+                            print(f"[RELOAD_LLM] '{DEFAULT_MODEL}' reloaded onto GPU (num_gpu={_num_gpu})")
+                        except Exception as _le:
+                            raise RuntimeError(f"GPU reload failed: {_le}")
+
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "completed",
+                                "note": f"LLM '{DEFAULT_MODEL}' reloaded onto GPU (num_gpu={_num_gpu})",
+                                "result": {"model": DEFAULT_MODEL, "num_gpu": _num_gpu},
+                            },
+                        )
+                        quiet_print("command", f"[COMMAND] reload_llm ok")
+                        set_ui_state("READY", "LLM reloaded on GPU")
+                    except Exception as e:
+                        set_ui_state("ERROR", truncate_for_ui(str(e)))
+                        await asyncio.to_thread(
+                            api.ack_command,
+                            {
+                                "command_id": command_id,
+                                "device_id": DEVICE_ID,
+                                "status": "failed",
+                                "note": f"reload_llm failed: {e}",
+                            },
+                        )
+                        quiet_print("command", f"[COMMAND] reload_llm failed: {e}")
+
                 else:
                     await asyncio.to_thread(
                         api.ack_command,
