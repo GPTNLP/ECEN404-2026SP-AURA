@@ -184,6 +184,10 @@ export default function DatabasePage() {
   const selectedKind = selected?.kind ?? "dir";
   const selectedDir = selectedKind === "dir" ? selectedPath : dirname(selectedPath);
 
+  const deleteLabel = selected
+    ? `${selected.kind === "dir" ? "folder" : "file"} "${basename(selected.path)}"`
+    : "this item";
+
   const allFolders = useMemo(() => {
     const out: string[] = [];
     const walk = (node: TreeNode | null, parentPath: string) => {
@@ -984,17 +988,6 @@ export default function DatabasePage() {
               <div>
                 <div className="db-panel-title">Files</div>
               </div>
-
-              <div className="db-actions">
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setDeleteOpen(true)}
-                  disabled={busy !== "" || !selected || selected.path === ""}
-                  title="Delete selected item"
-                >
-                  Delete
-                </button>
-              </div>
             </div>
 
             <div className="db-breadcrumb-row">
@@ -1387,20 +1380,36 @@ export default function DatabasePage() {
 
         {deleteOpen && selected && selected.path !== "" && (
           <div className="db-modal-overlay" onClick={() => setDeleteOpen(false)}>
-            <div className="card db-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="db-modal-title">Delete</div>
-              <div className="muted" style={{ fontSize: 13 }}>
-                Are you sure you want to delete:
+            <div className="card db-modal db-delete-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="db-delete-modal-icon" aria-hidden="true">
+                !
+              </div>
+              <div className="db-modal-title">Delete item?</div>
+              <div className="db-delete-modal-text">
+                Are you sure you want to delete <b>{deleteLabel}</b>?
+              </div>
+              <div className="db-delete-modal-subtext">
+                This will permanently remove it from the website documents area.
               </div>
 
               <div className="db-modal-path">{selected.path}</div>
 
               <div className="db-modal-actions">
-                <button className="btn" disabled={busy !== ""} onClick={() => setDeleteOpen(false)}>
+                <button
+                  className="btn db-modal-cancel-btn"
+                  disabled={busy !== ""}
+                  onClick={() => setDeleteOpen(false)}
+                  type="button"
+                >
                   Cancel
                 </button>
-                <button className="btn btn-primary" disabled={busy !== ""} onClick={doDelete}>
-                  {busy === "delete" ? "Deleting…" : "Delete"}
+                <button
+                  className="btn db-modal-danger-btn"
+                  disabled={busy !== ""}
+                  onClick={doDelete}
+                  type="button"
+                >
+                  {busy === "delete" ? "Deleting…" : "Yes, delete"}
                 </button>
               </div>
             </div>
