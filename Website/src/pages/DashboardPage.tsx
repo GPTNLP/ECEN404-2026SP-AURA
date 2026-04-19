@@ -1,4 +1,3 @@
-// Website/src/pages/DashboardPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import "../styles/dashboard.css";
 import robotImage from "../assets/robot.png";
@@ -50,6 +49,11 @@ type AdminListResponse = {
   items: DeviceRecord[];
 };
 
+type ToastState = {
+  kind: "success" | "error";
+  message: string;
+} | null;
+
 const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined)?.trim() ||
   "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
@@ -67,8 +71,29 @@ function thermalStatus(tempC?: number | null): HealthStatus {
   return "BAD";
 }
 
+function ramStatus(percent?: number | null): HealthStatus {
+  if (percent == null) return "WARN";
+  if (percent < 70) return "OK";
+  if (percent < 85) return "WARN";
+  return "BAD";
+}
+
+function cpuStatus(percent?: number | null): HealthStatus {
+  if (percent == null) return "WARN";
+  if (percent < 60) return "OK";
+  if (percent < 85) return "WARN";
+  return "BAD";
+}
+
+function gpuStatus(percent?: number | null): HealthStatus {
+  if (percent == null) return "WARN";
+  if (percent < 70) return "OK";
+  if (percent < 90) return "WARN";
+  return "BAD";
+}
+
 function formatUptime(sec?: number) {
-  if (sec == null) return "Unknown";
+  if (sec == null) return "Offline";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
@@ -81,7 +106,7 @@ function formatUpdated(unixSeconds?: number) {
 }
 
 function fmt(value?: number | null, suffix = "", digits = 1) {
-  if (value == null || Number.isNaN(value)) return "Unknown";
+  if (value == null || Number.isNaN(value)) return "Offline";
   return `${value.toFixed(digits)}${suffix}`;
 }
 
@@ -91,7 +116,7 @@ function staleHealth(): HealthStatus {
 
 function statusBadgeText(status: HealthStatus) {
   if (status === "OK") return "Stable";
-  if (status === "WARN") return "Moderate";
+  if (status === "WARN") return "Elevated";
   return "High";
 }
 
@@ -109,11 +134,9 @@ export default function DashboardPage() {
   const [error, setError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
 
-  const [flushState, setFlushState] = useState<"idle" | "pending" | "ok" | "err">("idle");
-  const [flushNote, setFlushNote] = useState("");
-
-  const [reloadState, setReloadState] = useState<"idle" | "pending" | "ok" | "err">("idle");
-  const [reloadNote, setReloadNote] = useState("");
+  const [flushPending, setFlushPending] = useState(false);
+  const [reloadPending, setReloadPending] = useState(false);
+  const [toast, setToast] = useState<ToastState>(null);
 
   useEffect(() => {
     let alive = true;
@@ -166,6 +189,12 @@ export default function DashboardPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!toast) return;
+    const id = window.setTimeout(() => setToast(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [toast]);
+
   const s = device?.status;
   const extra = s?.extra;
 
@@ -190,16 +219,19 @@ export default function DashboardPage() {
     return formatUpdated(device.last_seen_at);
   }, [device?.last_seen_at, isFresh]);
 
-  const ramValue = isOnline ? fmt(s?.ram_percent, "%", 1) : "Unknown";
-  const cpuValue = isOnline ? fmt(s?.cpu_percent, "%", 1) : "Unknown";
-  const gpuValue = isOnline ? fmt(extra?.gpu_percent, "%", 1) : "Unknown";
-  const uptimeValue = isOnline ? formatUptime(extra?.uptime_seconds) : "Unknown";
+  const ramValue = isOnline ? fmt(s?.ram_percent, "%", 1) : "Offline";
+  const cpuValue = isOnline ? fmt(s?.cpu_percent, "%", 1) : "Offline";
+  const gpuValue = isOnline ? fmt(extra?.gpu_percent, "%", 1) : "Offline";
+  const uptimeValue = isOnline ? formatUptime(extra?.uptime_seconds) : "Offline";
 
-  const flushModels = async () => {
-    if (!token || !device) return;
+  const ramHealth = isOnline ? ramStatus(s?.ram_percent) : staleHealth();
+  const cpuHealth = isOnline ? cpuStatus(s?.cpu_percent) : staleHealth();
+  const gpuHealth = isOnline ? gpuStatus(extra?.gpu_percent) : staleHealth();
 
-    setFlushState("pending");
-    setFlushNote("");
+  async function flushModels() {
+    if (!token || !device || flushPending) return;
+
+    setFlushPending(true);
 
     try {
       const res = await fetch(`${API_BASE}/device/admin/flush_models`, {
@@ -217,19 +249,24 @@ export default function DashboardPage() {
 
       if (!res.ok) throw new Error(await res.text());
 
-      setFlushState("ok");
-      setFlushNote("Flush queued - Jetson will unload idle models on next poll.");
+      setToast({
+        kind: "success",
+        message: "Flush queued. Jetson will unload idle models on next poll.",
+      });
     } catch (err) {
-      setFlushState("err");
-      setFlushNote(err instanceof Error ? err.message : "Flush failed");
+      setToast({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Flush failed.",
+      });
+    } finally {
+      setFlushPending(false);
     }
-  };
+  }
 
-  const reloadLlm = async () => {
-    if (!token || !device) return;
+  async function reloadLlm() {
+    if (!token || !device || reloadPending) return;
 
-    setReloadState("pending");
-    setReloadNote("");
+    setReloadPending(true);
 
     try {
       const res = await fetch(`${API_BASE}/device/admin/reload_llm`, {
@@ -247,36 +284,42 @@ export default function DashboardPage() {
 
       if (!res.ok) throw new Error(await res.text());
 
-      setReloadState("ok");
-      setReloadNote("Reload queued - Jetson will unload then reload the LLM to GPU.");
+      setToast({
+        kind: "success",
+        message: "Reload queued. Jetson will unload then reload the LLM to GPU.",
+      });
     } catch (err) {
-      setReloadState("err");
-      setReloadNote(err instanceof Error ? err.message : "Reload failed");
+      setToast({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Reload failed.",
+      });
+    } finally {
+      setReloadPending(false);
     }
-  };
+  }
 
   const esp32 = extra?.esp32;
   const esp32Value = !isOnline
-    ? "Unknown"
+    ? "Offline"
     : esp32?.connected
-    ? "Connected"
-    : esp32?.port_exists
-    ? "Detected"
-    : "Disconnected";
+      ? "Connected"
+      : esp32?.port_exists
+        ? "Detected"
+        : "Disconnected";
 
   const esp32Health: HealthStatus = !isOnline
     ? "WARN"
     : esp32?.connected
-    ? "OK"
-    : esp32?.port_exists
-    ? "WARN"
-    : "BAD";
+      ? "OK"
+      : esp32?.port_exists
+        ? "WARN"
+        : "BAD";
 
   const thermalsValue = isOnline
     ? s?.temperature_c != null
       ? fmt(s.temperature_c, "°C", 1)
-      : "Unknown"
-    : "Unknown";
+      : "Offline"
+    : "Offline";
 
   const thermalsHealth = isOnline ? thermalStatus(s?.temperature_c) : staleHealth();
 
@@ -295,9 +338,7 @@ export default function DashboardPage() {
                 <span className={isOnline ? "status-online" : "status-offline"}>
                   {status}
                 </span>
-                {isOnline && updatedLabel ? (
-                  <span> • Updated {updatedLabel}</span>
-                ) : null}
+                {isOnline && updatedLabel ? <span> • Updated {updatedLabel}</span> : null}
                 {!isOnline && freshestTimestampSeconds > 0 ? (
                   <span> • No fresh Jetson data</span>
                 ) : null}
@@ -310,37 +351,34 @@ export default function DashboardPage() {
               <button
                 className="dashboard-action-btn"
                 onClick={() => void flushModels()}
-                disabled={flushState === "pending" || !device}
+                disabled={flushPending || !device}
                 type="button"
                 title="Free VRAM/RAM by unloading idle models."
               >
-                {flushState === "pending" ? "Queuing..." : "Flush Models"}
+                {flushPending ? "Queuing..." : "Flush Models"}
               </button>
 
               <button
                 className="dashboard-action-btn"
                 onClick={() => void reloadLlm()}
-                disabled={reloadState === "pending" || !device}
+                disabled={reloadPending || !device}
                 type="button"
                 title="Unload then force-reload the LLM onto the Jetson GPU."
               >
-                {reloadState === "pending" ? "Queuing..." : "Reload LLM to GPU"}
+                {reloadPending ? "Queuing..." : "Reload LLM to GPU"}
               </button>
             </div>
           ) : null}
         </div>
       </section>
 
-      {error ? (
-        <div className="dash-error">Dashboard load failed: {error}</div>
+      {toast ? (
+        <div className={`dash-toast ${toast.kind === "error" ? "error" : "success"}`}>
+          {toast.message}
+        </div>
       ) : null}
 
-      {(flushNote || reloadNote) && (
-        <section className="dashboard-section dashboard-maintenance-notes">
-          {flushNote ? <div className="dashboard-note">{flushNote}</div> : null}
-          {reloadNote ? <div className="dashboard-note">{reloadNote}</div> : null}
-        </section>
-      )}
+      {error ? <div className="dash-error">Dashboard load failed: {error}</div> : null}
 
       <section className="dashboard-section">
         <div className="dash-title-row">
@@ -357,37 +395,43 @@ export default function DashboardPage() {
             label="RAM Usage"
             value={ramValue}
             sub="Memory load"
-            status={isOnline ? "BAD" : "WARN"}
+            status={ramHealth}
+            showBadge
           />
           <FiloCard
             label="CPU Usage"
             value={cpuValue}
             sub="Processor load"
-            status={isOnline ? "BAD" : "WARN"}
+            status={cpuHealth}
+            showBadge
           />
           <FiloCard
             label="GPU Usage"
             value={gpuValue}
             sub="GPU load"
-            status={isOnline ? "BAD" : "WARN"}
+            status={gpuHealth}
+            showBadge
           />
           <FiloCard
             label="Uptime"
             value={uptimeValue}
             sub="Since boot"
-            status={isOnline ? "BAD" : "WARN"}
+            status={isOnline ? "OK" : "WARN"}
+            showBadge={false}
           />
           <FiloCard
             label="ESP32 Connection"
             value={esp32Value}
             sub="Controller link"
             status={esp32Health}
+            showBadge={false}
           />
           <FiloCard
             label="Thermals"
             value={thermalsValue}
             sub="Overall thermal condition"
             status={thermalsHealth}
+            showBadge
           />
         </div>
       </section>
@@ -400,24 +444,38 @@ function FiloCard({
   value,
   sub,
   status,
+  showBadge = true,
 }: {
   label: string;
   value: string;
   sub: string;
   status?: HealthStatus;
+  showBadge?: boolean;
 }) {
   const resolvedStatus = status ?? "WARN";
   const badgeText = statusBadgeText(resolvedStatus);
   const badgeClass = statusBadgeClass(resolvedStatus);
 
+  const isTextValue =
+    /[a-zA-Z]/.test(value) ||
+    value.length > 12 ||
+    value === "Connected" ||
+    value === "Detected" ||
+    value === "Disconnected" ||
+    value === "Offline";
+
   return (
     <div className="filo-item">
       <div className="filo-top">
         <div className="filo-label">{label}</div>
-        <div className={`filo-status-badge ${badgeClass}`}>{badgeText}</div>
+        {showBadge ? (
+          <div className={`filo-status-badge ${badgeClass}`}>{badgeText}</div>
+        ) : (
+          <div className="filo-status-spacer" />
+        )}
       </div>
 
-      <div className="filo-value">{value}</div>
+      <div className={`filo-value ${isTextValue ? "filo-value-text" : ""}`}>{value}</div>
       <div className="filo-sub">{sub}</div>
     </div>
   );
