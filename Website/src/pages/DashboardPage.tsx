@@ -191,7 +191,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!toast) return;
-    const id = window.setTimeout(() => setToast(null), 5000);
+    const id = window.setTimeout(() => setToast(null), 5200);
     return () => window.clearTimeout(id);
   }, [toast]);
 
