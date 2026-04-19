@@ -1053,8 +1053,8 @@ class AuraConsoleApp:
             justify="left",
             wraplength=max(600, int(self.root.winfo_screenwidth() * 0.9)),
             padx=14,
-            pady=(0, 8),
-        ).pack(fill="x")
+            pady=0,
+        ).pack(fill="x", pady=(0, 8))
 
         volume_row = tk.Frame(settings_card, bg="#0b0f14")
         volume_row.pack(fill="x", padx=14, pady=(8, 8))
