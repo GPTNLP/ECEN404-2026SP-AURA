@@ -1,17 +1,21 @@
-Scenario 3: Offline RAG Ingestion & Recall (The Knowledge Layer)
+Scenario 3: LLM Accuracy, Dual-Level RAG, & Cache Stress Test
 
-Objective: Verify that the Jetson can independently ingest a technical PDF, build a LightRAG dual-level graph/vector database locally, and answer questions accurately without an internet connection.
+Objective: Stress-test the local LightRAG system's accuracy on multi-hop logical questions, and verify that the LLM pipeline successfully utilizes the Two-Tier Semantic Query Cache and Ollama KV Cache to handle high-frequency requests without memory starvation.
 
-    Pre-conditions: The Azure cloud is temporarily disconnected or bypassed. A technical PDF (e.g., a lab manual) is placed in the local storage queue.
+Pre-conditions: A dense, 30-page technical PDF (with cross-referenced concepts) has been ingested into the local LightRAG database, extracting entities and relations.
 
-    Test Execution:
+Test Execution:
 
-        Trigger the ingest_document function locally on the Jetson targeting the PDF.
+    Accuracy Test: Ask a complex relational question requiring dual-level retrieval (e.g., "How does the sensor array described in chapter 2 connect to the logic board in chapter 5?").
 
-        Ask the robot a highly specific question that only exists inside that PDF (e.g., "What is the required resistor value for step 3 of the lab?").
+    Exact Cache Hit (Tier 1): Immediately ask the exact same question again.
 
-    Expected Outcome:
+    Context Reuse Cache (Tier 2): Ask a semantically similar question (e.g., "Explain the connection between the logic board and the sensors").
 
-        The terminal should log [RAG] Vectorizing... and output the newly created faiss.index, embeddings.npy, and JSON files into the jetson_local_db directory.
+Expected Outcome:
 
-        The local LLM must return the exact resistor value by pulling from the LightRAG context, proving that the local vector search successfully grounded the model's response.
+    Accuracy: The LLM uses both local entity-graph retrieval and global vector similarity to provide a highly accurate, hallucination-free answer combining chapters 2 and 5.
+
+    Tier 1 Stress Pass: The second identical query evaluates against the semantic cache (AURA_CACHE_EXACT_THRESH), skipping retrieval/generation entirely and returning the answer instantly via TTS.
+
+    Tier 2 Stress Pass: The third query evaluates above the context threshold (AURA_CACHE_CTX_THRESH). It skips the FAISS database search, re-feeds the cached context to the LLM, and successfully triggers the Ollama KV Cache—dropping prefill token processing from ~3000 tokens down to ~30 tokens for rapid inference. The device passes the stress test by avoiding VRAM out-of-memory errors.

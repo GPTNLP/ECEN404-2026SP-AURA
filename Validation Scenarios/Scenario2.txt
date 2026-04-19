@@ -1,21 +1,17 @@
-Scenario 2: Acoustic & Intent Routing Validation (The Agent Layer)
+Scenario 2: Acoustic Resilience & Streaming TTS Response
 
-Objective: Verify that the faster-whisper STT loop accurately captures speech, filters out background noise, and uses the local Ollama intent parser to correctly route commands versus academic questions.
+Objective: Verify that the STT rejects continuous background noise using dynamic thresholding, and that complex queries utilize the sentence-by-sentence streaming TTS to reduce perceived latency.
 
-    Pre-conditions: The microphone is connected, Ollama is running (llama3.2:3b), and the environment has a moderate amount of ambient noise (e.g., a typical lab).
+Test Execution:
 
-    Test Execution:
+    Play background coffee-shop chatter near the robot to test the calibrate_noise_floor() logic.
 
-        Remain silent for 10 seconds to test ambient noise rejection.
+    Speak clearly over the noise: "Hey AURA, explain the history of robotics in three long sentences."
 
-        Speak clearly into the microphone: "AURA, please move backward."
+Expected Outcome:
 
-        Speak clearly into the microphone: "Can you explain the difference between a mesh network and a star topology?"
+    The background chatter is ignored. The wake word triggers successfully.
 
-    Expected Outcome:
+    The prompt is classified as llm intent.
 
-        The terminal should not print any [STT] Transcribed: logs during the silence (the >5 character length filter should reject static).
-
-        The first phrase should be classified as MOVEMENT by the Ollama intent parser and automatically trigger the ESP32 backward sequence.
-
-        The second phrase should be classified as QUESTION and routed to the rag_manager.query() function, outputting a text response to the UI instead of triggering the motors.
+    Crucial Capability: Instead of waiting 10-15 seconds for the full 3B model generation, the _on_token callback triggers the TTS engine to speak the very first sentence out loud the moment it is generated, masking the generation latency of the remaining sentences.

@@ -1,11 +1,11 @@
-Scenario 1: Hardware & Kinematic Validation (The Physical Layer)
+Scenario 1: Integrated Hardware & Edge Actuation
 
-    Objective: Verify that the Jetson accurately translates directional movement commands into synchronized bipedal servo movements.
+    Objective: Verify that the Jetson translates intent into simultaneous physical action, voice feedback, and peripheral control without latency blocking.
 
-    Test Execution: 1. Send a MOVE:forward command.
-    2. Wait 3 seconds, then send a MOVE:backward command.
-    3. Wait 3 seconds, then send a MOVE:stop command.
+    Test Execution: 1. Send a web command to activate the camera in detection mode.
+    2. Speak the voice command: "AURA, please move forward."
+    3. Send a web command MOVE:stop.
 
-    Expected Outcome: 1. The forward command should trigger the alternating bipedal gait loop instantly.
-    2. The backward command should reverse the leg/arm swing polarity without stuttering.
-    3. The stop command should immediately halt the gait and return all four servos to their 90-degree flat home positions. The ESP32 must echo ACK:MOVE:stop.
+    Expected Outcome: 1. The camera immediately starts streaming to the UI.
+    2. The STT loop correctly routes the intent as movement, passing it to the ESP32 to trigger the bipedal gait. Simultaneously, the TTS service outputs "Moving forward" without interrupting the motor serial link.
+    3. The stop command immediately halts the gait and returns all four servos to their 90-degree flat home positions, bypassing the voice queue.

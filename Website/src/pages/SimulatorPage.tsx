@@ -9,14 +9,6 @@ type ChatMsg = {
   ts?: number;
 };
 
-type ChatResponse = {
-  ok?: boolean;
-  answer?: string;
-  status?: string;
-  detail?: string;
-  message?: string;
-};
-
 type SessionMeta = {
   session_id: string;
   title?: string;
@@ -421,7 +413,7 @@ export default function SimulatorPage() {
           db: loadedDb,
           device_id: DEVICE_ID,
           session_id: sessionId,
-          command_status: data?.status || "unknown",
+          command_status: "completed", // <-- Hardcode to "completed" since the stream finished successfully
         },
       });
     } catch (err: any) {
