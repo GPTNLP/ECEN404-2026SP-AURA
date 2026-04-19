@@ -322,7 +322,11 @@ export default function ChatLogsPage() {
                   </div>
                 </div>
 
-                <button className="btn" onClick={() => void fetchSessions()} type="button">
+                <button
+                  className="btn chatlogs-action-btn"
+                  onClick={() => void fetchSessions()}
+                  type="button"
+                >
                   Refresh
                 </button>
               </div>
@@ -420,7 +424,7 @@ export default function ChatLogsPage() {
 
                     <div className="chatlogs-thread-actions">
                       <button
-                        className="btn btn-primary"
+                        className="btn chatlogs-action-btn"
                         onClick={() => openInSimulator(selectedSession.session_id)}
                         type="button"
                       >
@@ -429,8 +433,7 @@ export default function ChatLogsPage() {
 
                       {!deleteConfirm ? (
                         <button
-                          className="btn"
-                          style={{ color: "var(--status-bad, #f87171)" }}
+                          className="btn chatlogs-action-btn"
                           onClick={() => setDeleteConfirm(true)}
                           type="button"
                         >
@@ -439,8 +442,7 @@ export default function ChatLogsPage() {
                       ) : (
                         <>
                           <button
-                            className="btn"
-                            style={{ color: "var(--status-bad, #f87171)" }}
+                            className="btn chatlogs-action-btn"
                             disabled={deletingSession}
                             onClick={() => void deleteSession(selectedSession.session_id)}
                             type="button"
@@ -448,7 +450,7 @@ export default function ChatLogsPage() {
                             {deletingSession ? "Deleting..." : "Confirm Delete"}
                           </button>
                           <button
-                            className="btn"
+                            className="btn chatlogs-action-btn chatlogs-action-btn-secondary"
                             onClick={() => setDeleteConfirm(false)}
                             disabled={deletingSession}
                             type="button"
@@ -573,12 +575,16 @@ export default function ChatLogsPage() {
                 <option value="500">500</option>
               </select>
 
-              <button className="btn btn-primary" onClick={() => void fetchLogs()} type="button">
+              <button
+                className="btn chatlogs-action-btn"
+                onClick={() => void fetchLogs()}
+                type="button"
+              >
                 Search
               </button>
 
               <button
-                className="btn"
+                className="btn chatlogs-action-btn chatlogs-action-btn-secondary"
                 onClick={() => {
                   setQ("");
                   setRole("");
@@ -655,7 +661,7 @@ export default function ChatLogsPage() {
 
               <div className="chatlogs-pagination-actions">
                 <button
-                  className="btn"
+                  className="btn chatlogs-action-btn chatlogs-action-btn-secondary"
                   onClick={() => setOffset((v) => Math.max(0, v - limit))}
                   disabled={evLoading || offset === 0}
                   type="button"
@@ -663,7 +669,7 @@ export default function ChatLogsPage() {
                   ← Prev
                 </button>
                 <button
-                  className="btn"
+                  className="btn chatlogs-action-btn"
                   onClick={() => setOffset((v) => v + limit)}
                   disabled={evLoading || offset + limit >= matched}
                   type="button"
