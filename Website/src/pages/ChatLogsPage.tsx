@@ -418,7 +418,7 @@ export default function ChatLogsPage() {
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                    <div className="chatlogs-thread-actions">
                       <button
                         className="btn btn-primary"
                         onClick={() => openInSimulator(selectedSession.session_id)}
@@ -598,11 +598,11 @@ export default function ChatLogsPage() {
 
             {evError && <div className="panel">{evError}</div>}
 
-            <div className="table-wrap">
+            <div className="chatlogs-events-table-wrap">
               {items.length === 0 && !evLoading ? (
                 <div className="chatlogs-empty-state">No logs found.</div>
               ) : (
-                <table className="table">
+                <table className="chatlogs-events-table">
                   <thead>
                     <tr>
                       <th>Time</th>
@@ -617,10 +617,16 @@ export default function ChatLogsPage() {
                     {items.map((it, idx) => (
                       <tr key={`${it.ts}-${idx}`}>
                         <td>{fmtTime(it.ts)}</td>
-                        <td>{it.user_email || "-"}</td>
-                        <td>{it.user_role || "-"}</td>
-                        <td>{it.event || "-"}</td>
-                        <td>
+                        <td className="chatlogs-event-user">{it.user_email || "-"}</td>
+                        <td className="chatlogs-event-role">{it.user_role || "-"}</td>
+                        <td
+                          className={`chatlogs-event-type ${
+                            it.event === "chat_error" ? "error" : ""
+                          }`}
+                        >
+                          {it.event || "-"}
+                        </td>
+                        <td className="chatlogs-event-prompt">
                           {it.prompt ? (
                             <>
                               {it.prompt.slice(0, 500)}
@@ -630,7 +636,7 @@ export default function ChatLogsPage() {
                             "-"
                           )}
                         </td>
-                        <td>
+                        <td className="chatlogs-event-latency">
                           {typeof it.latency_ms === "number"
                             ? `${it.latency_ms}ms`
                             : "-"}
