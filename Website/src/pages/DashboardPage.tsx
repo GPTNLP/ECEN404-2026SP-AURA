@@ -90,9 +90,9 @@ function staleHealth(): HealthStatus {
 }
 
 function statusBadgeText(status: HealthStatus) {
-  if (status === "OK") return "Good";
-  if (status === "WARN") return "Watch";
-  return "Alert";
+  if (status === "OK") return "Stable";
+  if (status === "WARN") return "Moderate";
+  return "High";
 }
 
 function statusBadgeClass(status: HealthStatus) {
