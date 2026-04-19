@@ -1,3 +1,4 @@
+// Website/src/pages/DashboardPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import "../styles/dashboard.css";
 import robotImage from "../assets/robot.png";
@@ -54,17 +55,10 @@ const API_BASE =
   "https://aura-backend-fmfyemepbybgebcs.eastus-01.azurewebsites.net";
 
 const DEVICE_ID =
-  (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() ||
-  "jetson-001";
+  (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() || "jetson-001";
 
 const LS_TOKEN = "aura-auth-token";
 const STALE_AFTER_SECONDS = 15;
-
-function dotColor(status: HealthStatus) {
-  if (status === "OK") return "var(--status-good)";
-  if (status === "WARN") return "var(--status-warn)";
-  return "var(--status-bad)";
-}
 
 function thermalStatus(tempC?: number | null): HealthStatus {
   if (tempC == null) return "WARN";
@@ -91,9 +85,20 @@ function fmt(value?: number | null, suffix = "", digits = 1) {
   return `${value.toFixed(digits)}${suffix}`;
 }
 
-
 function staleHealth(): HealthStatus {
   return "WARN";
+}
+
+function statusBadgeText(status: HealthStatus) {
+  if (status === "OK") return "Good";
+  if (status === "WARN") return "Watch";
+  return "Alert";
+}
+
+function statusBadgeClass(status: HealthStatus) {
+  if (status === "OK") return "ok";
+  if (status === "WARN") return "warn";
+  return "bad";
 }
 
 export default function DashboardPage() {
@@ -103,8 +108,10 @@ export default function DashboardPage() {
   const [device, setDevice] = useState<DeviceRecord | null>(null);
   const [error, setError] = useState("");
   const [nowMs, setNowMs] = useState(Date.now());
+
   const [flushState, setFlushState] = useState<"idle" | "pending" | "ok" | "err">("idle");
   const [flushNote, setFlushNote] = useState("");
+
   const [reloadState, setReloadState] = useState<"idle" | "pending" | "ok" | "err">("idle");
   const [reloadNote, setReloadNote] = useState("");
 
@@ -112,7 +119,7 @@ export default function DashboardPage() {
     let alive = true;
 
     async function load() {
-      const token = localStorage.getItem(LS_TOKEN);
+      const storedToken = localStorage.getItem(LS_TOKEN);
 
       try {
         const res = await fetch(`${API_BASE}/device/admin/list`, {
@@ -120,7 +127,7 @@ export default function DashboardPage() {
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
           },
         });
 
@@ -163,11 +170,9 @@ export default function DashboardPage() {
   const extra = s?.extra;
 
   const freshestTimestampSeconds = useMemo(() => {
-    const candidates = [
-      device?.last_seen_at,
-      s?.updated_at,
-    ].filter((v): v is number => typeof v === "number" && v > 0);
-
+    const candidates = [device?.last_seen_at, s?.updated_at].filter(
+      (v): v is number => typeof v === "number" && v > 0
+    );
     if (!candidates.length) return 0;
     return Math.max(...candidates);
   }, [device?.last_seen_at, s?.updated_at]);
@@ -178,13 +183,12 @@ export default function DashboardPage() {
 
   const isFresh = freshestTimestampSeconds > 0 && ageSeconds <= STALE_AFTER_SECONDS;
   const isOnline = Boolean(device?.online) && isFresh;
+  const status = isOnline ? "ONLINE" : "OFFLINE";
 
   const updatedLabel = useMemo(() => {
     if (!isFresh || !device?.last_seen_at) return "";
     return formatUpdated(device.last_seen_at);
   }, [device?.last_seen_at, isFresh]);
-
-  const status = isOnline ? "ONLINE" : "OFFLINE";
 
   const ramValue = isOnline ? fmt(s?.ram_percent, "%", 1) : "Unknown";
   const cpuValue = isOnline ? fmt(s?.cpu_percent, "%", 1) : "Unknown";
@@ -193,8 +197,10 @@ export default function DashboardPage() {
 
   const flushModels = async () => {
     if (!token || !device) return;
+
     setFlushState("pending");
     setFlushNote("");
+
     try {
       const res = await fetch(`${API_BASE}/device/admin/flush_models`, {
         method: "POST",
@@ -203,11 +209,16 @@ export default function DashboardPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ device_id: device.device_id, command: "flush_models" }),
+        body: JSON.stringify({
+          device_id: device.device_id,
+          command: "flush_models",
+        }),
       });
+
       if (!res.ok) throw new Error(await res.text());
+
       setFlushState("ok");
-      setFlushNote("Flush queued — Jetson will unload models on next poll.");
+      setFlushNote("Flush queued - Jetson will unload idle models on next poll.");
     } catch (err) {
       setFlushState("err");
       setFlushNote(err instanceof Error ? err.message : "Flush failed");
@@ -216,8 +227,10 @@ export default function DashboardPage() {
 
   const reloadLlm = async () => {
     if (!token || !device) return;
+
     setReloadState("pending");
     setReloadNote("");
+
     try {
       const res = await fetch(`${API_BASE}/device/admin/reload_llm`, {
         method: "POST",
@@ -226,11 +239,16 @@ export default function DashboardPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ device_id: device.device_id, command: "reload_llm" }),
+        body: JSON.stringify({
+          device_id: device.device_id,
+          command: "reload_llm",
+        }),
       });
+
       if (!res.ok) throw new Error(await res.text());
+
       setReloadState("ok");
-      setReloadNote("Reload queued — Jetson will unload then reload LLM onto GPU (~3 min).");
+      setReloadNote("Reload queued - Jetson will unload then reload the LLM to GPU.");
     } catch (err) {
       setReloadState("err");
       setReloadNote(err instanceof Error ? err.message : "Reload failed");
@@ -238,7 +256,6 @@ export default function DashboardPage() {
   };
 
   const esp32 = extra?.esp32;
-
   const esp32Value = !isOnline
     ? "Unknown"
     : esp32?.connected
@@ -255,95 +272,81 @@ export default function DashboardPage() {
     ? "WARN"
     : "BAD";
 
-  const thermalsValue = isOnline ? (s?.temperature_c != null ? fmt(s.temperature_c, "°C", 1) : "Unknown") : "Unknown";
+  const thermalsValue = isOnline
+    ? s?.temperature_c != null
+      ? fmt(s.temperature_c, "°C", 1)
+      : "Unknown"
+    : "Unknown";
+
   const thermalsHealth = isOnline ? thermalStatus(s?.temperature_c) : staleHealth();
 
   return (
     <div className="dashboard-page">
-      <div className="aura-header">
+      <section className="aura-header">
         <div className="aura-panel">
-          <div
-            className="aura-img-wrap"
-            style={{
-              width: 88,
-              height: 88,
-              borderRadius: 20,
-              overflow: "hidden",
-              flexShrink: 0,
-              background: "rgba(0,0,0,0.06)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <img
-              src={robotImage}
-              alt="AURA"
-              className="aura-img"
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                objectPosition: "center top",
-                display: "block",
-              }}
-            />
-          </div>
+          <div className="aura-panel-left">
+            <img src={robotImage} alt="AURA robot" className="aura-img" />
 
-          <div className="aura-text">
-            <h1 className="aura-title">{device?.device_name || "AURA"}</h1>
-            <div className="aura-sub">
-              Status: <b>{status}</b>
-              {isOnline && updatedLabel ? <> • Updated {updatedLabel}</> : null}
-              {!isOnline && freshestTimestampSeconds > 0 ? <> • No fresh Jetson data</> : null}
+            <div className="aura-text">
+              <h1 className="aura-title">{device?.device_name || "AURA Jetson"}</h1>
+
+              <div className="aura-sub">
+                Status:{" "}
+                <span className={isOnline ? "status-online" : "status-offline"}>
+                  {status}
+                </span>
+                {isOnline && updatedLabel ? (
+                  <span> • Updated {updatedLabel}</span>
+                ) : null}
+                {!isOnline && freshestTimestampSeconds > 0 ? (
+                  <span> • No fresh Jetson data</span>
+                ) : null}
+              </div>
             </div>
           </div>
+
+          {canFlush ? (
+            <div className="aura-panel-actions">
+              <button
+                className="dashboard-action-btn"
+                onClick={() => void flushModels()}
+                disabled={flushState === "pending" || !device}
+                type="button"
+                title="Free VRAM/RAM by unloading idle models."
+              >
+                {flushState === "pending" ? "Queuing..." : "Flush Models"}
+              </button>
+
+              <button
+                className="dashboard-action-btn"
+                onClick={() => void reloadLlm()}
+                disabled={reloadState === "pending" || !device}
+                type="button"
+                title="Unload then force-reload the LLM onto the Jetson GPU."
+              >
+                {reloadState === "pending" ? "Queuing..." : "Reload LLM to GPU"}
+              </button>
+            </div>
+          ) : null}
         </div>
-      </div>
+      </section>
 
-      {error ? <div className="dash-error">Dashboard load failed: {error}</div> : null}
+      {error ? (
+        <div className="dash-error">Dashboard load failed: {error}</div>
+      ) : null}
 
-      {canFlush && (
-        <section className="dashboard-section">
-          <div className="dash-title-row">
-            <h2 className="dash-title">Jetson Maintenance</h2>
-            <div className="dash-subtitle">Free VRAM/RAM by unloading idle models</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-            <button
-              className="btn btn-primary"
-              onClick={() => void flushModels()}
-              disabled={flushState === "pending" || !device}
-              type="button"
-            >
-              {flushState === "pending" ? "Queuing..." : "Flush Models"}
-            </button>
-            <button
-              className="btn btn-primary"
-              onClick={() => void reloadLlm()}
-              disabled={reloadState === "pending" || !device}
-              type="button"
-              title="Unload then force-reload the LLM onto the Jetson GPU. Use when Ollama silently fell back to CPU."
-            >
-              {reloadState === "pending" ? "Queuing..." : "Reload LLM to GPU"}
-            </button>
-            {flushNote && (
-              <span style={{ color: flushState === "err" ? "var(--status-bad, #f87171)" : "var(--status-good, #4ade80)", fontSize: "0.85rem" }}>
-                {flushNote}
-              </span>
-            )}
-            {reloadNote && (
-              <span style={{ color: reloadState === "err" ? "var(--status-bad, #f87171)" : "var(--status-good, #4ade80)", fontSize: "0.85rem" }}>
-                {reloadNote}
-              </span>
-            )}
-          </div>
+      {(flushNote || reloadNote) && (
+        <section className="dashboard-section dashboard-maintenance-notes">
+          {flushNote ? <div className="dashboard-note">{flushNote}</div> : null}
+          {reloadNote ? <div className="dashboard-note">{reloadNote}</div> : null}
         </section>
       )}
 
       <section className="dashboard-section">
         <div className="dash-title-row">
-          <h2 className="dash-title">System Overview</h2>
+          <div>
+            <h2 className="dash-title">System Overview</h2>
+          </div>
           <div className="dash-subtitle">
             {isOnline ? "Live Jetson values" : "Waiting for fresh Jetson data"}
           </div>
@@ -353,42 +356,33 @@ export default function DashboardPage() {
           <FiloCard
             label="RAM Usage"
             value={ramValue}
-            sub={isOnline ? "Memory load" : "No recent data"}
+            sub="Memory load"
             status={isOnline ? "BAD" : "WARN"}
-
           />
-
           <FiloCard
             label="CPU Usage"
             value={cpuValue}
-            sub={isOnline ? "Processor load" : "No recent data"}
+            sub="Processor load"
             status={isOnline ? "BAD" : "WARN"}
-
           />
-
           <FiloCard
             label="GPU Usage"
             value={gpuValue}
-            sub={isOnline ? "GPU load" : "No recent data"}
+            sub="GPU load"
             status={isOnline ? "BAD" : "WARN"}
-
           />
-
           <FiloCard
             label="Uptime"
             value={uptimeValue}
-            sub={isOnline ? "Since boot" : "No recent data"}
+            sub="Since boot"
             status={isOnline ? "BAD" : "WARN"}
-
           />
-
           <FiloCard
             label="ESP32 Connection"
             value={esp32Value}
             sub="Controller link"
             status={esp32Health}
           />
-
           <FiloCard
             label="Thermals"
             value={thermalsValue}
@@ -413,13 +407,16 @@ function FiloCard({
   status?: HealthStatus;
 }) {
   const resolvedStatus = status ?? "WARN";
+  const badgeText = statusBadgeText(resolvedStatus);
+  const badgeClass = statusBadgeClass(resolvedStatus);
 
   return (
     <div className="filo-item">
       <div className="filo-top">
         <div className="filo-label">{label}</div>
-        <div className="filo-dot" style={{ background: dotColor(resolvedStatus) }} />
+        <div className={`filo-status-badge ${badgeClass}`}>{badgeText}</div>
       </div>
+
       <div className="filo-value">{value}</div>
       <div className="filo-sub">{sub}</div>
     </div>
