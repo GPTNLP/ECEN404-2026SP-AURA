@@ -2,12 +2,13 @@
 .tamanage-page {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   min-width: 0;
 }
 
 .tamanage-header {
   align-items: flex-start;
+  margin-bottom: 2px;
 }
 
 /* ================= CARDS ================= */
@@ -17,8 +18,14 @@
   min-width: 0;
 }
 
+.tamanage-card {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
 .tamanage-table-card {
   overflow: hidden;
+  margin-top: 2px;
 }
 
 /* ================= ADD ROW ================= */
@@ -37,6 +44,13 @@
   width: 100%;
   min-height: 48px;
   border-radius: 14px;
+  padding-left: 16px;
+  padding-right: 16px;
+  text-indent: 0;
+}
+
+.tamanage-input::placeholder {
+  opacity: 0.8;
 }
 
 .tamanage-input.is-invalid {
@@ -77,7 +91,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 14px;
-  padding: 18px 18px 0;
+  padding: 12px 18px 0;
 }
 
 .tamanage-section-title {
@@ -95,7 +109,7 @@
 /* ================= TABLE ================= */
 .tamanage-table-wrap {
   overflow: auto;
-  padding: 18px;
+  padding: 14px 18px 18px;
 }
 
 .tamanage-table {

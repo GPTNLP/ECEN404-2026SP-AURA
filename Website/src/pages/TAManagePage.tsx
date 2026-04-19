@@ -223,7 +223,7 @@ export default function TaManagerPage() {
               </div>
             </div>
 
-            <button className="btn tamanage-action-btn tamanage-action-btn-secondary" onClick={() => void loadTAs()} type="button">
+            <button className="btn tamanage-action-btn" onClick={() => void loadTAs()} type="button">
               Refresh
             </button>
           </div>
