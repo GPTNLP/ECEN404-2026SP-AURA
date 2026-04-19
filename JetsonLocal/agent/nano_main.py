@@ -4,6 +4,7 @@ import json
 import queue
 import re
 import subprocess
+import os
 import threading
 import tkinter as tk
 from collections import Counter
@@ -85,6 +86,8 @@ class AuraConsoleApp:
 
         self.ui_mode = "home"
         self.view_mode = "home"
+        self.previous_ui_mode = "home"
+        self.previous_view_mode = "home"
         self.active_vision_mode = None
         self.voice_should_resume = False
         self.current_frame_image = None
@@ -103,6 +106,16 @@ class AuraConsoleApp:
             value="Last voice result will appear here."
         )
         self.voice_busy = False
+
+        self._settings_volume_var = tk.DoubleVar(value=50.0)
+        self._settings_brightness_var = tk.DoubleVar(value=100.0)
+        self._settings_volume_text = tk.StringVar(value="50%")
+        self._settings_brightness_text = tk.StringVar(value="100%")
+        self._settings_status_text = tk.StringVar(
+            value="Adjust volume and brightness for the touchscreen."
+        )
+        self._pending_volume_job = None
+        self._pending_brightness_job = None
 
         self._llm_thinking = False
         self._llm_history = []
@@ -184,7 +197,7 @@ class AuraConsoleApp:
         self.header_label.grid(row=0, column=1, sticky="n")
 
         header_actions = tk.Frame(header_inner, bg="#0b0f14")
-        header_actions.grid(row=0, column=2, sticky="e", padx=10, pady=8)
+        header_actions.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=8)
 
         icon_font = tkfont.Font(
             family="Courier", size=max(16, int(sw * 0.020)), weight="bold"
@@ -209,19 +222,44 @@ class AuraConsoleApp:
             highlightbackground="#14f195",
             highlightcolor="#14f195",
         )
-        self.reboot_button.pack(side="left")
+        self.reboot_button.pack(side="left", padx=(0, 8))
+
+        self.settings_button = tk.Button(
+            header_actions,
+            text="⚙",
+            command=self.open_settings,
+            font=icon_font,
+            bg="#0b0f14",
+            fg="#14f195",
+            activebackground="#052e1c",
+            activeforeground="#eafff3",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            width=3,
+            padx=8,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.settings_button.pack(side="left")
 
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
         self.home_frame = tk.Frame(self.content, bg="#05070a")
         self.vision_frame = tk.Frame(self.content, bg="#05070a")
+        self.settings_frame = tk.Frame(self.content, bg="#05070a")
 
         self._build_home_ui(
             self.home_frame, sub_font, section_font, log_font, button_font
         )
         self._build_vision_ui(
             self.vision_frame, button_font, vision_title_font, vision_info_font
+        )
+        self._build_settings_ui(
+            self.settings_frame, section_font, button_font
         )
 
         self._show_home()
@@ -932,6 +970,167 @@ class AuraConsoleApp:
             pady=6,
         ).pack(fill="x", pady=(0, 12))
 
+
+    def _build_settings_ui(self, parent, section_font, button_font):
+        topbar = tk.Frame(parent, bg="#05070a")
+        topbar.pack(fill="x", pady=(0, 10))
+
+        self.settings_back_button = tk.Button(
+            topbar,
+            text="← Back",
+            command=self.close_settings,
+            font=button_font,
+            bg="#111827",
+            fg="#ecfeff",
+            activebackground="#0f172a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=18,
+            pady=12,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.settings_back_button.pack(side="left")
+
+        tk.Label(
+            topbar,
+            text="SETTINGS",
+            fg="#14f195",
+            bg="#05070a",
+            font=section_font,
+            anchor="center",
+        ).pack(side="left", fill="x", expand=True, padx=16)
+
+        info_font = tkfont.Font(
+            family="Courier",
+            size=max(11, int(self.root.winfo_screenwidth() * 0.014)),
+            weight="bold",
+        )
+        value_font = tkfont.Font(
+            family="Courier",
+            size=max(13, int(self.root.winfo_screenwidth() * 0.016)),
+            weight="bold",
+        )
+
+        settings_card = tk.Frame(
+            parent,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        settings_card.pack(fill="both", expand=True)
+
+        tk.Label(
+            settings_card,
+            text="DISPLAY & AUDIO",
+            fg="#14f195",
+            bg="#0b0f14",
+            font=section_font,
+            anchor="w",
+            padx=14,
+            pady=12,
+        ).pack(fill="x")
+
+        volume_row = tk.Frame(settings_card, bg="#0b0f14")
+        volume_row.pack(fill="x", padx=14, pady=(8, 10))
+
+        tk.Label(
+            volume_row,
+            text="Volume",
+            fg="#e2e8f0",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="w",
+        ).pack(side="left")
+
+        tk.Label(
+            volume_row,
+            textvariable=self._settings_volume_text,
+            fg="#14f195",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="e",
+        ).pack(side="right")
+
+        self.volume_scale = tk.Scale(
+            settings_card,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self._settings_volume_var,
+            command=self._on_volume_change,
+            showvalue=False,
+            resolution=1,
+            troughcolor="#052e1c",
+            activebackground="#14f195",
+            bg="#0b0f14",
+            fg="#cbd5e1",
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+            length=max(500, int(self.root.winfo_screenwidth() * 0.72)),
+            sliderrelief="flat",
+            bd=0,
+        )
+        self.volume_scale.pack(fill="x", padx=14, pady=(0, 18))
+
+        brightness_row = tk.Frame(settings_card, bg="#0b0f14")
+        brightness_row.pack(fill="x", padx=14, pady=(8, 10))
+
+        tk.Label(
+            brightness_row,
+            text="Brightness",
+            fg="#e2e8f0",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="w",
+        ).pack(side="left")
+
+        tk.Label(
+            brightness_row,
+            textvariable=self._settings_brightness_text,
+            fg="#14f195",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="e",
+        ).pack(side="right")
+
+        self.brightness_scale = tk.Scale(
+            settings_card,
+            from_=10,
+            to=100,
+            orient="horizontal",
+            variable=self._settings_brightness_var,
+            command=self._on_brightness_change,
+            showvalue=False,
+            resolution=1,
+            troughcolor="#052e1c",
+            activebackground="#14f195",
+            bg="#0b0f14",
+            fg="#cbd5e1",
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+            length=max(500, int(self.root.winfo_screenwidth() * 0.72)),
+            sliderrelief="flat",
+            bd=0,
+        )
+        self.brightness_scale.pack(fill="x", padx=14, pady=(0, 18))
+
+        tk.Label(
+            settings_card,
+            textvariable=self._settings_status_text,
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=info_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.9)),
+            padx=14,
+            pady=10,
+        ).pack(fill="x")
+
     # =========================
     # View switching / actions
     # =========================
@@ -939,12 +1138,20 @@ class AuraConsoleApp:
     def _show_home(self):
         self.ui_mode = "home"
         self.vision_frame.pack_forget()
+        self.settings_frame.pack_forget()
         self.home_frame.pack(fill="both", expand=True)
 
     def _show_vision(self):
         self.ui_mode = "vision"
+        self.settings_frame.pack_forget()
         self.home_frame.pack_forget()
         self.vision_frame.pack(fill="both", expand=True)
+
+    def _show_settings(self):
+        self.ui_mode = "settings"
+        self.home_frame.pack_forget()
+        self.vision_frame.pack_forget()
+        self.settings_frame.pack(fill="both", expand=True)
 
     def _switch_view(self, mode: str):
         self.view_mode = mode
@@ -975,6 +1182,23 @@ class AuraConsoleApp:
         self._poll_rag_dataset()
         self._poll_vision()
         self._best_effort_disable_system_keyboard()
+
+    def open_settings(self):
+        self.previous_ui_mode = self.ui_mode
+        self.previous_view_mode = self.view_mode
+        self._load_settings_state()
+        self._show_settings()
+        self._set_status("READY", "Settings open")
+
+    def close_settings(self):
+        if self.previous_ui_mode == "vision" and self.active_vision_mode:
+            self._show_vision()
+            self._set_status("VISION", f"{VISION_MODES[self.active_vision_mode]['button']} active")
+            return
+
+        self._show_home()
+        self._switch_view(self.previous_view_mode or "home")
+        self._set_status("READY", "Returned from settings")
 
     def _tap_reboot(self):
         now_ms = int(datetime.now().timestamp() * 1000)
@@ -1017,6 +1241,172 @@ class AuraConsoleApp:
                 subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
             except Exception:
                 pass
+
+
+    def _load_settings_state(self):
+        volume = self._get_system_volume()
+        if volume is not None:
+            self._settings_volume_var.set(volume)
+            self._settings_volume_text.set(f"{int(volume)}%")
+        else:
+            self._settings_volume_text.set(f"{int(self._settings_volume_var.get())}%")
+
+        brightness = self._get_system_brightness()
+        if brightness is not None:
+            self._settings_brightness_var.set(brightness)
+            self._settings_brightness_text.set(f"{int(brightness)}%")
+        else:
+            self._settings_brightness_text.set(f"{int(self._settings_brightness_var.get())}%")
+
+        self._settings_status_text.set("Adjust volume and brightness for the touchscreen.")
+
+    def _on_volume_change(self, value):
+        try:
+            percent = max(0, min(100, int(float(value))))
+        except Exception:
+            percent = int(self._settings_volume_var.get())
+        self._settings_volume_text.set(f"{percent}%")
+
+        if self._pending_volume_job is not None:
+            try:
+                self.root.after_cancel(self._pending_volume_job)
+            except Exception:
+                pass
+        self._pending_volume_job = self.root.after(120, lambda p=percent: self._apply_volume(p))
+
+    def _on_brightness_change(self, value):
+        try:
+            percent = max(10, min(100, int(float(value))))
+        except Exception:
+            percent = int(self._settings_brightness_var.get())
+        self._settings_brightness_text.set(f"{percent}%")
+
+        if self._pending_brightness_job is not None:
+            try:
+                self.root.after_cancel(self._pending_brightness_job)
+            except Exception:
+                pass
+        self._pending_brightness_job = self.root.after(120, lambda p=percent: self._apply_brightness(p))
+
+    def _apply_volume(self, percent: int):
+        self._pending_volume_job = None
+        if self._best_effort_set_volume(percent):
+            self._settings_status_text.set(f"Volume set to {percent}%.")
+        else:
+            self._settings_status_text.set("Could not change volume on this device.")
+
+    def _apply_brightness(self, percent: int):
+        self._pending_brightness_job = None
+        if self._best_effort_set_brightness(percent):
+            self._settings_status_text.set(f"Brightness set to {percent}%.")
+        else:
+            self._settings_status_text.set("Could not change brightness on this device.")
+
+    def _get_system_volume(self):
+        commands = [
+            ["amixer", "get", "Master"],
+            ["amixer", "-D", "pulse", "get", "Master"],
+            ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+        ]
+        for cmd in commands:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=2,
+                )
+                match = re.search(r"(\d{1,3})%", proc.stdout or "")
+                if match:
+                    return max(0, min(100, int(match.group(1))))
+            except Exception:
+                continue
+        return None
+
+    def _best_effort_set_volume(self, percent: int) -> bool:
+        commands = [
+            ["amixer", "sset", "Master", f"{percent}%"],
+            ["amixer", "-D", "pulse", "sset", "Master", f"{percent}%"],
+            ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{percent}%"],
+        ]
+        for cmd in commands:
+            try:
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                    check=False,
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _get_system_brightness(self):
+        try:
+            backlight_root = "/sys/class/backlight"
+            if os.path.isdir(backlight_root):
+                for name in os.listdir(backlight_root):
+                    base = os.path.join(backlight_root, name)
+                    try:
+                        with open(os.path.join(base, "brightness"), "r", encoding="utf-8") as f:
+                            cur = int(f.read().strip())
+                        with open(os.path.join(base, "max_brightness"), "r", encoding="utf-8") as f:
+                            max_val = int(f.read().strip())
+                        if max_val > 0:
+                            return max(1, min(100, int(round((cur / max_val) * 100))))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return None
+
+    def _best_effort_set_brightness(self, percent: int) -> bool:
+        percent = max(10, min(100, int(percent)))
+
+        try:
+            backlight_root = "/sys/class/backlight"
+            if os.path.isdir(backlight_root):
+                for name in os.listdir(backlight_root):
+                    base = os.path.join(backlight_root, name)
+                    try:
+                        with open(os.path.join(base, "max_brightness"), "r", encoding="utf-8") as f:
+                            max_val = int(f.read().strip())
+                        target = max(1, int(round((percent / 100.0) * max_val)))
+                        with open(os.path.join(base, "brightness"), "w", encoding="utf-8") as f:
+                            f.write(str(target))
+                        return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        try:
+            proc = subprocess.run(
+                ["xrandr", "--current"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
+            for line in (proc.stdout or "").splitlines():
+                if " connected" in line:
+                    output_name = line.split()[0]
+                    brightness_value = max(0.10, min(1.0, percent / 100.0))
+                    subprocess.run(
+                        ["xrandr", "--output", output_name, "--brightness", f"{brightness_value:.2f}"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                        check=False,
+                    )
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     # =========================
     # LLM chat
