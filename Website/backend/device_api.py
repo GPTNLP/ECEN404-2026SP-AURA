@@ -2,7 +2,7 @@ import os
 import json
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel, Field
@@ -108,31 +108,91 @@ def _require_device_secret(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Bad device secret")
 
 
-def _read_devices() -> Dict[str, Any]:
-    if not DEVICES_FILE.exists():
-        return {"devices": {}}
+def _empty_devices_store() -> Dict[str, Any]:
+    return {"devices": {}}
 
-    try:
-        raw = DEVICES_FILE.read_text(encoding="utf-8").strip()
-        if not raw:
-            return {"devices": {}}
-        data = json.loads(raw)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Devices store unreadable: {e}")
 
+def _normalize_devices_store(data: Any) -> Dict[str, Any]:
     if not isinstance(data, dict):
-        return {"devices": {}}
+        return _empty_devices_store()
 
     devices = data.get("devices")
     if not isinstance(devices, dict):
         data["devices"] = {}
+        return data
 
+    cleaned: Dict[str, Any] = {}
+    for device_id, rec in devices.items():
+        if isinstance(device_id, str) and isinstance(rec, dict):
+            cleaned[device_id] = rec
+    data["devices"] = cleaned
     return data
 
 
+def _backup_corrupt_devices(raw: str, reason: str) -> None:
+    try:
+        ts = _now()
+        backup_path = STORAGE_DIR / f"devices.corrupt.{ts}.json"
+        meta_path = STORAGE_DIR / f"devices.corrupt.{ts}.txt"
+        backup_path.write_text(raw, encoding="utf-8")
+        meta_path.write_text(reason.strip() + "\n", encoding="utf-8")
+    except Exception:
+        # Never let backup failures take down the API.
+        pass
+
+
+def _try_salvage_devices_store(raw: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    raw = raw.strip()
+    if not raw:
+        return _empty_devices_store(), "empty devices store"
+
+    decoder = json.JSONDecoder()
+    try:
+        obj, end = decoder.raw_decode(raw)
+    except Exception as exc:
+        return None, f"raw_decode failed: {exc}"
+
+    trailing = raw[end:].strip()
+    if trailing:
+        reason = f"salvaged valid JSON prefix and ignored trailing data: {trailing[:200]}"
+    else:
+        reason = "salvaged devices store"
+
+    return _normalize_devices_store(obj), reason
+
+
+def _read_devices() -> Dict[str, Any]:
+    if not DEVICES_FILE.exists():
+        return _empty_devices_store()
+
+    raw = ""
+    try:
+        raw = DEVICES_FILE.read_text(encoding="utf-8").strip()
+        if not raw:
+            return _empty_devices_store()
+        return _normalize_devices_store(json.loads(raw))
+    except Exception as exc:
+        salvaged, reason = _try_salvage_devices_store(raw)
+        if salvaged is not None:
+            _backup_corrupt_devices(raw, f"{exc}\n{reason}")
+            try:
+                _write_devices(salvaged)
+            except Exception:
+                pass
+            return salvaged
+
+        _backup_corrupt_devices(raw, str(exc))
+        try:
+            _write_devices(_empty_devices_store())
+        except Exception:
+            pass
+        return _empty_devices_store()
+
+
 def _write_devices(data: Dict[str, Any]) -> None:
+    safe = _normalize_devices_store(data)
     tmp = DEVICES_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(safe, indent=2) + "\n", encoding="utf-8")
     tmp.replace(DEVICES_FILE)
 
 
