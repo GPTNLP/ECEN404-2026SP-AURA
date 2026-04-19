@@ -75,9 +75,9 @@ app = FastAPI(title="AURA Jetson Agent")
 api = ApiClient()
 
 runtime_config = {
-    "poll_seconds": 0.10,
-    "heartbeat_seconds": int(HEARTBEAT_SECONDS),
-    "status_seconds": int(STATUS_SECONDS),
+    "poll_seconds": 0.05,
+    "heartbeat_seconds": 3,
+    "status_seconds": 3,
 }
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
