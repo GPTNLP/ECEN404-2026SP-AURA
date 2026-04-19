@@ -176,32 +176,40 @@ class AuraConsoleApp:
         )
         self.header.pack(fill="x", pady=(0, 10))
 
-        header_inner = tk.Frame(self.header, bg="#0b0f14")
+        header_inner = tk.Frame(self.header, bg="#0b0f14", height=74)
         header_inner.pack(fill="x")
-        header_inner.grid_columnconfigure(0, weight=1)
-        header_inner.grid_columnconfigure(1, weight=0)
-        header_inner.grid_columnconfigure(2, weight=1)
-
-        tk.Frame(header_inner, bg="#0b0f14").grid(row=0, column=0, sticky="ew")
-
-        self.header_label = tk.Label(
-            header_inner,
-            textvariable=self.banner_text,
-            fg="#14f195",
-            bg="#0b0f14",
-            font=title_font,
-            anchor="center",
-            padx=10,
-            pady=10,
-        )
-        self.header_label.grid(row=0, column=1, sticky="n")
-
-        header_actions = tk.Frame(header_inner, bg="#0b0f14")
-        header_actions.grid(row=0, column=2, sticky="e", padx=(0, 22), pady=8)
+        header_inner.pack_propagate(False)
 
         icon_font = tkfont.Font(
-            family="Courier", size=max(16, int(sw * 0.020)), weight="bold"
+            family="Courier", size=max(17, int(sw * 0.021)), weight="bold"
         )
+        settings_icon_font = tkfont.Font(
+            family="Courier", size=max(19, int(sw * 0.023)), weight="bold"
+        )
+
+        header_actions = tk.Frame(header_inner, bg="#0b0f14")
+        header_actions.pack(side="right", padx=(0, 10), pady=8)
+
+        self.settings_button = tk.Button(
+            header_actions,
+            text="⚙",
+            command=self.open_settings,
+            font=settings_icon_font,
+            bg="#0b0f14",
+            fg="#14f195",
+            activebackground="#052e1c",
+            activeforeground="#eafff3",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            width=2,
+            padx=8,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.settings_button.pack(side="right")
 
         self.reboot_button = tk.Button(
             header_actions,
@@ -215,35 +223,25 @@ class AuraConsoleApp:
             relief="flat",
             bd=0,
             cursor="hand2",
-            width=3,
+            width=2,
             padx=8,
-            pady=8,
+            pady=6,
             highlightthickness=1,
             highlightbackground="#14f195",
             highlightcolor="#14f195",
         )
-        self.reboot_button.pack(side="left", padx=(0, 8))
+        self.reboot_button.pack(side="right", padx=(0, 6))
 
-        self.settings_button = tk.Button(
-            header_actions,
-            text="⚙",
-            command=self.open_settings,
-            font=icon_font,
-            bg="#0b0f14",
+        self.header_label = tk.Label(
+            header_inner,
+            textvariable=self.banner_text,
             fg="#14f195",
-            activebackground="#052e1c",
-            activeforeground="#eafff3",
-            relief="flat",
-            bd=0,
-            cursor="hand2",
-            width=3,
-            padx=8,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground="#14f195",
-            highlightcolor="#14f195",
+            bg="#0b0f14",
+            font=title_font,
+            anchor="center",
         )
-        self.settings_button.pack(side="left")
+        self.header_label.place(relx=0.5, rely=0.5, anchor="center")
+        header_actions.lift()
 
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
@@ -972,8 +970,9 @@ class AuraConsoleApp:
 
 
     def _build_settings_ui(self, parent, section_font, button_font):
-        topbar = tk.Frame(parent, bg="#05070a")
+        topbar = tk.Frame(parent, bg="#05070a", height=64)
         topbar.pack(fill="x", pady=(0, 10))
+        topbar.pack_propagate(False)
 
         self.settings_back_button = tk.Button(
             topbar,
@@ -987,22 +986,27 @@ class AuraConsoleApp:
             relief="flat",
             bd=0,
             cursor="hand2",
-            padx=18,
-            pady=12,
+            padx=16,
+            pady=10,
             highlightthickness=1,
             highlightbackground="#14f195",
             highlightcolor="#14f195",
         )
-        self.settings_back_button.pack(side="left")
+        self.settings_back_button.pack(side="left", padx=(0, 6), pady=8)
 
+        settings_title_font = tkfont.Font(
+            family="Courier",
+            size=max(17, int(self.root.winfo_screenwidth() * 0.024)),
+            weight="bold",
+        )
         tk.Label(
             topbar,
             text="SETTINGS",
             fg="#14f195",
             bg="#05070a",
-            font=section_font,
+            font=settings_title_font,
             anchor="center",
-        ).pack(side="left", fill="x", expand=True, padx=16)
+        ).place(relx=0.5, rely=0.5, anchor="center")
 
         info_font = tkfont.Font(
             family="Courier",
@@ -1012,6 +1016,11 @@ class AuraConsoleApp:
         value_font = tkfont.Font(
             family="Courier",
             size=max(13, int(self.root.winfo_screenwidth() * 0.016)),
+            weight="bold",
+        )
+        slider_font = tkfont.Font(
+            family="Courier",
+            size=max(10, int(self.root.winfo_screenwidth() * 0.013)),
             weight="bold",
         )
 
@@ -1034,8 +1043,21 @@ class AuraConsoleApp:
             pady=12,
         ).pack(fill="x")
 
+        tk.Label(
+            settings_card,
+            text="Use the bright handle on each slider. The current value always shows on the right.",
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=info_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.9)),
+            padx=14,
+            pady=(0, 8),
+        ).pack(fill="x")
+
         volume_row = tk.Frame(settings_card, bg="#0b0f14")
-        volume_row.pack(fill="x", padx=14, pady=(8, 10))
+        volume_row.pack(fill="x", padx=14, pady=(8, 8))
 
         tk.Label(
             volume_row,
@@ -1050,13 +1072,25 @@ class AuraConsoleApp:
             volume_row,
             textvariable=self._settings_volume_text,
             fg="#14f195",
-            bg="#0b0f14",
+            bg="#052e1c",
             font=value_font,
             anchor="e",
+            padx=12,
+            pady=4,
+            highlightbackground="#14f195",
+            highlightthickness=1,
         ).pack(side="right")
 
-        self.volume_scale = tk.Scale(
+        volume_scale_wrap = tk.Frame(
             settings_card,
+            bg="#07130b",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        volume_scale_wrap.pack(fill="x", padx=14, pady=(0, 8))
+
+        self.volume_scale = tk.Scale(
+            volume_scale_wrap,
             from_=0,
             to=100,
             orient="horizontal",
@@ -1064,20 +1098,28 @@ class AuraConsoleApp:
             command=self._on_volume_change,
             showvalue=False,
             resolution=1,
-            troughcolor="#052e1c",
+            troughcolor="#163a28",
             activebackground="#14f195",
-            bg="#0b0f14",
-            fg="#cbd5e1",
-            highlightbackground="#14f195",
-            highlightcolor="#14f195",
-            length=max(500, int(self.root.winfo_screenwidth() * 0.72)),
-            sliderrelief="flat",
+            bg="#07130b",
+            fg="#14f195",
+            font=slider_font,
+            highlightthickness=0,
             bd=0,
+            relief="flat",
+            sliderlength=44,
+            width=28,
+            length=max(520, int(self.root.winfo_screenwidth() * 0.74)),
         )
-        self.volume_scale.pack(fill="x", padx=14, pady=(0, 18))
+        self.volume_scale.pack(fill="x", padx=12, pady=(10, 4))
+
+        volume_ticks = tk.Frame(volume_scale_wrap, bg="#07130b")
+        volume_ticks.pack(fill="x", padx=18, pady=(0, 10))
+        tk.Label(volume_ticks, text="0%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="left")
+        tk.Label(volume_ticks, text="50%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="left", expand=True)
+        tk.Label(volume_ticks, text="100%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="right")
 
         brightness_row = tk.Frame(settings_card, bg="#0b0f14")
-        brightness_row.pack(fill="x", padx=14, pady=(8, 10))
+        brightness_row.pack(fill="x", padx=14, pady=(10, 8))
 
         tk.Label(
             brightness_row,
@@ -1092,13 +1134,25 @@ class AuraConsoleApp:
             brightness_row,
             textvariable=self._settings_brightness_text,
             fg="#14f195",
-            bg="#0b0f14",
+            bg="#052e1c",
             font=value_font,
             anchor="e",
+            padx=12,
+            pady=4,
+            highlightbackground="#14f195",
+            highlightthickness=1,
         ).pack(side="right")
 
-        self.brightness_scale = tk.Scale(
+        brightness_scale_wrap = tk.Frame(
             settings_card,
+            bg="#07130b",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        brightness_scale_wrap.pack(fill="x", padx=14, pady=(0, 8))
+
+        self.brightness_scale = tk.Scale(
+            brightness_scale_wrap,
             from_=10,
             to=100,
             orient="horizontal",
@@ -1106,29 +1160,37 @@ class AuraConsoleApp:
             command=self._on_brightness_change,
             showvalue=False,
             resolution=1,
-            troughcolor="#052e1c",
+            troughcolor="#163a28",
             activebackground="#14f195",
-            bg="#0b0f14",
-            fg="#cbd5e1",
-            highlightbackground="#14f195",
-            highlightcolor="#14f195",
-            length=max(500, int(self.root.winfo_screenwidth() * 0.72)),
-            sliderrelief="flat",
+            bg="#07130b",
+            fg="#14f195",
+            font=slider_font,
+            highlightthickness=0,
             bd=0,
+            relief="flat",
+            sliderlength=44,
+            width=28,
+            length=max(520, int(self.root.winfo_screenwidth() * 0.74)),
         )
-        self.brightness_scale.pack(fill="x", padx=14, pady=(0, 18))
+        self.brightness_scale.pack(fill="x", padx=12, pady=(10, 4))
+
+        brightness_ticks = tk.Frame(brightness_scale_wrap, bg="#07130b")
+        brightness_ticks.pack(fill="x", padx=18, pady=(0, 10))
+        tk.Label(brightness_ticks, text="10%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="left")
+        tk.Label(brightness_ticks, text="55%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="left", expand=True)
+        tk.Label(brightness_ticks, text="100%", fg="#94a3b8", bg="#07130b", font=info_font).pack(side="right")
 
         tk.Label(
             settings_card,
             textvariable=self._settings_status_text,
-            fg="#94a3b8",
+            fg="#cbd5e1",
             bg="#0b0f14",
             font=info_font,
             anchor="w",
             justify="left",
             wraplength=max(600, int(self.root.winfo_screenwidth() * 0.9)),
             padx=14,
-            pady=10,
+            pady=14,
         ).pack(fill="x")
 
     # =========================
