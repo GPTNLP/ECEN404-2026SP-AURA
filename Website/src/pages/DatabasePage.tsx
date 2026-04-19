@@ -984,17 +984,6 @@ export default function DatabasePage() {
               <div>
                 <div className="db-panel-title">Files</div>
               </div>
-
-              <div className="db-actions">
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setDeleteOpen(true)}
-                  disabled={busy !== "" || !selected || selected.path === ""}
-                  title="Delete selected item"
-                >
-                  Delete
-                </button>
-              </div>
             </div>
 
             <div className="db-breadcrumb-row">
@@ -1387,20 +1376,42 @@ export default function DatabasePage() {
 
         {deleteOpen && selected && selected.path !== "" && (
           <div className="db-modal-overlay" onClick={() => setDeleteOpen(false)}>
-            <div className="card db-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="db-modal-title">Delete</div>
-              <div className="muted" style={{ fontSize: 13 }}>
-                Are you sure you want to delete:
+            <div
+              className="db-delete-modal"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="db-delete-title"
+            >
+              <div className="db-delete-modal-icon">!</div>
+
+              <div id="db-delete-title" className="db-delete-title">
+                Are you sure?
               </div>
 
-              <div className="db-modal-path">{selected.path}</div>
+              <div className="db-delete-text">
+                This will permanently delete{" "}
+                <b>
+                  {selected.kind === "dir" ? "folder" : "file"} "{basename(selected.path)}"
+                </b>
+                {selected.kind === "dir" ? " and all of its contents." : "."}
+              </div>
 
               <div className="db-modal-actions">
-                <button className="btn" disabled={busy !== ""} onClick={() => setDeleteOpen(false)}>
+                <button
+                  className="btn db-modal-cancel-btn"
+                  onClick={() => setDeleteOpen(false)}
+                  disabled={busy !== ""}
+                >
                   Cancel
                 </button>
-                <button className="btn btn-primary" disabled={busy !== ""} onClick={doDelete}>
-                  {busy === "delete" ? "Deleting…" : "Delete"}
+
+                <button
+                  className="btn btn-primary db-modal-danger-btn"
+                  onClick={doDelete}
+                  disabled={busy !== ""}
+                >
+                  {busy === "delete" ? "Deleting..." : "Yes, delete"}
                 </button>
               </div>
             </div>
