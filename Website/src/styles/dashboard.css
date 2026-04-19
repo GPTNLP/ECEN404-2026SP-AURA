@@ -214,25 +214,25 @@
 
 .filo-value {
   margin-top: 12px;
-  font-size: clamp(2rem, 2.1vw, 2.7rem);
+  font-size: clamp(1.7rem, 1.95vw, 2.35rem);
   font-weight: 900;
-  line-height: 1.02;
+  line-height: 1.08;
   color: var(--text);
   min-width: 0;
   max-width: 100%;
+  min-height: 2.2em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .filo-value-text {
-  font-size: clamp(0.95rem, 1.1vw, 1.35rem);
-  line-height: 1.12;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  white-space: normal;
+  font-size: inherit;
+  line-height: inherit;
+  min-height: inherit;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  white-space: normal;
   max-width: 100%;
-  min-height: 2.24em;
 }
 
 .filo-sub {
@@ -252,7 +252,6 @@
   font-size: 14px;
 }
 
-/* Better toast */
 .dash-toast {
   position: fixed;
   top: 88px;
