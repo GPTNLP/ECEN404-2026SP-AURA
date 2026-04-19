@@ -11,12 +11,14 @@ type TaItem = {
   createdAt?: string;
   added_at?: string;
   addedAt?: string;
+  added_ts?: number | string;
+  addedTs?: number | string;
   ts?: number | string;
   timestamp?: number | string;
 };
 
 const API_BASE =
-  (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
+  (import.meta.env.VITE_AUTH_API_BASE as string | undefined)?.trim() ||
   "http://127.0.0.1:9000";
 
 function normalizeEmail(value: string) {
@@ -27,26 +29,35 @@ function isTamuEmail(value: string) {
   return /^[a-z0-9._%+-]+@tamu\.edu$/i.test(normalizeEmail(value));
 }
 
-function formatDate(value?: string | number) {
-  if (value === undefined || value === null || value === "") return "-";
-  try {
-    if (typeof value === "number") {
-      const ms = value < 10_000_000_000 ? value * 1000 : value;
-      return new Date(ms).toLocaleString();
-    }
-    if (/^\d+$/.test(String(value))) {
-      const raw = Number(value);
-      const ms = raw < 10_000_000_000 ? raw * 1000 : raw;
-      return new Date(ms).toLocaleString();
-    }
-    return new Date(String(value)).toLocaleString();
-  } catch {
-    return String(value);
+function toMillis(value?: string | number) {
+  if (value === undefined || value === null || value === "") return 0;
+
+  if (typeof value === "number") {
+    return value < 10_000_000_000 ? value * 1000 : value;
   }
+
+  const raw = String(value).trim();
+  if (!raw) return 0;
+
+  if (/^\d+$/.test(raw)) {
+    const num = Number(raw);
+    return num < 10_000_000_000 ? num * 1000 : num;
+  }
+
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function formatDateTime(value?: string | number) {
+  const ms = toMillis(value);
+  if (!ms) return "-";
+  return new Date(ms).toLocaleString();
 }
 
 function getAddedValue(ta: TaItem) {
   return (
+    ta.added_ts ??
+    ta.addedTs ??
     ta.created_at ??
     ta.createdAt ??
     ta.added_at ??
@@ -54,6 +65,15 @@ function getAddedValue(ta: TaItem) {
     ta.ts ??
     ta.timestamp
   );
+}
+
+function getAddedByValue(ta: TaItem, currentUserEmail?: string | null) {
+  const addedBy = normalizeEmail(ta.added_by || ta.addedBy || "");
+  const me = normalizeEmail(currentUserEmail || "");
+
+  if (!addedBy) return "-";
+  if (me && addedBy === me) return "You";
+  return addedBy;
 }
 
 export default function TaManagerPage() {
@@ -80,22 +100,30 @@ export default function TaManagerPage() {
 
   const loadTAs = async () => {
     if (!token) return;
+
     setLoading(true);
     setError("");
+
     try {
       const res = await fetch(`${API_BASE}/admin/ta/list`, {
         headers: authHeaders,
         credentials: "include",
       });
+
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Failed to load TAs");
 
-      const next = Array.isArray(data?.tas)
+      const rawItems = Array.isArray(data?.tas)
         ? data.tas
         : Array.isArray(data?.items)
-        ? data.items
-        : [];
-      setTas(next as TaItem[]);
+          ? data.items
+          : [];
+
+      const next = [...(rawItems as TaItem[])].sort((a, b) => {
+        return toMillis(getAddedValue(b)) - toMillis(getAddedValue(a));
+      });
+
+      setTas(next);
     } catch (e: any) {
       setError(e?.message || "Failed to load TAs");
       setTas([]);
@@ -139,6 +167,7 @@ export default function TaManagerPage() {
         credentials: "include",
         body: JSON.stringify({ email: nextEmail }),
       });
+
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Failed to add TA");
 
@@ -167,6 +196,7 @@ export default function TaManagerPage() {
         credentials: "include",
         body: JSON.stringify({ email: nextEmail }),
       });
+
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Failed to remove TA");
 
@@ -273,11 +303,13 @@ export default function TaManagerPage() {
                   tas.map((ta) => {
                     const taEmail = normalizeEmail(ta.email);
                     const addedValue = getAddedValue(ta);
+                    const addedByLabel = getAddedByValue(ta, user?.email || null);
+
                     return (
                       <tr key={taEmail}>
                         <td className="tamanage-email">{ta.email}</td>
-                        <td>{ta.added_by || ta.addedBy || "-"}</td>
-                        <td>{formatDate(addedValue)}</td>
+                        <td>{addedByLabel}</td>
+                        <td>{formatDateTime(addedValue)}</td>
                         <td className="tamanage-actions-col">
                           <button
                             className="btn tamanage-action-btn tamanage-action-btn-secondary"
