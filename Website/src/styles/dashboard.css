@@ -214,7 +214,7 @@
 
 .filo-value {
   margin-top: 12px;
-  font-size: clamp(1.95rem, 2vw, 2.45rem);
+  font-size: clamp(1.75rem, 1.9vw, 2.25rem);
   font-weight: 900;
   line-height: 1.08;
   color: var(--text);
@@ -222,18 +222,6 @@
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-
-.filo-value-text {
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
-  color: inherit;
-  min-width: 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  white-space: normal;
 }
 
 .filo-sub {

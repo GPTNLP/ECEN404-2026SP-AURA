@@ -456,14 +456,6 @@ function FiloCard({
   const badgeText = statusBadgeText(resolvedStatus);
   const badgeClass = statusBadgeClass(resolvedStatus);
 
-  const isTextValue =
-    /[a-zA-Z]/.test(value) ||
-    value.length > 12 ||
-    value === "Connected" ||
-    value === "Detected" ||
-    value === "Disconnected" ||
-    value === "Offline";
-
   return (
     <div className="filo-item">
       <div className="filo-top">
@@ -475,7 +467,7 @@ function FiloCard({
         )}
       </div>
 
-      <div className={`filo-value ${isTextValue ? "filo-value-text" : ""}`}>{value}</div>
+      <div className="filo-value">{value}</div>
       <div className="filo-sub">{sub}</div>
     </div>
   );
