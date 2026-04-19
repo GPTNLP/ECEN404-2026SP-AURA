@@ -9,6 +9,10 @@ type TaItem = {
   addedBy?: string;
   created_at?: string;
   createdAt?: string;
+  added_at?: string;
+  addedAt?: string;
+  ts?: number | string;
+  timestamp?: number | string;
 };
 
 const API_BASE =
@@ -23,13 +27,33 @@ function isTamuEmail(value: string) {
   return /^[a-z0-9._%+-]+@tamu\.edu$/i.test(normalizeEmail(value));
 }
 
-function formatDate(value?: string) {
-  if (!value) return "-";
+function formatDate(value?: string | number) {
+  if (value === undefined || value === null || value === "") return "-";
   try {
-    return new Date(value).toLocaleString();
+    if (typeof value === "number") {
+      const ms = value < 10_000_000_000 ? value * 1000 : value;
+      return new Date(ms).toLocaleString();
+    }
+    if (/^\d+$/.test(String(value))) {
+      const raw = Number(value);
+      const ms = raw < 10_000_000_000 ? raw * 1000 : raw;
+      return new Date(ms).toLocaleString();
+    }
+    return new Date(String(value)).toLocaleString();
   } catch {
-    return value;
+    return String(value);
   }
+}
+
+function getAddedValue(ta: TaItem) {
+  return (
+    ta.created_at ??
+    ta.createdAt ??
+    ta.added_at ??
+    ta.addedAt ??
+    ta.ts ??
+    ta.timestamp
+  );
 }
 
 export default function TaManagerPage() {
@@ -248,11 +272,12 @@ export default function TaManagerPage() {
                 ) : (
                   tas.map((ta) => {
                     const taEmail = normalizeEmail(ta.email);
+                    const addedValue = getAddedValue(ta);
                     return (
                       <tr key={taEmail}>
                         <td className="tamanage-email">{ta.email}</td>
                         <td>{ta.added_by || ta.addedBy || "-"}</td>
-                        <td>{formatDate(ta.created_at || ta.createdAt)}</td>
+                        <td>{formatDate(addedValue)}</td>
                         <td className="tamanage-actions-col">
                           <button
                             className="btn tamanage-action-btn tamanage-action-btn-secondary"
