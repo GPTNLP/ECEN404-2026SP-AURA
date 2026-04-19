@@ -1,24 +1,26 @@
 .layout-wrapper {
   display: block;
   min-height: 100vh;
-  background: var(--app-bg, #f6f3f3);
+  background: var(--bg);
 }
 
-/* 🔥 THIS IS CRITICAL */
+/* pushes content right of fixed sidebar */
 .layout-content {
-  margin-left: var(--sidebar-width); /* pushes content right of fixed sidebar */
+  margin-left: var(--sidebar-width);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  background: var(--bg);
 }
 
-/* 🔥 THIS CONTAINS ALL PAGES */
+/* contains all pages */
 .layout-main {
   flex: 1;
   min-height: 0;
   padding: 20px 22px;
-  overflow: hidden; /* prevents page stretching */
+  overflow: hidden;
+  background: var(--bg);
 }
 
 /* mobile */
