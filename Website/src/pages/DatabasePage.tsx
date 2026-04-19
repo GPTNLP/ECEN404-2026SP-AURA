@@ -184,10 +184,6 @@ export default function DatabasePage() {
   const selectedKind = selected?.kind ?? "dir";
   const selectedDir = selectedKind === "dir" ? selectedPath : dirname(selectedPath);
 
-  const deleteLabel = selected
-    ? `${selected.kind === "dir" ? "folder" : "file"} "${basename(selected.path)}"`
-    : "this item";
-
   const allFolders = useMemo(() => {
     const out: string[] = [];
     const walk = (node: TreeNode | null, parentPath: string) => {
@@ -1380,36 +1376,42 @@ export default function DatabasePage() {
 
         {deleteOpen && selected && selected.path !== "" && (
           <div className="db-modal-overlay" onClick={() => setDeleteOpen(false)}>
-            <div className="card db-modal db-delete-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="db-delete-modal-icon" aria-hidden="true">
-                !
-              </div>
-              <div className="db-modal-title">Delete item?</div>
-              <div className="db-delete-modal-text">
-                Are you sure you want to delete <b>{deleteLabel}</b>?
-              </div>
-              <div className="db-delete-modal-subtext">
-                This will permanently remove it from the website documents area.
+            <div
+              className="db-delete-modal"
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="db-delete-title"
+            >
+              <div className="db-delete-modal-icon">!</div>
+
+              <div id="db-delete-title" className="db-delete-title">
+                Are you sure?
               </div>
 
-              <div className="db-modal-path">{selected.path}</div>
+              <div className="db-delete-text">
+                This will permanently delete{" "}
+                <b>
+                  {selected.kind === "dir" ? "folder" : "file"} "{basename(selected.path)}"
+                </b>
+                {selected.kind === "dir" ? " and all of its contents." : "."}
+              </div>
 
               <div className="db-modal-actions">
                 <button
                   className="btn db-modal-cancel-btn"
-                  disabled={busy !== ""}
                   onClick={() => setDeleteOpen(false)}
-                  type="button"
+                  disabled={busy !== ""}
                 >
                   Cancel
                 </button>
+
                 <button
-                  className="btn db-modal-danger-btn"
-                  disabled={busy !== ""}
+                  className="btn btn-primary db-modal-danger-btn"
                   onClick={doDelete}
-                  type="button"
+                  disabled={busy !== ""}
                 >
-                  {busy === "delete" ? "Deleting…" : "Yes, delete"}
+                  {busy === "delete" ? "Deleting..." : "Yes, delete"}
                 </button>
               </div>
             </div>
