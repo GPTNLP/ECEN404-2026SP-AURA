@@ -1,44 +1,69 @@
-import os
 import json
+import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any
 
-def _default_path() -> Path:
-    # Prefer Azure persistent storage if configured
-    p = os.getenv("TA_USERS_PATH", "").strip()
-    if p:
-        return Path(p)
+from config import STORAGE_DIR
 
-    # Fallback: repo-local (dev only)
-    return Path(__file__).resolve().parent / "storage" / "ta_users.json"
+
+def _default_path() -> Path:
+    explicit = os.getenv("TA_USERS_PATH", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+
+    return (STORAGE_DIR / "ta_users.json").resolve()
+
 
 TA_USERS_PATH = _default_path()
 TA_USERS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+
+def _empty_store() -> Dict[str, Any]:
+    return {"tas": []}
+
+
+def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def _init_if_missing_or_empty() -> None:
-    """
-    Ensure the TA store is valid JSON.
-    - If missing -> create {"tas":[]}
-    - If empty (size 0) -> write {"tas":[]}
-    """
-    if (not TA_USERS_PATH.exists()) or (TA_USERS_PATH.stat().st_size == 0):
-        TA_USERS_PATH.write_text(json.dumps({"tas": []}, indent=2) + "\n", encoding="utf-8")
+    if (not TA_USERS_PATH.exists()) or TA_USERS_PATH.stat().st_size == 0:
+        _write_json_atomic(TA_USERS_PATH, _empty_store())
+
 
 def _read() -> Dict[str, Any]:
     _init_if_missing_or_empty()
+
+    raw = TA_USERS_PATH.read_text(encoding="utf-8").strip()
+    if not raw:
+        return _empty_store()
+
     try:
-        return json.loads(TA_USERS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        # If corrupted, reset safely (you can also choose to raise)
-        TA_USERS_PATH.write_text(json.dumps({"tas": []}, indent=2) + "\n", encoding="utf-8")
-        return {"tas": []}
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"TA store is unreadable: {TA_USERS_PATH} ({exc})") from exc
+
+    if not isinstance(data, dict):
+        return _empty_store()
+
+    tas = data.get("tas")
+    if not isinstance(tas, list):
+        data["tas"] = []
+
+    return data
+
 
 def _write(data: Dict[str, Any]) -> None:
-    TA_USERS_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _write_json_atomic(TA_USERS_PATH, data)
+
 
 def _norm(email: str) -> str:
     return (email or "").strip().lower()
+
 
 def list_ta_items() -> List[Dict[str, Any]]:
     """
@@ -52,44 +77,54 @@ def list_ta_items() -> List[Dict[str, Any]]:
     if not isinstance(tas, list):
         tas = []
 
-    # migrate old format (list[str]) -> list[dict]
+    migrated_from_legacy = False
     if tas and isinstance(tas[0], str):
-        migrated = []
-        for e in tas:
-            e2 = _norm(e)
-            if e2 and "@" in e2:
-                migrated.append({"email": e2, "added_by": "", "added_ts": 0})
+        migrated: List[Dict[str, Any]] = []
+        for value in tas:
+            email = _norm(value)
+            if email and "@" in email:
+                migrated.append({"email": email, "added_by": "", "added_ts": 0})
         tas = migrated
+        migrated_from_legacy = True
 
     out: List[Dict[str, Any]] = []
     seen = set()
-    for it in tas:
-        if not isinstance(it, dict):
+    for item in tas:
+        if not isinstance(item, dict):
             continue
-        email = _norm(it.get("email", ""))
-        if not email or "@" not in email:
+
+        email = _norm(item.get("email", ""))
+        if not email or "@" not in email or email in seen:
             continue
-        if email in seen:
-            continue
+
         seen.add(email)
         out.append(
             {
                 "email": email,
-                "added_by": _norm(it.get("added_by", "")),
-                "added_ts": int(it.get("added_ts") or 0),
+                "added_by": _norm(item.get("added_by", "")),
+                "added_ts": int(item.get("added_ts") or 0),
             }
         )
 
     out.sort(key=lambda x: x["email"])
-    _write({"tas": out})  # persist migration + cleanup
+
+    normalized = {"tas": out}
+    if migrated_from_legacy or raw.get("tas") != out:
+        _write(normalized)
+
     return out
 
+
 def list_tas() -> List[str]:
-    return [x["email"] for x in list_ta_items()]
+    return [item["email"] for item in list_ta_items()]
+
 
 def is_ta(email: str) -> bool:
-    e = _norm(email)
-    return e in set(list_tas())
+    normalized = _norm(email)
+    if not normalized:
+        return False
+    return normalized in set(list_tas())
+
 
 def add_ta(email: str, added_by: str = "") -> None:
     email = _norm(email)
@@ -97,7 +132,7 @@ def add_ta(email: str, added_by: str = "") -> None:
         return
 
     items = list_ta_items()
-    if any(x["email"] == email for x in items):
+    if any(item["email"] == email for item in items):
         return
 
     items.append(
@@ -110,7 +145,8 @@ def add_ta(email: str, added_by: str = "") -> None:
     items.sort(key=lambda x: x["email"])
     _write({"tas": items})
 
+
 def remove_ta(email: str) -> None:
     email = _norm(email)
-    items = [x for x in list_ta_items() if x["email"] != email]
+    items = [item for item in list_ta_items() if item["email"] != email]
     _write({"tas": items})

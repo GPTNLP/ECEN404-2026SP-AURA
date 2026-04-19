@@ -104,6 +104,13 @@ def resolve_current_role(email: str) -> str:
     return "student"
 
 
+def _normalize_token_role(role: str) -> str:
+    role = (role or "").strip().lower()
+    if role in {"admin", "ta", "student"}:
+        return role
+    return "student"
+
+
 def require_auth(request: Request) -> Dict[str, Any]:
     token = _get_auth_token_from_request(request)
     if not token:
@@ -119,7 +126,12 @@ def require_auth(request: Request) -> Dict[str, Any]:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     payload["sub"] = email
-    payload["role"] = resolve_current_role(email)
+
+    # Keep the role embedded in the signed token stable for the lifetime of that
+    # session. Role changes should happen through token revocation + new login,
+    # not by silently downgrading users on /auth/me when a backing file is briefly
+    # stale, moved, or unreadable.
+    payload["role"] = _normalize_token_role(payload.get("role") or "student")
     return payload
 
 

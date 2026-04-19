@@ -43,7 +43,7 @@ type DeviceRecord = {
   };
 };
 
-type AdminListResponse = {
+type DeviceListResponse = {
   ok: boolean;
   count: number;
   items: DeviceRecord[];
@@ -61,7 +61,6 @@ const API_BASE =
 const DEVICE_ID =
   (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() || "jetson-001";
 
-const LS_TOKEN = "aura-auth-token";
 const STALE_AFTER_SECONDS = 15;
 
 function thermalStatus(tempC?: number | null): HealthStatus {
@@ -138,19 +137,28 @@ export default function DashboardPage() {
   const [reloadPending, setReloadPending] = useState(false);
   const [toast, setToast] = useState<ToastState>(null);
 
+  const listEndpoint = user?.role === "admin" ? "/device/admin/list" : "/device/list";
+
   useEffect(() => {
     let alive = true;
 
     async function load() {
-      const storedToken = localStorage.getItem(LS_TOKEN);
+      if (!token) {
+        if (alive) {
+          setDevice(null);
+          setError("");
+          setNowMs(Date.now());
+        }
+        return;
+      }
 
       try {
-        const res = await fetch(`${API_BASE}/device/admin/list`, {
+        const res = await fetch(`${API_BASE}${listEndpoint}`, {
           method: "GET",
           credentials: "include",
           headers: {
             "Content-Type": "application/json",
-            ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
+            Authorization: `Bearer ${token}`,
           },
         });
 
@@ -159,11 +167,9 @@ export default function DashboardPage() {
           throw new Error(`${res.status} ${text}`);
         }
 
-        const data: AdminListResponse = await res.json();
+        const data: DeviceListResponse = await res.json();
         const found =
-          data.items.find((item) => item.device_id === DEVICE_ID) ??
-          data.items[0] ??
-          null;
+          data.items.find((item) => item.device_id === DEVICE_ID) ?? data.items[0] ?? null;
 
         if (alive) {
           setDevice(found);
@@ -178,16 +184,18 @@ export default function DashboardPage() {
       }
     }
 
-    load();
-    const id = setInterval(load, 2000);
-    const clock = setInterval(() => setNowMs(Date.now()), 1000);
+    void load();
+    const id = window.setInterval(() => {
+      void load();
+    }, 2000);
+    const clock = window.setInterval(() => setNowMs(Date.now()), 1000);
 
     return () => {
       alive = false;
-      clearInterval(id);
-      clearInterval(clock);
+      window.clearInterval(id);
+      window.clearInterval(clock);
     };
-  }, []);
+  }, [listEndpoint, token]);
 
   useEffect(() => {
     if (!toast) return;
@@ -335,9 +343,7 @@ export default function DashboardPage() {
 
               <div className="aura-sub">
                 Status:{" "}
-                <span className={isOnline ? "status-online" : "status-offline"}>
-                  {status}
-                </span>
+                <span className={isOnline ? "status-online" : "status-offline"}>{status}</span>
                 {isOnline && updatedLabel ? <span> • Updated {updatedLabel}</span> : null}
                 {!isOnline && freshestTimestampSeconds > 0 ? (
                   <span> • No fresh Jetson data</span>

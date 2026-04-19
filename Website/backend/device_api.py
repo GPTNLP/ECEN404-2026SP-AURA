@@ -8,6 +8,9 @@ from fastapi import APIRouter, Request, HTTPException
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+from config import STORAGE_DIR
+from security import require_auth
+
 # Load Website/.env if it exists
 env_path = Path(__file__).resolve().parents[1] / ".env"
 if env_path.exists():
@@ -15,8 +18,6 @@ if env_path.exists():
 
 router = APIRouter(prefix="/device", tags=["device"])
 
-BACKEND_DIR = Path(__file__).resolve().parent
-STORAGE_DIR = BACKEND_DIR / "storage"
 DEVICES_FILE = STORAGE_DIR / "devices.json"
 DEVICE_LOGS_FILE = STORAGE_DIR / "device_logs.jsonl"
 
@@ -79,6 +80,12 @@ class DeviceLogReq(BaseModel):
     event: str = Field(..., min_length=1, max_length=120)
     message: str = Field(..., min_length=1, max_length=4000)
     meta: Optional[Dict[str, Any]] = None
+
+
+class DeviceListResponse(BaseModel):
+    ok: bool
+    count: int
+    items: List[Dict[str, Any]]
 
 
 def _now() -> int:
@@ -145,6 +152,19 @@ def _get_or_create_device_slot(data: Dict[str, Any], device_id: str) -> Dict[str
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _sorted_device_items() -> List[Dict[str, Any]]:
+    data = _read_devices()
+    devices = data.get("devices", {})
+
+    items: List[Dict[str, Any]] = []
+    for rec in devices.values():
+        if isinstance(rec, dict):
+            items.append(rec)
+
+    items.sort(key=lambda x: int(x.get("last_seen_at", 0) or 0), reverse=True)
+    return items
 
 
 @router.post("/register")
@@ -323,24 +343,24 @@ def device_config(request: Request, device_id: str):
     }
 
 
-@router.get("/admin/list")
-def admin_list_devices(request: Request):
-    from security import require_auth
+@router.get("/list", response_model=DeviceListResponse)
+def list_devices(request: Request):
+    require_auth(request)
+    items = _sorted_device_items()
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+    }
 
+
+@router.get("/admin/list", response_model=DeviceListResponse)
+def admin_list_devices(request: Request):
     payload = require_auth(request)
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    data = _read_devices()
-    devices = data.get("devices", {})
-
-    items: List[Dict[str, Any]] = []
-    for rec in devices.values():
-        if isinstance(rec, dict):
-            items.append(rec)
-
-    items.sort(key=lambda x: int(x.get("last_seen_at", 0) or 0), reverse=True)
-
+    items = _sorted_device_items()
     return {
         "ok": True,
         "count": len(items),

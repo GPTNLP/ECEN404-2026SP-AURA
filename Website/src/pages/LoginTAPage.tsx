@@ -10,7 +10,7 @@ function isTamuEmail(email: string) {
 }
 
 export default function LoginTAPage() {
-  const { taStartLogin, taVerifyOtp, refreshMe, logout } = useAuth();
+  const { taStartLogin, taVerifyOtp } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState("");
@@ -29,12 +29,14 @@ export default function LoginTAPage() {
     setLoading(true);
 
     try {
-      const em = email.trim().toLowerCase();
-      if (!isTamuEmail(em)) throw new Error("Please use your @tamu.edu email.");
+      const normalizedEmail = email.trim().toLowerCase();
+      if (!isTamuEmail(normalizedEmail)) {
+        throw new Error("Please use your @tamu.edu email.");
+      }
 
-      const hint = await taStartLogin(em);
+      const hint = await taStartLogin(normalizedEmail);
 
-      setOtpEmail(em);
+      setOtpEmail(normalizedEmail);
       setOtpError(null);
       setNotice(hint.notice || null);
       setShowOtp(true);
@@ -50,13 +52,6 @@ export default function LoginTAPage() {
 
     try {
       const hint = await taVerifyOtp(otpEmail, otp);
-      const me = await refreshMe();
-
-      if (me?.role && me.role !== "ta") {
-        await logout();
-        throw new Error(hint.notice || "Please use the correct login portal for your account.");
-      }
-
       setNotice(hint.notice || notice);
       setShowOtp(false);
       navigate("/database", { replace: true });
