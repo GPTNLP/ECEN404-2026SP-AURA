@@ -1,196 +1,275 @@
 import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import { useAuth } from "../services/authService";
+import "../styles/tamanagepage.css";
 
-type TaRow = {
+type TaItem = {
   email: string;
   added_by?: string;
-  added_ts?: number;
+  addedBy?: string;
+  created_at?: string;
+  createdAt?: string;
 };
 
 const API_BASE =
   (import.meta.env.VITE_AUTH_API_BASE as string | undefined) ||
-  (import.meta.env.VITE_CAMERA_API_BASE as string | undefined) ||
   "http://127.0.0.1:9000";
 
-async function readErr(res: Response) {
+function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isTamuEmail(value: string) {
+  return /^[a-z0-9._%+-]+@tamu\.edu$/i.test(normalizeEmail(value));
+}
+
+function formatDate(value?: string) {
+  if (!value) return "-";
   try {
-    const j = await res.json();
-    return j?.detail || j?.message || (await res.text());
+    return new Date(value).toLocaleString();
   } catch {
-    try {
-      return (await res.text()) || `Request failed (${res.status})`;
-    } catch {
-      return `Request failed (${res.status})`;
-    }
+    return value;
   }
 }
 
-export default function TAManagePage() {
-  const { token } = useAuth();
-  const [items, setItems] = useState<TaRow[]>([]);
+export default function TaManagerPage() {
+  const { token, user } = useAuth();
+  const isAdmin = user?.role === "admin";
+
   const [email, setEmail] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  const [tas, setTas] = useState<TaItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [removingEmail, setRemovingEmail] = useState("");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
 
-  const headers = useMemo(() => {
-    return {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    };
+  const cleanEmail = useMemo(() => normalizeEmail(email), [email]);
+  const emailIsValid = useMemo(() => !cleanEmail || isTamuEmail(cleanEmail), [cleanEmail]);
+
+  const authHeaders = useMemo(() => {
+    const h = new Headers();
+    if (token) h.set("Authorization", `Bearer ${token}`);
+    h.set("Content-Type", "application/json");
+    return h;
   }, [token]);
 
-  const load = async () => {
+  const loadTAs = async () => {
     if (!token) return;
-    setErr(null);
-
-    const res = await fetch(`${API_BASE}/admin/ta/list`, { headers });
-    if (!res.ok) {
-      setErr(await readErr(res));
-      setItems([]);
-      return;
-    }
-
-    const data = await res.json().catch(() => null);
-    setItems(Array.isArray(data?.items) ? data.items : []);
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token]);
-
-  const addTa = async () => {
-    if (!token) return;
-    setErr(null);
     setLoading(true);
-
+    setError("");
     try {
-      const e = email.trim().toLowerCase();
-      if (!e) throw new Error("Enter an email");
-
-      const res = await fetch(`${API_BASE}/admin/ta/add`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ email: e }),
+      const res = await fetch(`${API_BASE}/admin/ta/list`, {
+        headers: authHeaders,
+        credentials: "include",
       });
-
-      if (!res.ok) throw new Error(await readErr(res));
-
-      setEmail("");
       const data = await res.json().catch(() => null);
-      setItems(Array.isArray(data?.items) ? data.items : []);
-    } catch (ex: any) {
-      setErr(ex?.message || "Failed to add TA");
+      if (!res.ok) throw new Error(data?.detail || "Failed to load TAs");
+
+      const next = Array.isArray(data?.tas)
+        ? data.tas
+        : Array.isArray(data?.items)
+        ? data.items
+        : [];
+      setTas(next as TaItem[]);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load TAs");
+      setTas([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const removeTa = async (taEmail: string) => {
+  useEffect(() => {
+    if (token && isAdmin) void loadTAs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, isAdmin]);
+
+  const handleAdd = async (e?: FormEvent) => {
+    e?.preventDefault();
+
+    const nextEmail = normalizeEmail(email);
+
+    if (!nextEmail) {
+      setError("Enter a TA email first.");
+      setStatus("");
+      return;
+    }
+
+    if (!isTamuEmail(nextEmail)) {
+      setError("Only @tamu.edu email addresses are allowed.");
+      setStatus("");
+      return;
+    }
+
     if (!token) return;
-    setErr(null);
-    setLoading(true);
+
+    setAdding(true);
+    setError("");
+    setStatus("");
+
+    try {
+      const res = await fetch(`${API_BASE}/admin/ta/add`, {
+        method: "POST",
+        headers: authHeaders,
+        credentials: "include",
+        body: JSON.stringify({ email: nextEmail }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.detail || "Failed to add TA");
+
+      setEmail("");
+      setStatus(`Added ${nextEmail} as a TA.`);
+      await loadTAs();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add TA");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemove = async (taEmail: string) => {
+    if (!token) return;
+
+    const nextEmail = normalizeEmail(taEmail);
+    setRemovingEmail(nextEmail);
+    setError("");
+    setStatus("");
 
     try {
       const res = await fetch(`${API_BASE}/admin/ta/remove`, {
         method: "POST",
-        headers,
-        body: JSON.stringify({ email: taEmail }),
+        headers: authHeaders,
+        credentials: "include",
+        body: JSON.stringify({ email: nextEmail }),
       });
-
-      if (!res.ok) throw new Error(await readErr(res));
-
       const data = await res.json().catch(() => null);
-      setItems(Array.isArray(data?.items) ? data.items : []);
-    } catch (ex: any) {
-      setErr(ex?.message || "Failed to remove TA");
+      if (!res.ok) throw new Error(data?.detail || "Failed to remove TA");
+
+      setStatus(`Removed ${nextEmail}.`);
+      await loadTAs();
+    } catch (e: any) {
+      setError(e?.message || "Failed to remove TA");
     } finally {
-      setLoading(false);
+      setRemovingEmail("");
     }
   };
 
-  const fmt = (ts?: number) => {
-    if (!ts) return "";
-    try {
-      return new Date(ts * 1000).toLocaleString();
-    } catch {
-      return "";
-    }
-  };
-
-  if (!token) {
+  if (!token || !isAdmin) {
     return (
-      <div style={{ padding: 16 }}>
-        <h2 style={{ margin: 0 }}>TA Manager</h2>
-        <p style={{ marginTop: 6, opacity: 0.8 }}>Please login as an admin.</p>
+      <div className="page-shell">
+        <div className="page-wrap">
+          <div className="panel">{!token ? "Please login." : "Admin only."}</div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 16 }}>
-      <h2 style={{ margin: 0 }}>TA Manager</h2>
-      <p style={{ marginTop: 6, opacity: 0.8 }}>
-        Add/remove TA access by email. TAs can upload to the database, but can only delete/move files they uploaded.
-      </p>
-
-      <div style={{ display: "flex", gap: 10, marginTop: 14, maxWidth: 520 }}>
-        <input
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="someone@tamu.edu"
-          style={{ flex: 1, padding: 10, borderRadius: 10, border: "1px solid rgba(0,0,0,0.15)" }}
-        />
-        <button onClick={addTa} disabled={loading} style={{ padding: "10px 14px", borderRadius: 10 }}>
-          {loading ? "..." : "Add"}
-        </button>
-      </div>
-
-      {err && (
-        <div style={{ marginTop: 12, color: "#b00020", fontWeight: 600 }}>
-          {err}
+    <div className="page-shell">
+      <div className="page-wrap tamanage-page">
+        <div className="page-header tamanage-header">
+          <div>
+            <h1 className="page-title">TA Manager</h1>
+            <div className="page-subtitle">
+              Add or remove TA access by email. Only @tamu.edu emails are allowed.
+            </div>
+          </div>
         </div>
-      )}
 
-      <div style={{ marginTop: 18 }}>
-        <div style={{ fontWeight: 700, marginBottom: 8 }}>Current TAs</div>
-        <div style={{ border: "1px solid rgba(0,0,0,0.12)", borderRadius: 12, overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead style={{ background: "rgba(0,0,0,0.04)" }}>
-              <tr>
-                <th style={{ textAlign: "left", padding: 10 }}>Email</th>
-                <th style={{ textAlign: "left", padding: 10 }}>Added By</th>
-                <th style={{ textAlign: "left", padding: 10 }}>Added</th>
-                <th style={{ padding: 10 }} />
-              </tr>
-            </thead>
-            <tbody>
-              {items.length === 0 ? (
+        <div className="card card-pad tamanage-card">
+          <form className="tamanage-add-row" onSubmit={handleAdd}>
+            <div className="tamanage-input-wrap">
+              <input
+                className={`input tamanage-input ${!emailIsValid ? "is-invalid" : ""}`}
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setError("");
+                  setStatus("");
+                }}
+                placeholder="someone@tamu.edu"
+                autoComplete="off"
+              />
+              {!emailIsValid && (
+                <div className="tamanage-warning">
+                  Only @tamu.edu email addresses are allowed.
+                </div>
+              )}
+            </div>
+
+            <button
+              className="btn tamanage-action-btn"
+              type="submit"
+              disabled={adding || !cleanEmail || !emailIsValid}
+            >
+              {adding ? "Adding..." : "Add"}
+            </button>
+          </form>
+
+          {(error || status) && (
+            <div className={`tamanage-message ${error ? "is-error" : "is-success"}`}>
+              {error || status}
+            </div>
+          )}
+        </div>
+
+        <div className="card tamanage-table-card">
+          <div className="tamanage-table-head">
+            <div>
+              <div className="tamanage-section-title">Current TAs</div>
+              <div className="tamanage-section-subtitle">
+                {loading ? "Loading..." : `${tas.length} total`}
+              </div>
+            </div>
+
+            <button className="btn tamanage-action-btn tamanage-action-btn-secondary" onClick={() => void loadTAs()} type="button">
+              Refresh
+            </button>
+          </div>
+
+          <div className="tamanage-table-wrap">
+            <table className="tamanage-table">
+              <thead>
                 <tr>
-                  <td colSpan={4} style={{ padding: 12, opacity: 0.7 }}>
-                    No TAs yet.
-                  </td>
+                  <th>Email</th>
+                  <th>Added By</th>
+                  <th>Added</th>
+                  <th className="tamanage-actions-col">Action</th>
                 </tr>
-              ) : (
-                items.map((it) => (
-                  <tr key={it.email} style={{ borderTop: "1px solid rgba(0,0,0,0.08)" }}>
-                    <td style={{ padding: 10 }}>{it.email}</td>
-                    <td style={{ padding: 10, opacity: 0.8 }}>{it.added_by || ""}</td>
-                    <td style={{ padding: 10, opacity: 0.8 }}>{fmt(it.added_ts)}</td>
-                    <td style={{ padding: 10, textAlign: "right" }}>
-                      <button
-                        onClick={() => removeTa(it.email)}
-                        disabled={loading}
-                        style={{ padding: "8px 10px", borderRadius: 10 }}
-                      >
-                        Remove
-                      </button>
+              </thead>
+              <tbody>
+                {!loading && tas.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="tamanage-empty">
+                      No TAs yet.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  tas.map((ta) => {
+                    const taEmail = normalizeEmail(ta.email);
+                    return (
+                      <tr key={taEmail}>
+                        <td className="tamanage-email">{ta.email}</td>
+                        <td>{ta.added_by || ta.addedBy || "-"}</td>
+                        <td>{formatDate(ta.created_at || ta.createdAt)}</td>
+                        <td className="tamanage-actions-col">
+                          <button
+                            className="btn tamanage-action-btn tamanage-action-btn-secondary"
+                            type="button"
+                            disabled={removingEmail === taEmail}
+                            onClick={() => void handleRemove(taEmail)}
+                          >
+                            {removingEmail === taEmail ? "Removing..." : "Remove"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
