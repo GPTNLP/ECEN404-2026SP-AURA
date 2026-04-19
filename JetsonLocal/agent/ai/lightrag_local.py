@@ -916,7 +916,8 @@ class LightRAG:
         self._bm25_tokens.append(_tokenize(text))
         self._inserts_since_bm25 += 1
         if self._inserts_since_bm25 >= BM25_REBUILD_EVERY:
-            self._bm25 = BM25Okapi(self._bm25_tokens)
+            tokens_snap = list(self._bm25_tokens)
+            self._bm25 = await asyncio.to_thread(BM25Okapi, tokens_snap)
             self._inserts_since_bm25 = 0
 
         # Graph extraction
@@ -1011,7 +1012,8 @@ class LightRAG:
             self._inserts_since_bm25 += 1
 
         if self._inserts_since_bm25 >= BM25_REBUILD_EVERY:
-            self._bm25 = BM25Okapi(self._bm25_tokens)
+            tokens_snap = list(self._bm25_tokens)
+            self._bm25 = await asyncio.to_thread(BM25Okapi, tokens_snap)
             self._inserts_since_bm25 = 0
 
         # ── 3. Graph extraction (sequential — single GPU can't parallelize) ──

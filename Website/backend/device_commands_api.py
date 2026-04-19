@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Literal, Dict, Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -111,9 +111,25 @@ class DeviceCommandPartialIn(BaseModel):
 # Works correctly for a single-process deployment (Azure App Service default).
 _stream_queues: Dict[str, _queue.SimpleQueue] = {}
 
+# Active WebSocket connections from Jetson devices (device_id → WebSocket).
+# Used to push {"notify": "command"} when a command is queued, allowing the
+# Jetson to fetch it immediately instead of waiting for the 5s HTTP poll.
+_ws_connections: Dict[str, WebSocket] = {}
+
+
+async def _ws_push(device_id: str, msg: dict) -> None:
+    """Push a JSON message to the Jetson's WebSocket if connected (best-effort)."""
+    ws = _ws_connections.get(device_id)
+    if ws is None:
+        return
+    try:
+        await ws.send_json(msg)
+    except Exception:
+        _ws_connections.pop(device_id, None)
+
 
 @router.post("/device/admin/command")
-def queue_device_command(payload: DeviceCommandIn, request: Request):
+async def queue_device_command(payload: DeviceCommandIn, request: Request):
     _require_admin(request)
 
     if payload.command not in ALLOWED_COMMANDS:
@@ -148,6 +164,9 @@ def queue_device_command(payload: DeviceCommandIn, request: Request):
     _save_commands(commands)
 
     print(f"[DEVICE_COMMANDS] queued {payload.command} for {payload.device_id} -> {COMMANDS_FILE}")
+
+    # Wake the Jetson immediately over WebSocket so it doesn't wait for the 5s poll.
+    await _ws_push(payload.device_id, {"notify": "command"})
 
     return {"ok": True, "queued": entry}
 
@@ -379,6 +398,45 @@ def flush_jetson_models(payload: DeviceCommandIn, request: Request):
 
     print(f"[DEVICE_COMMANDS] queued flush_models for {payload.device_id}")
     return {"ok": True, "queued": entry}
+
+
+@router.websocket("/device/ws/{device_id}")
+async def device_websocket(
+    device_id: str,
+    websocket: WebSocket,
+    secret: str = Query(default=None),
+):
+    """Persistent WebSocket for cloud → Jetson command push.
+
+    The Jetson connects once on startup and holds the connection open.
+    When a command is queued via POST /device/admin/command, the cloud sends
+    {"notify": "command"} so the Jetson fetches it immediately rather than
+    waiting for the 5-second HTTP poll fallback.
+
+    Authentication: ?secret=<DEVICE_SHARED_SECRET> query param (encrypted in TLS).
+    """
+    expected = os.getenv("DEVICE_SHARED_SECRET", "").strip()
+    if not expected or (secret or "").strip() != expected:
+        await websocket.close(code=1008)  # Policy Violation
+        return
+
+    await websocket.accept()
+    _ws_connections[device_id] = websocket
+    print(f"[WS] Jetson '{device_id}' connected via WebSocket command channel")
+
+    try:
+        # Keep-alive: the Jetson sends periodic pings; websockets library handles
+        # them automatically. We just need to keep recv() running to detect disconnect.
+        while True:
+            await asyncio.wait_for(websocket.receive_text(), timeout=90.0)
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    except Exception:
+        pass
+    finally:
+        if _ws_connections.get(device_id) is websocket:
+            _ws_connections.pop(device_id, None)
+        print(f"[WS] Jetson '{device_id}' disconnected from WebSocket command channel")
 
 
 @router.post("/device/admin/reload_llm")

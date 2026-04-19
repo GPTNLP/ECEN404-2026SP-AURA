@@ -76,10 +76,15 @@ app = FastAPI(title="AURA Jetson Agent")
 api = ApiClient()
 
 runtime_config = {
-    "poll_seconds": 0.05,
+    "poll_seconds": 5.0,
     "heartbeat_seconds": 3,
     "status_seconds": 3,
 }
+
+# Set by ws_command_loop() each time the cloud pushes a command notification.
+# command_loop() waits on this event (with poll_seconds as timeout fallback)
+# so it wakes immediately on push rather than sleeping the full poll interval.
+_ws_notify_event: asyncio.Event = asyncio.Event()
 
 MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
 CAMERA_MODE_PATTERN = "^(raw|detection|colorcode|face)$"
@@ -756,6 +761,47 @@ async def config_loop():
         await asyncio.sleep(int(CONFIG_REFRESH_SECONDS))
 
 
+async def ws_command_loop():
+    """Connect to cloud via WebSocket and wake command_loop on each push notification.
+
+    The cloud sends {"notify": "command"} when a command is queued, allowing
+    command_loop to fetch it in ~10ms instead of waiting up to poll_seconds (5s).
+    Reconnects automatically; errors are non-fatal since HTTP poll is the fallback.
+    """
+    if not API_BASE_URL:
+        return
+
+    # Convert HTTP(S) base URL to WS(S) URL
+    ws_base = API_BASE_URL.rstrip("/")
+    ws_base = ws_base.replace("https://", "wss://").replace("http://", "ws://")
+    ws_url = f"{ws_base}/device/ws/{DEVICE_ID}?secret={DEVICE_SHARED_SECRET}"
+
+    try:
+        import websockets as _websockets
+    except ImportError:
+        quiet_print("ws_import", "[WS] websockets not installed; using HTTP poll only")
+        return
+
+    while True:
+        try:
+            async with _websockets.connect(ws_url, ping_interval=25, ping_timeout=30) as ws:
+                quiet_print("ws_connect", "[WS] connected to cloud command channel")
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=90.0)
+                        try:
+                            msg = json.loads(raw)
+                        except Exception:
+                            continue
+                        if msg.get("notify") == "command":
+                            _ws_notify_event.set()
+                    except asyncio.TimeoutError:
+                        break  # no ping/message in 90s → reconnect
+        except Exception as exc:
+            quiet_print("ws_disconnect", f"[WS] disconnected ({type(exc).__name__}), reconnect in 10s")
+        await asyncio.sleep(10.0)
+
+
 async def command_loop():
     while True:
         try:
@@ -1335,7 +1381,17 @@ async def command_loop():
         except Exception as e:
             quiet_print("command_poll", f"[COMMAND] poll failed: {e}")
 
-        await asyncio.sleep(runtime_config["poll_seconds"])
+        # Wait for a WebSocket push notification or fall back to the periodic poll.
+        # When the cloud pushes {"notify": "command"}, ws_command_loop sets the event
+        # and we wake immediately (~10ms); otherwise we fall through after poll_seconds.
+        try:
+            await asyncio.wait_for(
+                _ws_notify_event.wait(),
+                timeout=runtime_config["poll_seconds"],
+            )
+            _ws_notify_event.clear()
+        except asyncio.TimeoutError:
+            pass
 
 
 async def rag_build_loop():
@@ -1655,6 +1711,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(status_loop())
     asyncio.create_task(flush_loop())
+    asyncio.create_task(ws_command_loop())
     asyncio.create_task(command_loop())
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../services/authService";
+import { useLoadedDb } from "../context/LoadedDbContext";
 import "../styles/chatlogs.css";
 import "../styles/database.css";
 
@@ -120,10 +121,7 @@ function isTerminalBuildStatus(status: BuildStatus) {
 export default function DatabasePage() {
   const { token, user } = useAuth();
   const isAdmin = user?.role === "admin";
-
-  const [loadedDb, setLoadedDb] = useState(
-    () => localStorage.getItem("aura_loaded_db") || ""
-  );
+  const { loadedDb, setLoadedDb } = useLoadedDb();
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<
     | ""
@@ -255,15 +253,11 @@ export default function DatabasePage() {
       setBuildStatus(nextStatus || "idle");
 
       if (nextStatus === "completed") {
-        localStorage.setItem("aura_loaded_db", name);
-        window.dispatchEvent(new Event("aura:loaded-db"));
         setLoadedDb(name);
         setStatus(`✅ Vectorization complete! "${name}" is ready on Jetson.`);
         return true;
       }
       if (nextStatus === "synced") {
-        localStorage.setItem("aura_loaded_db", name);
-        window.dispatchEvent(new Event("aura:loaded-db"));
         setLoadedDb(name);
         setStatus(`✅ Jetson synced "${name}" back to website.`);
         return true;
@@ -296,15 +290,6 @@ export default function DatabasePage() {
     refreshDatabases();
   }, []);
 
-  useEffect(() => {
-    const sync = () => setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
-    window.addEventListener("storage", sync);
-    window.addEventListener("aura:loaded-db", sync as EventListener);
-    return () => {
-      window.removeEventListener("storage", sync);
-      window.removeEventListener("aura:loaded-db", sync as EventListener);
-    };
-  }, []);
 
   useEffect(() => {
     setRenameValue(selected ? basename(selected.path) : "");
@@ -816,9 +801,7 @@ export default function DatabasePage() {
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.detail || "Failed to queue Jetson load");
 
-      localStorage.setItem("aura_loaded_db", activeDb);
-      window.dispatchEvent(new Event("aura:loaded-db"));
-
+      setLoadedDb(activeDb);
       setStatus(`✅ Queued "${activeDb}" to load on Jetson.`);
     } catch (e: any) {
       setStatus(`❌ ${e?.message || String(e)}`);
@@ -874,10 +857,8 @@ export default function DatabasePage() {
         throw new Error(cmdData?.detail || "Jetson delete queue failed");
       }
 
-      const currentLoadedDb = localStorage.getItem("aura_loaded_db") || "";
-      if (currentLoadedDb === activeDb) {
-        localStorage.removeItem("aura_loaded_db");
-        window.dispatchEvent(new Event("aura:loaded-db"));
+      if (loadedDb === activeDb) {
+        setLoadedDb("");
       }
 
       const deletedName = activeDb;

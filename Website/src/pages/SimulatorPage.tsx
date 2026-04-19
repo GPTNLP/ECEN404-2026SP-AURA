@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../services/authService";
+import { useLoadedDb } from "../context/LoadedDbContext";
 import "../styles/chatlogs.css";
 import "../styles/simulator.css";
 
@@ -86,7 +87,7 @@ export default function SimulatorPage() {
   const [loading, setLoading] = useState(false);
   const [apiOnline, setApiOnline] = useState<boolean | null>(null);
   const [statusText, setStatusText] = useState("");
-  const [loadedDb, setLoadedDb] = useState(() => localStorage.getItem("aura_loaded_db") || "");
+  const { loadedDb } = useLoadedDb();
 
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -138,9 +139,6 @@ export default function SimulatorPage() {
     });
   }, [sessions, sessionSearch]);
 
-  const refreshLoadedDb = () => {
-    setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
-  };
 
   const writeLog = async (payload: {
     event: string;
@@ -211,10 +209,7 @@ export default function SimulatorPage() {
       setHistory(normalizeHistory(session.history));
       localStorage.setItem("aura_active_session_id", session.session_id);
 
-      // IMPORTANT:
-      // Do not overwrite the current Jetson-loaded DB from an old saved session.
-      // The Database page is the source of truth for aura_loaded_db.
-      refreshLoadedDb();
+      // Context keeps loadedDb in sync automatically — no manual refresh needed here.
 
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("session_id", session.session_id);
@@ -288,7 +283,6 @@ export default function SimulatorPage() {
     setHistory([]);
     setStatusText("");
     setQuery("");
-    refreshLoadedDb();
     localStorage.removeItem("aura_active_session_id");
 
     const nextUrl = new URL(window.location.href);
@@ -465,15 +459,6 @@ export default function SimulatorPage() {
     });
   }, [history, loading]);
 
-  useEffect(() => {
-    window.addEventListener("storage", refreshLoadedDb);
-    window.addEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
-
-    return () => {
-      window.removeEventListener("storage", refreshLoadedDb);
-      window.removeEventListener("aura:loaded-db", refreshLoadedDb as EventListener);
-    };
-  }, []);
 
   useEffect(() => {
     let timer: number | null = null;
