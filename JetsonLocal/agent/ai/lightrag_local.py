@@ -91,6 +91,16 @@ AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "30"))
 # Batch embedding
 AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "8"))
 
+# Semantic query cache
+# Tier-1 (exact hit): cosine sim ≥ EXACT_THRESH → return cached answer immediately.
+# Tier-2 (context reuse): sim ≥ CTX_THRESH → skip FAISS/BM25, reuse cached passages.
+#   Because the same passages produce the same prompt prefix, Ollama's KV cache
+#   fires automatically and prefill drops from ~3000 tokens to ~30 tokens.
+AURA_CACHE_EXACT_THRESH = float(os.getenv("AURA_CACHE_EXACT_THRESH", "0.93"))
+AURA_CACHE_CTX_THRESH   = float(os.getenv("AURA_CACHE_CTX_THRESH",   "0.82"))
+AURA_CACHE_MAX_ENTRIES  = int(os.getenv("AURA_CACHE_MAX_ENTRIES",    "64"))
+AURA_CACHE_TTL_S        = float(os.getenv("AURA_CACHE_TTL_S",        "3600"))  # 1 h
+
 
 # ─── Data structures ─────────────────────────────────────────────────────────
 
@@ -130,6 +140,74 @@ def _save_json(path: str, obj):
 def _normalize(v: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(v) + 1e-12
     return (v / norm).astype(np.float32)
+
+
+# ─── Semantic query cache ─────────────────────────────────────────────────────
+
+@dataclass
+class _CacheEntry:
+    q_norm:     np.ndarray          # unit-normalized query embedding
+    chunk_hits: List[Dict[str, Any]]
+    sources:    List[str]
+    answer:     str
+    created_at: float               # time.time()
+
+
+class _QueryCache:
+    """
+    Two-tier LRU semantic cache keyed by cosine similarity on query embeddings.
+
+    Tier 1 (exact, sim ≥ EXACT_THRESH): return cached answer immediately.
+    Tier 2 (context, sim ≥ CTX_THRESH): return cached chunk_hits/sources so
+        the caller can skip retrieval. The same passages → same prompt prefix →
+        Ollama KV cache fires → prefill ~30 tokens instead of ~3000.
+    """
+
+    def __init__(self):
+        self._entries: List[_CacheEntry] = []
+
+    def _evict(self):
+        now = time.time()
+        # Remove expired entries
+        self._entries = [e for e in self._entries if now - e.created_at < AURA_CACHE_TTL_S]
+        # LRU eviction when still over capacity
+        if len(self._entries) > AURA_CACHE_MAX_ENTRIES:
+            self._entries = self._entries[-AURA_CACHE_MAX_ENTRIES:]
+
+    def lookup(self, q_norm: np.ndarray) -> Tuple[str, Optional[_CacheEntry]]:
+        """
+        Returns ("exact", entry) | ("context", entry) | ("miss", None).
+        """
+        self._evict()
+        if not self._entries:
+            return "miss", None
+        # Stack all entry vectors and do a single matrix dot product
+        mat = np.stack([e.q_norm for e in self._entries])   # (N, D)
+        sims = mat @ q_norm                                   # (N,)
+        best_idx = int(np.argmax(sims))
+        best_sim = float(sims[best_idx])
+        entry = self._entries[best_idx]
+        if best_sim >= AURA_CACHE_EXACT_THRESH:
+            # Promote to most-recent (LRU touch)
+            self._entries.pop(best_idx)
+            self._entries.append(entry)
+            return "exact", entry
+        if best_sim >= AURA_CACHE_CTX_THRESH:
+            return "context", entry
+        return "miss", None
+
+    def store(self, q_norm: np.ndarray, chunk_hits, sources, answer: str):
+        self._entries.append(_CacheEntry(
+            q_norm=q_norm,
+            chunk_hits=chunk_hits,
+            sources=sources,
+            answer=answer,
+            created_at=time.time(),
+        ))
+        self._evict()
+
+    def clear(self):
+        self._entries.clear()
 
 
 def _tokenize(s: str) -> List[str]:
@@ -539,6 +617,8 @@ class LightRAG:
             embed_model=embed_model_name,
             llm_model=AURA_FAST_LLM,
         )
+
+        self._cache = _QueryCache()
 
         # chunk runtime state
         self._rows: List[Dict[str, Any]] = _load_json(self.meta_path, default=[])
@@ -1166,81 +1246,111 @@ class LightRAG:
             self._extract_query_keywords(query),
         )
 
-        # ── 2. Low-level (local) entity retrieval ─────────────────────────
-        local_entity_hits:   List[Dict] = []
-        local_relation_hits: List[Dict] = []
-        if has_graph and mode in ("local", "hybrid") and keywords["low"]:
-            for er in self._search_entity_local(keywords["low"]):
-                local_entity_hits.append(er)
-                local_relation_hits.extend(er.get("relations", []))
+        q_norm = _normalize(np.array(q_emb, dtype=np.float32))
 
-        # ── 3. Global (high-level) entity vector retrieval ────────────────
-        global_entity_hits: List[Dict] = []
-        if has_graph and mode in ("global", "hybrid"):
-            global_entity_hits = self._search_entity_vector(
-                q_emb, top_k=AURA_GLOBAL_TOP_K
-            )
+        # ── Cache lookup ──────────────────────────────────────────────────
+        cache_tier, cached = self._cache.lookup(q_norm)
 
-        # Merge entity hits, deduplicate by name
-        seen_entities: Set[str] = set()
-        entity_hits: List[Dict] = []
-        for e in local_entity_hits + global_entity_hits:
-            name = e.get("name", "")
-            if name and name not in seen_entities:
-                seen_entities.add(name)
-                entity_hits.append(e)
+        if cache_tier == "exact":
+            # Return cached answer immediately; fire on_token so streaming TTS works
+            if on_token is not None:
+                for tok in cached.answer.split(" "):
+                    await on_token(tok + " ")
+            return {
+                "answer":        cached.answer,
+                "sources":       cached.sources,
+                "hits":          cached.chunk_hits,
+                "entities_used": 0,
+                "relations_used": 0,
+                "_cache":        "exact",
+            }
 
-        # Relation context: from local matches, or top-strength relations
-        relation_hits: List[Dict] = list(local_relation_hits)
-        if not relation_hits and seen_entities:
-            all_rels = self._graph.get("relations", [])
-            for rel in sorted(all_rels, key=lambda r: -r.get("strength", 1)):
-                if rel.get("src") in seen_entities or rel.get("tgt") in seen_entities:
-                    relation_hits.append(rel)
-                if len(relation_hits) >= 5:
-                    break
+        # For context-reuse hits, skip steps 2–4 (retrieval) entirely
+        _reuse_context = cache_tier == "context"
 
-        # ── 4. Chunk-level hybrid retrieval ──────────────────────────────
-        candidates: Dict[int, Dict[str, float]] = {}
+        if _reuse_context:
+            # Skip all retrieval — reuse passages from the semantically similar query.
+            # Same passages → same prompt prefix → Ollama KV cache hits automatically.
+            chunk_hits    = cached.chunk_hits
+            sources       = cached.sources
+            entity_hits   = []
+            relation_hits = []
+        else:
+            # ── 2. Low-level (local) entity retrieval ─────────────────────────
+            local_entity_hits:   List[Dict] = []
+            local_relation_hits: List[Dict] = []
+            if has_graph and mode in ("local", "hybrid") and keywords["low"]:
+                for er in self._search_entity_local(keywords["low"]):
+                    local_entity_hits.append(er)
+                    local_relation_hits.extend(er.get("relations", []))
 
-        for idx, score in self._search_vector(q_emb, top_k=top_k * 2):
-            candidates.setdefault(idx, {})["vec"] = score
+            # ── 3. Global (high-level) entity vector retrieval ────────────────
+            global_entity_hits: List[Dict] = []
+            if has_graph and mode in ("global", "hybrid"):
+                global_entity_hits = self._search_entity_vector(
+                    q_emb, top_k=AURA_GLOBAL_TOP_K
+                )
 
-        if mode in ("bm25", "hybrid", "global"):
-            # Expand BM25 query with extracted keywords: when the raw query term
-            # appears in every chunk its IDF → 0, making BM25 useless. Injecting
-            # semantically related keywords (from the keyword-extraction LLM call)
-            # gives BM25 non-zero signal via those alternative terms.
-            kw_terms = (keywords.get("low") or []) + (keywords.get("high") or [])
-            bm25_q = query + (" " + " ".join(kw_terms) if kw_terms else "")
-            for idx, score in self._search_bm25(bm25_q, top_k=top_k * 2):
-                candidates.setdefault(idx, {})["bm25"] = score
+            # Merge entity hits, deduplicate by name
+            seen_entities: Set[str] = set()
+            entity_hits: List[Dict] = []
+            for e in local_entity_hits + global_entity_hits:
+                name = e.get("name", "")
+                if name and name not in seen_entities:
+                    seen_entities.add(name)
+                    entity_hits.append(e)
 
-        scored: List[Tuple[float, int]] = []
-        for idx, d in candidates.items():
-            vec   = d.get("vec", 0.0)
-            bm    = d.get("bm25", 0.0)
-            # Normalization constant 4.0 (was 8.0): tighter constant spreads BM25
-            # scores further apart, making keyword hits more discriminating.
-            bm_n  = bm / (abs(bm) + 4.0)
-            # 60/40 split (was 75/25): BM25 needs more weight when the query term
-            # appears in nearly every chunk (common in domain-specific docs), so
-            # term-frequency differences within each chunk can override vector rank.
-            total = (0.60 * vec + 0.40 * bm_n) if mode == "hybrid" else (
-                vec if mode == "vector" else bm_n
-            )
-            scored.append((float(total), int(idx)))
+            # Relation context: from local matches, or top-strength relations
+            relation_hits: List[Dict] = list(local_relation_hits)
+            if not relation_hits and seen_entities:
+                all_rels = self._graph.get("relations", [])
+                for rel in sorted(all_rels, key=lambda r: -r.get("strength", 1)):
+                    if rel.get("src") in seen_entities or rel.get("tgt") in seen_entities:
+                        relation_hits.append(rel)
+                    if len(relation_hits) >= 5:
+                        break
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+            # ── 4. Chunk-level hybrid retrieval ──────────────────────────────
+            candidates: Dict[int, Dict[str, float]] = {}
 
-        chunk_hits: List[Dict[str, Any]] = []
-        sources:    List[str] = []
-        for score, idx in scored[:top_k]:
-            r = self._rows[idx]
-            chunk_hits.append({"score": score, "text": r.get("text", ""), "meta": r.get("meta", {})})
-            src = (r.get("meta") or {}).get("source")
-            if isinstance(src, str) and src and src not in sources:
-                sources.append(src)
+            for idx, score in self._search_vector(q_emb, top_k=top_k * 2):
+                candidates.setdefault(idx, {})["vec"] = score
+
+            if mode in ("bm25", "hybrid", "global"):
+                # Expand BM25 query with extracted keywords: when the raw query term
+                # appears in every chunk its IDF → 0, making BM25 useless. Injecting
+                # semantically related keywords (from the keyword-extraction LLM call)
+                # gives BM25 non-zero signal via those alternative terms.
+                kw_terms = (keywords.get("low") or []) + (keywords.get("high") or [])
+                bm25_q = query + (" " + " ".join(kw_terms) if kw_terms else "")
+                for idx, score in self._search_bm25(bm25_q, top_k=top_k * 2):
+                    candidates.setdefault(idx, {})["bm25"] = score
+
+            scored: List[Tuple[float, int]] = []
+            for idx, d in candidates.items():
+                vec   = d.get("vec", 0.0)
+                bm    = d.get("bm25", 0.0)
+                # Normalization constant 4.0 (was 8.0): tighter constant spreads BM25
+                # scores further apart, making keyword hits more discriminating.
+                bm_n  = bm / (abs(bm) + 4.0)
+                # 60/40 split (was 75/25): BM25 needs more weight when the query term
+                # appears in nearly every chunk (common in domain-specific docs), so
+                # term-frequency differences within each chunk can override vector rank.
+                total = (0.60 * vec + 0.40 * bm_n) if mode == "hybrid" else (
+                    vec if mode == "vector" else bm_n
+                )
+                scored.append((float(total), int(idx)))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            chunk_hits: List[Dict[str, Any]] = []
+            sources:    List[str] = []
+            for score, idx in scored[:top_k]:
+                r = self._rows[idx]
+                chunk_hits.append({"score": score, "text": r.get("text", ""), "meta": r.get("meta", {})})
+                src = (r.get("meta") or {}).get("source")
+                if isinstance(src, str) and src and src not in sources:
+                    sources.append(src)
 
         # ── 5. Build context + generate answer ───────────────────────────
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
@@ -1268,10 +1378,13 @@ class LightRAG:
             on_token=on_token,
         )
 
+        self._cache.store(q_norm, chunk_hits, sources, answer)
+
         return {
             "answer":         answer,
             "sources":        sources,
             "hits":           chunk_hits,
             "entities_used":  len(entity_hits),
             "relations_used": len(relation_hits),
+            "_cache":         "context" if _reuse_context else "miss",
         }
