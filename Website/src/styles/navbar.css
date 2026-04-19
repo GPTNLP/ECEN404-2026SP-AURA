@@ -1,4 +1,7 @@
 .navbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   height: 64px;
   display: flex;
   align-items: center;
@@ -11,7 +14,7 @@
 
 .navbar-title {
   font-size: 20px;
-  font-weight: 700;
+  font-weight: 800;
   letter-spacing: 0.2px;
   color: var(--navbar-text);
 }
@@ -35,9 +38,23 @@
   background: var(--accent);
   color: white;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .navbar-logout:hover {
   opacity: 0.9;
+}
+
+@media (max-width: 900px) {
+  .navbar {
+    padding: 0 16px;
+  }
+
+  .navbar-right {
+    gap: 8px;
+  }
+
+  .navbar-user {
+    font-size: 12px;
+  }
 }

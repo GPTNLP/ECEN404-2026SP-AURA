@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../services/authService";
-import "../styles/page-ui.css";
+import "../styles/chatlogs.css";
 import "../styles/database.css";
 
 const API_BASE =

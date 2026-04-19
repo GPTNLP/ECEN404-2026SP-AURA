@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../services/authService";
-import "../styles/page-ui.css";
+import "../styles/chatlogs.css";
 
 type LogItem = {
   ts: number;

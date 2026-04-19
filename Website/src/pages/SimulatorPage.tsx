@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../services/authService";
-import "../styles/page-ui.css";
+import "../styles/page-chatlogs.css";
 import "../styles/simulator.css";
 
 type ChatMsg = {

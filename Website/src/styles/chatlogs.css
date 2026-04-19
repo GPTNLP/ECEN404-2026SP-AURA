@@ -1,13 +1,18 @@
+/* ================= PAGE ================= */
 .chatlogs-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
+  min-width: 0;
 }
 
 .chatlogs-header {
   align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
+/* ================= TABS ================= */
 .chatlogs-tabs {
   display: inline-flex;
   align-items: center;
@@ -24,12 +29,15 @@
   border: 0;
   background: transparent;
   color: var(--muted-text);
-  font-weight: 800;
+  font-weight: 900;
   font-size: 14px;
-  padding: 10px 16px;
+  padding: 10px 18px;
   border-radius: 10px;
   cursor: pointer;
-  transition: 0.18s ease;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
 }
 
 .chatlogs-tab:hover {
@@ -43,13 +51,16 @@
   box-shadow: var(--shadow);
 }
 
+/* ================= LAYOUT ================= */
 .chatlogs-layout {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
   gap: 18px;
   min-height: calc(100vh - 220px);
+  min-width: 0;
 }
 
+/* ================= SIDEBAR ================= */
 .chatlogs-sidebar {
   display: flex;
   flex-direction: column;
@@ -66,15 +77,16 @@
 }
 
 .chatlogs-section-title {
-  font-size: 1.6rem;
+  font-size: 1.75rem;
   font-weight: 900;
+  line-height: 1.05;
   color: var(--text);
 }
 
 .chatlogs-section-subtitle {
   font-size: 13px;
   color: var(--muted-text);
-  margin-top: 3px;
+  margin-top: 4px;
 }
 
 .chatlogs-session-search {
@@ -99,10 +111,14 @@
   text-align: left;
   padding: 14px;
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-columns: 52px minmax(0, 1fr);
   gap: 12px;
   cursor: pointer;
-  transition: 0.18s ease;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
   box-shadow: var(--shadow);
 }
 
@@ -118,13 +134,13 @@
 }
 
 .chatlogs-session-avatar {
-  width: 48px;
-  height: 48px;
+  width: 52px;
+  height: 52px;
   border-radius: 14px;
   display: grid;
   place-items: center;
   font-weight: 900;
-  font-size: 14px;
+  font-size: 15px;
   color: white;
   background: linear-gradient(
     135deg,
@@ -145,10 +161,11 @@
 }
 
 .chatlogs-session-title {
-  font-size: 1.1rem;
+  font-size: 1.08rem;
   font-weight: 900;
   color: var(--text);
   line-height: 1.2;
+  word-break: break-word;
 }
 
 .chatlogs-session-time {
@@ -163,6 +180,7 @@
   color: var(--muted-text);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chatlogs-session-meta {
@@ -183,6 +201,7 @@
   border: 1px solid var(--card-border);
 }
 
+/* ================= THREAD PANEL ================= */
 .chatlogs-thread-panel {
   display: flex;
   flex-direction: column;
@@ -206,18 +225,37 @@
   line-height: 1.05;
   color: var(--text);
   font-weight: 900;
+  word-break: break-word;
 }
 
 .chatlogs-thread-meta {
   margin-top: 8px;
   font-size: 14px;
   color: var(--muted-text);
+  line-height: 1.45;
 }
 
 .chatlogs-thread-dates {
   margin-top: 6px;
   font-size: 12px;
   color: var(--muted-text);
+}
+
+.chatlogs-thread-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.chatlogs-thread-action {
+  color: var(--accent);
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.chatlogs-thread-action.danger {
+  color: #e5484d;
 }
 
 .chatlogs-thread-body {
@@ -243,6 +281,7 @@
   font-weight: 700;
 }
 
+/* ================= MESSAGES ================= */
 .chatlogs-message-row {
   display: flex;
   width: 100%;
@@ -308,6 +347,7 @@
   word-break: break-word;
 }
 
+/* ================= EVENTS ================= */
 .chatlogs-events-panel {
   display: flex;
   flex-direction: column;
@@ -316,7 +356,7 @@
 
 .chatlogs-events-controls {
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) 150px 170px 100px auto auto;
+  grid-template-columns: minmax(260px, 1fr) 150px 170px 100px auto auto;
   gap: 10px;
   align-items: center;
 }
@@ -325,6 +365,76 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  color: var(--muted-text);
+  font-weight: 800;
+}
+
+.chatlogs-events-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  background: var(--card-bg);
+  box-shadow: var(--shadow);
+}
+
+.chatlogs-events-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+}
+
+.chatlogs-events-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  padding: 14px 16px;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--muted-text);
+  background: color-mix(in srgb, var(--card-bg) 90%, var(--accent-soft));
+  border-bottom: 1px solid var(--card-border);
+  white-space: nowrap;
+}
+
+.chatlogs-events-table tbody td {
+  padding: 13px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--card-border) 85%, transparent);
+  vertical-align: top;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.chatlogs-events-table tbody tr:hover {
+  background: color-mix(in srgb, var(--card-bg) 88%, var(--accent-soft));
+}
+
+.chatlogs-events-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chatlogs-event-user,
+.chatlogs-event-prompt {
+  max-width: 280px;
+  word-break: break-word;
+}
+
+.chatlogs-event-role,
+.chatlogs-event-type {
+  font-weight: 900;
+}
+
+.chatlogs-event-role {
+  color: var(--accent);
+}
+
+.chatlogs-event-type.error {
+  color: #e5484d;
+}
+
+.chatlogs-event-latency {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: nowrap;
 }
 
 .chatlogs-pagination {
@@ -332,14 +442,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .chatlogs-pagination-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
+/* ================= RESPONSIVE ================= */
 @media (max-width: 1200px) {
   .chatlogs-layout {
     grid-template-columns: 320px minmax(0, 1fr);

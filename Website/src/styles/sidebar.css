@@ -1,36 +1,30 @@
 :root {
   --sidebar-width: 240px;
-  --sidebar-collapsed-width: 72px;
 }
 
+/* fixed sidebar */
 .sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
   width: var(--sidebar-width);
-
-  /* was height: 100vh; */
-  min-height: 100vh;   /* at least viewport */
-  height: auto;        /* allow it to grow with content */
-
+  height: 100vh;
   background: var(--sidebar-bg);
   color: var(--sidebar-text);
   padding: 14px 12px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--card-border);
-  transition: width 0.2s ease, padding 0.2s ease;
-  overflow: hidden;
-  align-self: stretch; /* important inside flex row */
-}
-
-.sidebar.collapsed {
-  width: var(--sidebar-collapsed-width);
-  padding: 12px 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  z-index: 30;
 }
 
 /* ===== Header ===== */
 .sidebar-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -58,37 +52,13 @@
   color: var(--sidebar-text);
 }
 
-/* Toggle = small, not a giant pill */
-.sidebar-toggle {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  border: 1px solid var(--card-border);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--sidebar-text);
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  transition: background-color 0.18s ease, transform 0.18s ease;
-  flex: 0 0 auto;
-}
-
-.sidebar-toggle:hover {
-  background: var(--sidebar-hover);
-  transform: translateY(-1px);
-}
-
-/* Hide brand when collapsed (no weird A) */
-.sidebar.collapsed .sidebar-brand {
-  display: none;
-}
-
 /* ===== Nav ===== */
 .sidebar-nav {
   display: flex;
   flex-direction: column;
   gap: 14px;
   flex: 1;
+  min-height: 0;
 }
 
 .sidebar-section {
@@ -105,10 +75,6 @@
   margin: 10px 10px 4px;
 }
 
-.sidebar.collapsed .sidebar-section-title {
-  display: none;
-}
-
 /* Link base */
 .sidebar-link {
   text-decoration: none;
@@ -116,6 +82,7 @@
   padding: 10px 12px;
   border-radius: 12px;
   font-size: 14px;
+  font-weight: 700;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -128,7 +95,7 @@
   transform: translateY(-1px);
 }
 
-/* Active = solid pill, no weird outline */
+/* Active */
 .sidebar-link.active {
   background: var(--sidebar-active);
   color: var(--sidebar-text);
@@ -141,31 +108,28 @@
   box-shadow: 0 10px 24px rgba(255, 107, 107, 0.12);
 }
 
-/* Collapsed: icon-only center */
-.sidebar.collapsed .sidebar-link {
-  justify-content: center;
-  padding: 10px;
-}
-
 .sidebar-link-text {
   display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.sidebar.collapsed .sidebar-link-text {
-  display: none;
-}
-
-/* Bottom row (no box) */
+/* Bottom row */
 .sidebar-bottom {
   margin-top: auto;
   padding-top: 10px;
 }
 
-/* Optional: subtle divider before bottom */
 .sidebar-bottom::before {
   content: "";
   display: block;
   height: 1px;
   background: rgba(255, 255, 255, 0.06);
   margin: 0 8px 10px;
+}
+
+@media (max-width: 980px) {
+  :root {
+    --sidebar-width: 220px;
+  }
 }
