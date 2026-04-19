@@ -1,4 +1,8 @@
 /* Database Page Layout */
+.db-page-header {
+  margin-bottom: 18px;
+}
+
 .db-grid {
   display: grid;
   grid-template-columns: 320px minmax(460px, 1.35fr) minmax(340px, 0.95fr);
@@ -35,22 +39,11 @@
 }
 
 .db-panel-sub {
-  font-size: 14px;
-  color: var(--muted-text);
-  margin-top: 6px;
+  display: none;
 }
 
 .db-role-pill {
-  margin-left: 8px;
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--card-border) 72%, var(--accent));
-  background: color-mix(in srgb, var(--card-bg) 82%, var(--accent-soft));
-  color: var(--accent);
-  font-weight: 900;
-  box-shadow: var(--shadow);
-  display: inline-flex;
-  align-items: center;
+  display: none;
 }
 
 /* Inputs */
@@ -174,7 +167,11 @@ textarea.db-input {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.db-inline .db-input {
+  min-width: 180px;
 }
 
 .db-actions {
@@ -189,7 +186,8 @@ textarea.db-input {
 }
 
 .db-tree-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 22px;
   align-items: center;
   gap: 12px;
   padding: 12px 14px;
@@ -245,40 +243,41 @@ textarea.db-input {
 .db-tree-main {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .db-tree-name {
   font-weight: 900;
-  font-size: 1.15rem;
+  font-size: 1.06rem;
   color: var(--text);
-}
-
-.db-tree-path {
-  font-size: 13px;
-  color: var(--muted-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  min-width: 0;
+}
+
+.db-tree-path {
+  display: none;
 }
 
 .db-tree-include {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--muted-text);
-  font-weight: 900;
+  justify-content: center;
+  gap: 0;
+  font-size: 0;
   user-select: none;
   opacity: 1;
   pointer-events: auto;
   white-space: nowrap;
+  width: 22px;
+  height: 22px;
 }
 
 .db-tree-include input[type="checkbox"] {
   accent-color: var(--accent);
   width: 16px;
   height: 16px;
+  margin: 0;
 }
 
 .db-tree-children {
@@ -349,6 +348,7 @@ textarea.db-input {
 
 .db-drop-left {
   min-width: 0;
+  flex: 1 1 220px;
 }
 
 .db-drop-title {
@@ -357,7 +357,7 @@ textarea.db-input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 520px;
+  max-width: 100%;
   color: var(--text);
 }
 
@@ -523,11 +523,46 @@ textarea.db-input {
 }
 
 .db-item-path {
-  font-size: 13px;
-  color: var(--muted-text);
-  white-space: nowrap;
+  display: none;
+}
+
+/* Jetson status */
+.db-jetson-state {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px solid #334155;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.db-jetson-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #475569;
+  flex: 0 0 auto;
+}
+
+.db-jetson-dot.is-live {
+  background: #14f195;
+}
+
+.db-jetson-name {
+  color: #14f195;
+}
+
+.db-jetson-warn {
+  color: #f59e0b;
+  margin-left: 6px;
+}
+
+.db-jetson-empty {
+  color: #64748b;
 }
 
 /* Stats */
@@ -658,10 +693,14 @@ textarea.db-input {
 
   .db-search,
   .db-contents-head,
-  .db-row,
-  .db-inline {
+  .db-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .db-inline {
+    width: 100%;
+    flex-wrap: wrap;
   }
 
   .db-dropzone-top,
@@ -679,5 +718,13 @@ textarea.db-input {
   .db-inline .btn,
   .db-row .btn {
     width: 100%;
+  }
+
+  .db-inline .db-input {
+    width: 100%;
+  }
+
+  .db-tree-row {
+    grid-template-columns: 42px minmax(0, 1fr) 22px;
   }
 }

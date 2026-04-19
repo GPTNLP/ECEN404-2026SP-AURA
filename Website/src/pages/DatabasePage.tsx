@@ -120,9 +120,10 @@ function isTerminalBuildStatus(status: BuildStatus) {
 export default function DatabasePage() {
   const { token, user } = useAuth();
   const isAdmin = user?.role === "admin";
-  const isTA = user?.role === "ta";
 
-  const [loadedDb, setLoadedDb] = useState(() => localStorage.getItem("aura_loaded_db") || "");
+  const [loadedDb, setLoadedDb] = useState(
+    () => localStorage.getItem("aura_loaded_db") || ""
+  );
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<
     | ""
@@ -254,7 +255,6 @@ export default function DatabasePage() {
       setBuildStatus(nextStatus || "idle");
 
       if (nextStatus === "completed") {
-        // Mark this DB as loaded on Jetson — the Jetson built it locally and it's ready to query
         localStorage.setItem("aura_loaded_db", name);
         window.dispatchEvent(new Event("aura:loaded-db"));
         setLoadedDb(name);
@@ -262,7 +262,6 @@ export default function DatabasePage() {
         return true;
       }
       if (nextStatus === "synced") {
-        // Jetson also synced the vectors back — DB is live on Jetson
         localStorage.setItem("aura_loaded_db", name);
         window.dispatchEvent(new Event("aura:loaded-db"));
         setLoadedDb(name);
@@ -275,8 +274,7 @@ export default function DatabasePage() {
       }
       if (nextStatus === "timed_out") {
         setStatus(
-          `⚠️ Build timed out — Jetson stopped responding. ` +
-          `Click "Force Reset" below to unblock.`
+          `⚠️ Build timed out — Jetson stopped responding. Click "Force Reset" below to unblock.`
         );
         return true;
       }
@@ -298,7 +296,6 @@ export default function DatabasePage() {
     refreshDatabases();
   }, []);
 
-  // Keep loadedDb in sync when the Database page sets or clears it
   useEffect(() => {
     const sync = () => setLoadedDb(localStorage.getItem("aura_loaded_db") || "");
     window.addEventListener("storage", sync);
@@ -359,19 +356,14 @@ export default function DatabasePage() {
     };
   }, [buildMonitorActive, activeDb, authHeaders]);
 
-  // On page load (and whenever activeDb changes), fetch the real build status.
-  // If a build is already active we resume monitoring automatically — this means
-  // a stuck "running" job is visible as soon as the admin opens the page, even
-  // after a browser refresh, so they can hit "Force Reset" without guessing.
   useEffect(() => {
     if (!activeDb || !token) return;
-    if (buildMonitorActive) return; // monitor loop already running
+    if (buildMonitorActive) return;
 
     let cancelled = false;
-    fetch(
-      `${API_BASE}/api/databases/${encodeURIComponent(activeDb)}/stats`,
-      { headers: authHeaders }
-    )
+    fetch(`${API_BASE}/api/databases/${encodeURIComponent(activeDb)}/stats`, {
+      headers: authHeaders,
+    })
       .then((r) => r.json().catch(() => null))
       .then((data) => {
         if (cancelled || !data) return;
@@ -379,21 +371,20 @@ export default function DatabasePage() {
         if (!s) return;
         setBuildStatus(s);
         if (isActiveBuildStatus(s)) {
-          // Resume the polling loop so the admin sees live progress/timeout.
           setBuildMonitorActive(true);
         } else if (s === "timed_out") {
           setStatus(
-            `⚠️ Build timed out — Jetson stopped responding. ` +
-            `Click "Force Reset" below to unblock.`
+            `⚠️ Build timed out — Jetson stopped responding. Click "Force Reset" below to unblock.`
           );
         } else if (s === "completed" || s === "synced") {
-          // Show a clear success message so the admin knows they can act.
           setStatus(`✅ "${activeDb}" is built and ready. Build or load as needed.`);
         }
       })
-      .catch(() => { /* silently ignore initial fetch errors */ });
+      .catch(() => {});
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [activeDb, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getDirNode = (dirPath: string) => {
@@ -494,13 +485,13 @@ export default function DatabasePage() {
 
                 <div className="db-tree-main">
                   <div className="db-tree-name">{ch.name}</div>
-                  <div className="db-tree-path">{chPath}</div>
                 </div>
 
                 <label
                   className="db-tree-include"
                   onClick={(e) => e.stopPropagation()}
                   title="Include this folder when building the active database"
+                  aria-label={`Include ${ch.name}`}
                 >
                   <input
                     type="checkbox"
@@ -509,15 +500,10 @@ export default function DatabasePage() {
                       setFolderChecks((p) => ({ ...p, [chPath]: e.target.checked }));
                     }}
                   />
-                  Include
                 </label>
               </div>
 
-              {open && (
-                <div className="db-tree-children">
-                  {renderTree(ch, chPath)}
-                </div>
-              )}
+              {open && <div className="db-tree-children">{renderTree(ch, chPath)}</div>}
             </div>
           );
         })}
@@ -888,8 +874,8 @@ export default function DatabasePage() {
         throw new Error(cmdData?.detail || "Jetson delete queue failed");
       }
 
-      const loadedDb = localStorage.getItem("aura_loaded_db") || "";
-      if (loadedDb === activeDb) {
+      const currentLoadedDb = localStorage.getItem("aura_loaded_db") || "";
+      if (currentLoadedDb === activeDb) {
         localStorage.removeItem("aura_loaded_db");
         window.dispatchEvent(new Event("aura:loaded-db"));
       }
@@ -910,12 +896,6 @@ export default function DatabasePage() {
     for (const f of Array.from(fileList)) dt.items.add(f);
     setFiles(dt.files);
   };
-
-  const selectedLabel = selected
-    ? selected.path
-      ? `${selected.kind.toUpperCase()}: ${selected.path}`
-      : `${selected.kind.toUpperCase()}: (Documents)`
-    : "None";
 
   const ctxTarget = ctx.open ? ctx.target : null;
 
@@ -964,19 +944,9 @@ export default function DatabasePage() {
   return (
     <div className="page-shell">
       <div className="page-wrap">
-        <div className="page-header">
+        <div className="page-header db-page-header">
           <div>
             <h2 className="page-title">Database</h2>
-            <div className="page-subtitle">
-              Manage documents → select folders → build named databases
-            </div>
-          </div>
-
-          <div className="badge" title="Role">
-            Role:
-            <span className="db-role-pill">
-              {isAdmin ? "ADMIN" : isTA ? "TA" : "STUDENT"}
-            </span>
           </div>
         </div>
 
@@ -985,7 +955,6 @@ export default function DatabasePage() {
             <div className="db-panel-head">
               <div>
                 <div className="db-panel-title">Folders</div>
-                <div className="db-panel-sub">Right-click folders for actions</div>
               </div>
 
               <button className="btn btn-primary" disabled={busy !== ""} onClick={refreshTree}>
@@ -1006,34 +975,7 @@ export default function DatabasePage() {
             </div>
 
             <div className="db-scroll">
-              <div
-                className={`db-tree-row ${
-                  selected?.kind === "dir" && selected?.path === "" ? "is-selected" : ""
-                }`}
-                onClick={() => setSelected({ kind: "dir", path: "" })}
-                onContextMenu={(e) =>
-                  openCtxMenu(e, { kind: "dir", path: "", name: "Documents" })
-                }
-                title="Documents"
-              >
-                <button
-                  className="db-tree-toggle"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggle("");
-                  }}
-                  title={isExpanded("") ? "Collapse" : "Expand"}
-                >
-                  {isExpanded("") ? "▾" : "▸"}
-                </button>
-
-                <div className="db-tree-main">
-                  <div className="db-tree-name">Documents</div>
-                  <div className="db-tree-path">(top level)</div>
-                </div>
-              </div>
-
-              {tree ? (isExpanded("") ? renderTree(tree, "") : null) : <div className="muted">No documents yet.</div>}
+              {tree ? renderTree(tree, "") : <div className="muted">No documents yet.</div>}
             </div>
           </div>
 
@@ -1041,9 +983,6 @@ export default function DatabasePage() {
             <div className="db-panel-head">
               <div>
                 <div className="db-panel-title">Files</div>
-                <div className="db-panel-sub">
-                  Selected: <span className="db-mono">{selectedLabel}</span>
-                </div>
               </div>
 
               <div className="db-actions">
@@ -1102,9 +1041,9 @@ export default function DatabasePage() {
               <div className="db-dropzone-top">
                 <div className="db-drop-left">
                   <div className="db-drop-title">
-                    Upload to <span className="db-mono">{selectedDir || "Documents"}</span>
+                    {selectedDir ? basename(selectedDir) : "Documents"}
                   </div>
-                  <div className="db-drop-sub">Drag & drop files here, or browse.</div>
+                  <div className="db-drop-sub">Drag and drop files here, or browse.</div>
                 </div>
 
                 <div className="db-drop-actions">
@@ -1122,7 +1061,11 @@ export default function DatabasePage() {
                   >
                     Browse
                   </button>
-                  <button className="btn btn-primary" onClick={doUpload} disabled={busy !== "" || selectedFiles.length === 0}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={doUpload}
+                    disabled={busy !== "" || selectedFiles.length === 0}
+                  >
                     {busy === "upload" ? "Uploading…" : `Upload (${selectedFiles.length || 0})`}
                   </button>
                 </div>
@@ -1251,7 +1194,6 @@ export default function DatabasePage() {
                       <div className="db-item-ic">{n.type === "dir" ? "📁" : "📄"}</div>
                       <div className="db-item-main">
                         <div className="db-item-name">{n.name}</div>
-                        <div className="db-item-path">{p}</div>
                       </div>
 
                       {n.type === "dir" ? (
@@ -1277,7 +1219,6 @@ export default function DatabasePage() {
             <div className="db-panel-head">
               <div>
                 <div className="db-panel-title">Databases</div>
-                <div className="db-panel-sub">Create, build, load, and delete vector DBs</div>
               </div>
             </div>
 
@@ -1308,54 +1249,30 @@ export default function DatabasePage() {
               <div className="db-mini">
                 Build status: <b>{prettyBuildStatus(buildStatus)}</b>
               </div>
-              <div
-                className="db-mini"
-                style={{
-                  marginTop: 8,
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  background: loadedDb ? "rgba(20,241,149,0.08)" : "rgba(148,163,184,0.08)",
-                  border: `1px solid ${loadedDb ? "#14f195" : "#334155"}`,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span
-                  style={{
-                    width: 9,
-                    height: 9,
-                    borderRadius: "50%",
-                    background: loadedDb ? "#14f195" : "#475569",
-                    flexShrink: 0,
-                    display: "inline-block",
-                  }}
-                />
+              <div className="db-jetson-state">
+                <span className={`db-jetson-dot ${loadedDb ? "is-live" : ""}`} />
                 <span>
                   {loadedDb ? (
                     <>
-                      Jetson active:{" "}
-                      <b style={{ color: "#14f195" }}>{loadedDb}</b>
+                      Jetson active: <b className="db-jetson-name">{loadedDb}</b>
                       {loadedDb !== activeDb && activeDb && (
-                        <span style={{ color: "#f59e0b", marginLeft: 6 }}>
-                          (differs from selection)
-                        </span>
+                        <span className="db-jetson-warn">(differs from selection)</span>
                       )}
                     </>
                   ) : (
-                    <span style={{ color: "#64748b" }}>Nothing loaded on Jetson yet</span>
+                    <span className="db-jetson-empty">Nothing loaded on Jetson yet</span>
                   )}
                 </span>
               </div>
             </div>
 
             <div className="db-box">
-              <div className="db-box-title">Create new DB</div>
+              <div className="db-box-title">Create</div>
               <div className="db-row">
                 <input
                   value={newDbName}
                   onChange={(e) => setNewDbName(e.target.value)}
-                  placeholder="db name (e.g., ecen214)"
+                  placeholder="Database name…"
                   className="db-input"
                 />
                 <button className="btn btn-primary" disabled={busy !== ""} onClick={doCreateDb}>
@@ -1365,7 +1282,6 @@ export default function DatabasePage() {
             </div>
 
             <div className="db-box">
-              <div className="db-box-title">Build / Rebuild</div>
               <button
                 className="btn btn-primary"
                 disabled={busy !== "" || !activeDb || buildMonitorActive || isActiveBuildStatus(buildStatus)}
@@ -1379,21 +1295,27 @@ export default function DatabasePage() {
                   : `Build "${activeDb || "DB"}"`}
               </button>
 
-              {isAdmin && (buildMonitorActive || isActiveBuildStatus(buildStatus) || buildStatus === "timed_out") && (
-                <button
-                  className="btn"
-                  disabled={busy !== ""}
-                  onClick={doCancelBuild}
-                  style={{ width: "100%", marginTop: 6, color: "#dc3545", borderColor: "#dc3545" }}
-                  title="Force-cancel the current build and unblock all database actions"
-                >
-                  {busy === "db-cancel"
-                    ? "Resetting…"
-                    : buildStatus === "timed_out"
-                    ? `Force Reset "${activeDb || "DB"}"`
-                    : `Cancel Build "${activeDb || "DB"}"`}
-                </button>
-              )}
+              {isAdmin &&
+                (buildMonitorActive || isActiveBuildStatus(buildStatus) || buildStatus === "timed_out") && (
+                  <button
+                    className="btn"
+                    disabled={busy !== ""}
+                    onClick={doCancelBuild}
+                    style={{
+                      width: "100%",
+                      marginTop: 8,
+                      color: "#dc3545",
+                      borderColor: "#dc3545",
+                    }}
+                    title="Force-cancel the current build and unblock all database actions"
+                  >
+                    {busy === "db-cancel"
+                      ? "Resetting…"
+                      : buildStatus === "timed_out"
+                      ? `Force Reset "${activeDb || "DB"}"`
+                      : `Cancel Build "${activeDb || "DB"}"`}
+                  </button>
+                )}
             </div>
 
             <div className="db-box">
@@ -1442,7 +1364,7 @@ export default function DatabasePage() {
 
             {ctx.target.kind === "dir" && ctx.target.path !== "" && (
               <button className="db-ctx-item" onClick={ctxToggleInclude}>
-                {folderChecks[ctx.target.path] ? "Uninclude from DB build" : "Include in DB build"}
+                {folderChecks[ctx.target.path] ? "Remove from build" : "Include in build"}
               </button>
             )}
 
