@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import queue as _queue
 import time
 from pathlib import Path
 from typing import Literal, Dict, Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from security import require_role
@@ -94,6 +97,19 @@ class DeviceCommandAckIn(BaseModel):
     status: Literal["completed", "failed"] = "completed"
     note: str | None = None
     result: Optional[Dict[str, Any]] = None
+
+
+class DeviceCommandPartialIn(BaseModel):
+    command_id: str
+    device_id: str
+    text: str  # one sentence chunk from the Jetson
+
+
+# In-memory queues keyed by command_id.  The SSE streaming endpoint creates a
+# queue when the chat command is queued; the Jetson pushes sentences via
+# /device/command/partial; ack_device_command signals done.
+# Works correctly for a single-process deployment (Azure App Service default).
+_stream_queues: Dict[str, _queue.SimpleQueue] = {}
 
 
 @router.post("/device/admin/command")
@@ -185,10 +201,31 @@ def ack_device_command(
     if not updated:
         raise HTTPException(status_code=404, detail="Command not found")
 
+    # Signal the SSE stream generator that the answer is complete
+    q = _stream_queues.get(payload.command_id)
+    if q is not None:
+        answer = (payload.result or {}).get("answer", "") if payload.result else ""
+        event_type = "done" if payload.status == "completed" else "error"
+        q.put({"type": event_type, "text": answer})
+
     return {
         "ok": True,
         "command": updated,
     }
+
+
+@router.post("/device/command/partial")
+def push_partial_result(
+    payload: DeviceCommandPartialIn,
+    x_device_secret: str | None = Header(default=None, alias="X-Device-Secret"),
+):
+    """Receive a sentence chunk from the Jetson during generation and forward it
+    to any active SSE stream for this command."""
+    _require_device_secret(x_device_secret)
+    q = _stream_queues.get(payload.command_id)
+    if q is not None:
+        q.put({"type": "token", "text": payload.text})
+    return {"ok": True}
 
 
 @router.post("/device/admin/chat")
@@ -241,6 +278,80 @@ def chat_via_jetson(payload: DeviceCommandIn, request: Request):
         time.sleep(0.3)
 
     raise HTTPException(status_code=504, detail="Jetson did not respond in time")
+
+
+@router.post("/device/admin/chat/stream")
+async def chat_via_jetson_stream(payload: DeviceCommandIn, request: Request):
+    """SSE endpoint that streams sentence chunks as the Jetson generates them.
+
+    Flow:
+      1. Queue a chat_prompt command (same as /device/admin/chat).
+      2. Create an in-memory SimpleQueue for this command_id.
+      3. Jetson picks up the command, calls /device/command/partial per sentence.
+      4. /device/command/partial puts each sentence in the queue.
+      5. Jetson calls /device/command/ack when done → "done" event is enqueued.
+      6. This generator dequeues events and sends them as SSE to the browser.
+
+    SSE event format:
+      data: {"text": "<sentence>"}   — partial sentence
+      data: {"done": true, "answer": "<full answer>"}  — terminal event
+      data: {"error": "<message>"}   — error terminal event
+    """
+    _require_admin(request)
+
+    if payload.command != "chat_prompt":
+        raise HTTPException(status_code=400, detail="Only chat_prompt supported here")
+
+    commands = _load_commands()
+    now_ms = int(time.time() * 1000)
+    now_s = int(time.time())
+    command_id = f"{payload.device_id}-{now_ms}"
+
+    entry = {
+        "id": command_id,
+        "device_id": payload.device_id,
+        "command": "chat_prompt",
+        "payload": payload.payload or {},
+        "created_at": now_s,
+        "status": "pending",
+    }
+    commands.append(entry)
+    _save_commands(commands)
+
+    # Register queue before returning so ack_partial writes never miss
+    q: _queue.SimpleQueue = _queue.SimpleQueue()
+    _stream_queues[command_id] = q
+
+    async def event_generator():
+        try:
+            deadline = time.time() + 180
+            keepalive_ticks = 0
+            while time.time() < deadline:
+                try:
+                    event = q.get_nowait()
+                    if event["type"] == "token":
+                        yield f"data: {json.dumps({'text': event['text']})}\n\n"
+                    elif event["type"] == "done":
+                        yield f"data: {json.dumps({'done': True, 'answer': event['text']})}\n\n"
+                        return
+                    elif event["type"] == "error":
+                        yield f"data: {json.dumps({'error': event['text']})}\n\n"
+                        return
+                except _queue.Empty:
+                    await asyncio.sleep(0.1)
+                    keepalive_ticks += 1
+                    if keepalive_ticks >= 30:  # every ~3 s
+                        yield ": keepalive\n\n"
+                        keepalive_ticks = 0
+            yield f"data: {json.dumps({'error': 'Jetson did not respond in time'})}\n\n"
+        finally:
+            _stream_queues.pop(command_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/device/admin/flush_models")

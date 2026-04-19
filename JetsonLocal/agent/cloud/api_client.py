@@ -102,6 +102,18 @@ class ApiClient:
         r.raise_for_status()
         return r.json()
 
+    def ack_partial(self, command_id: str, device_id: str, text: str) -> None:
+        """Push a partial sentence to the cloud SSE stream (best-effort, errors ignored)."""
+        try:
+            self.session.post(
+                self._url("/device/command/partial"),
+                json={"command_id": command_id, "device_id": device_id, "text": text},
+                headers=self._headers(),
+                timeout=5.0,
+            )
+        except Exception:
+            pass  # partial streaming is best-effort; never block generation
+
     def download_document(self, path: str, dest_path: str) -> None:
         r = self.session.get(
             self._url("/api/documents/download"),

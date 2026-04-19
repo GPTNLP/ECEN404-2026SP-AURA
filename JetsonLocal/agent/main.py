@@ -1,6 +1,7 @@
 import sys
 import time
 import asyncio
+import json
 import os
 import re as _re
 import traceback
@@ -1127,8 +1128,27 @@ async def command_loop():
                         print(f"[CHAT] running RAG query on db='{rag_manager.active_db_name}': {query}")
                         set_ui_state("THINKING", truncate_for_ui(query))
 
+                        # Stream sentence chunks back to the cloud so the website
+                        # SSE endpoint can relay them to the browser progressively.
+                        _partial_buf: List[str] = []
+
+                        async def _partial_on_token(tok: str) -> None:
+                            _partial_buf.append(tok)
+                            sentence, remainder = _pop_sentence("".join(_partial_buf))
+                            if sentence:
+                                _partial_buf.clear()
+                                _partial_buf.append(remainder)
+                                # Fire-and-forget: run HTTP call concurrently so
+                                # token generation is never blocked waiting for ACK.
+                                asyncio.create_task(
+                                    asyncio.to_thread(api.ack_partial, command_id, DEVICE_ID, sentence)
+                                )
+
                         try:
-                            answer = await query_rag_with_timeout(query, CHAT_RAG_TIMEOUT_SECONDS)
+                            answer = await asyncio.wait_for(
+                                rag_manager.query(query, on_token=_partial_on_token),
+                                timeout=CHAT_RAG_TIMEOUT_SECONDS,
+                            )
                         except asyncio.TimeoutError:
                             answer = "I timed out while generating a response."
 
@@ -1789,13 +1809,65 @@ async def rag_build(req: _BuildRagRequest):
 
 
 @app.post("/rag/chat")
-async def rag_chat(req: _ChatRequest):
+async def rag_chat(req: _ChatRequest, stream: bool = Query(False)):
     session_id = req.session_id or chat_manager.active_session_id
     if session_id != chat_manager.active_session_id:
         chat_manager.set_session(session_id)
 
     chat_manager.add_message("user", req.query, api, DEVICE_ID)
 
+    if stream:
+        # SSE streaming path: yields sentence chunks as they are generated so the
+        # caller (nano_main.py touchscreen, or any direct client) sees tokens
+        # progressively rather than waiting for the full answer.
+        async def _event_generator():
+            sentence_buf: List[str] = []
+            token_q: asyncio.Queue = asyncio.Queue(maxsize=512)
+
+            async def _on_tok(tok: str) -> None:
+                sentence_buf.append(tok)
+                sentence, remainder = _pop_sentence("".join(sentence_buf))
+                if sentence:
+                    sentence_buf.clear()
+                    sentence_buf.append(remainder)
+                    await token_q.put(sentence)
+
+            async def _run():
+                try:
+                    ans = await asyncio.wait_for(
+                        rag_manager.query(req.query, on_token=_on_tok),
+                        timeout=CHAT_RAG_TIMEOUT_SECONDS,
+                    )
+                    if isinstance(ans, dict):
+                        ans = ans.get("answer") or ans.get("response") or str(ans)
+                    ans = str(ans or "").strip() or "No response generated from model."
+                    chat_manager.add_message("assistant", ans, api, DEVICE_ID)
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+                finally:
+                    leftover = "".join(sentence_buf).strip()
+                    if leftover:
+                        await token_q.put(leftover)
+                    await token_q.put(None)
+
+            asyncio.create_task(_run())
+
+            while True:
+                chunk = await token_q.get()
+                if chunk is None:
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    break
+                yield f"data: {json.dumps({'text': chunk})}\n\n"
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Non-streaming path (unchanged — used by command loop and legacy callers)
     try:
         answer = await query_rag_with_timeout(req.query, CHAT_RAG_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:

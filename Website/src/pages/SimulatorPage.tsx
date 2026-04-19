@@ -339,7 +339,12 @@ export default function SimulatorPage() {
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
 
-      const res = await fetch(`${API_URL}/device/admin/chat`, {
+      // SSE streaming path: add a placeholder assistant bubble and fill it as
+      // sentences arrive, so the user sees the response being typed in real-time.
+      const placeholderMsg: ChatMsg = { role: "assistant", content: "", ts: Math.floor(Date.now() / 1000) };
+      setHistory([...optimisticHistory, placeholderMsg]);
+
+      const res = await fetch(`${API_URL}/device/admin/chat/stream`, {
         method: "POST",
         headers,
         credentials: "include",
@@ -355,30 +360,50 @@ export default function SimulatorPage() {
         signal: controller.signal,
       });
 
-      let data: ChatResponse | null = null;
-      try {
-        data = (await res.json()) as ChatResponse;
-      } catch {
-        data = null;
-      }
-
       if (!res.ok) {
-        const msg = data?.detail || data?.message || `Request failed (${res.status})`;
-        throw new Error(msg);
+        let errDetail = `Request failed (${res.status})`;
+        try { const e = await res.json(); errDetail = e?.detail || e?.message || errDetail; } catch { /* */ }
+        throw new Error(errDetail);
       }
 
-      const answer =
-        typeof data?.answer === "string" && data.answer.trim()
-          ? data.answer
-          : "(No answer returned)";
+      // Read the SSE stream and progressively update the placeholder bubble
+      let accumulated = "";
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-      const aiMsg: ChatMsg = {
-        role: "assistant",
-        content: answer,
-        ts: Math.floor(Date.now() / 1000),
-      };
+      outer: while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw) continue;
+          try {
+            const obj = JSON.parse(raw) as { text?: string; done?: boolean; answer?: string; error?: string };
+            if (obj.error) throw new Error(obj.error);
+            if (obj.done) { if (obj.answer) accumulated = obj.answer; break outer; }
+            if (obj.text) {
+              accumulated += obj.text;
+              const current = accumulated;
+              setHistory(prev => {
+                const next = [...prev];
+                next[next.length - 1] = { role: "assistant", content: current, ts: placeholderMsg.ts };
+                return next;
+              });
+            }
+          } catch (parseErr: any) {
+            if (parseErr?.message !== "Unexpected token") throw parseErr;
+          }
+        }
+      }
 
-      const finalHistory = [...optimisticHistory, aiMsg];
+      const answer = accumulated.trim() || "(No answer returned)";
+
+      const finalHistory = [...optimisticHistory, { role: "assistant" as const, content: answer, ts: placeholderMsg.ts }];
       setHistory(finalHistory);
       setActiveSessionTitle(inferredTitle);
 

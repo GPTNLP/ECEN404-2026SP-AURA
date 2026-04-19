@@ -1485,24 +1485,65 @@ class AuraConsoleApp:
         self.llm_entry.configure(state="disabled")
 
         self._llm_history.append(("user", query))
+        # Reserve an assistant slot that we'll fill progressively via streaming
+        self._llm_history.append(("assistant", ""))
         self._llm_redraw()
 
         def _call():
             try:
-                result = self._http_json_post("/rag/chat", {"query": query}, timeout=120.0)
-                answer = result.get("answer") or "(no response from model)"
-                self.root.after(0, lambda: self._llm_got_response(answer, None))
+                # SSE streaming: update the panel sentence-by-sentence so the
+                # touchscreen sees tokens appear rather than waiting for the full answer.
+                req = request.Request(
+                    f"{API_BASE}/rag/chat?stream=true",
+                    data=json.dumps({"query": query}).encode(),
+                    method="POST",
+                )
+                req.add_header("Content-Type", "application/json")
+                req.add_header("Accept", "text/event-stream")
+
+                accumulated = ""
+                with request.urlopen(req, timeout=120.0) as resp:
+                    for raw in resp:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line.startswith("data:"):
+                            continue
+                        payload_str = line[5:].strip()
+                        try:
+                            obj = json.loads(payload_str)
+                        except Exception:
+                            continue
+                        if obj.get("done"):
+                            break
+                        chunk = obj.get("text", "")
+                        if chunk:
+                            accumulated += chunk
+                            _acc = accumulated
+                            self.root.after(0, lambda a=_acc: self._llm_stream_chunk(a))
+
+                self.root.after(0, lambda: self._llm_got_response(accumulated or "(no response)", None))
             except Exception as exc:
                 self.root.after(0, lambda: self._llm_got_response(None, str(exc)))
 
         threading.Thread(target=_call, daemon=True).start()
 
+    def _llm_stream_chunk(self, accumulated: str):
+        """Replace the last assistant entry with the growing streamed answer."""
+        if self._llm_history and self._llm_history[-1][0] == "assistant":
+            self._llm_history[-1] = ("assistant", accumulated)
+            self._llm_redraw()
+
     def _llm_got_response(self, answer, err):
         self._llm_thinking = False
         if err:
-            self._llm_history.append(("error", err))
+            if self._llm_history and self._llm_history[-1][0] == "assistant":
+                self._llm_history[-1] = ("error", err)
+            else:
+                self._llm_history.append(("error", err))
         else:
-            self._llm_history.append(("assistant", answer))
+            if self._llm_history and self._llm_history[-1][0] == "assistant":
+                self._llm_history[-1] = ("assistant", answer)
+            else:
+                self._llm_history.append(("assistant", answer))
         self._llm_redraw()
         self.llm_send_btn.configure(state="normal", bg="#14f195")
         self.llm_entry.configure(state="normal")
