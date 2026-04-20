@@ -34,14 +34,6 @@ ensure_user_owns_path() {
     fi
 }
 
-safe_remove_path() {
-    local path="$1"
-    if [ -e "$path" ]; then
-        echo "Removing existing path: $path"
-        sudo rm -rf "$path"
-    fi
-}
-
 # -----------------------------
 # System packages
 # -----------------------------
@@ -91,10 +83,6 @@ if [ -f "$OLLAMA_SVC" ]; then
         sudo sed -i '/\[Service\]/a Environment="OLLAMA_KV_CACHE_TYPE=q8_0"' "$OLLAMA_SVC"
         CHANGED=1
     fi
-    # Speculative decoding: llama3.2:1b drafts 4 tokens per step that the 3b
-    # generator verifies in one batch pass — yields ~1.3–1.5x generation speedup.
-    # Both models share the LLaMA-3 vocabulary, so they are compatible.
-    # Requires Ollama >= 0.4.x (installed by the curl | sh line above).
     if ! grep -q 'OLLAMA_DRAFT_MODEL' "$OLLAMA_SVC"; then
         sudo sed -i '/\[Service\]/a Environment="OLLAMA_DRAFT_MODEL=llama3.2:1b"' "$OLLAMA_SVC"
         CHANGED=1
@@ -109,34 +97,23 @@ if [ -f "$OLLAMA_SVC" ]; then
 fi
 
 echo "Downloading models..."
-# Pull explicit Q4_K_M quantization: optimal speed/quality on the Jetson Orin Nano.
-# llama3.2 (3b) = generator; llama3.2:1b = keyword extraction + speculative draft.
 ollama pull llama3.2:latest
 ollama pull llama3.2:1b-instruct-q4_K_M
 ollama pull nomic-embed-text
 
 # -----------------------------
-# Reuse or rebuild venv
+# Reuse existing venv only
 # -----------------------------
 VENV_DIR="$PROJECT_DIR/aura_env"
-REBUILD_VENV="${REBUILD_VENV:-0}"
 
 if [ -d "$VENV_DIR" ]; then
     echo "Existing aura_env detected"
-    ensure_user_owns_path "$VENV_DIR"
-
-    if [ "$REBUILD_VENV" = "1" ]; then
-        echo "REBUILD_VENV=1 -> removing old venv"
-        safe_remove_path "$VENV_DIR"
-    fi
-fi
-
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating fresh virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    echo "Reusing existing virtual environment (will not delete it)"
     ensure_user_owns_path "$VENV_DIR"
 else
-    echo "Reusing existing virtual environment"
+    echo "No aura_env found, creating a fresh virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    ensure_user_owns_path "$VENV_DIR"
 fi
 
 # shellcheck disable=SC1091
@@ -149,7 +126,7 @@ unset PYTHONUSERBASE
 echo "Upgrading pip/setuptools/wheel..."
 python -m pip install --upgrade pip setuptools wheel
 
-echo "Installing Python requirements..."
+echo "Installing Python requirements into existing venv..."
 python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 
 echo "Installing Jetson-specific Python libraries..."
@@ -163,9 +140,62 @@ cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-cd "$PROJECT_DIR"
-source "$VENV_DIR/bin/activate"
+PROJECT_DIR="$PROJECT_DIR"
+VENV_DIR="$VENV_DIR"
+DEFAULT_BRANCH="main"
 
+echo "[start_aura] project: \$PROJECT_DIR"
+cd "\$PROJECT_DIR"
+
+wait_for_github() {
+  local tries=10
+  local i
+  for ((i=1; i<=tries; i++)); do
+    if getent hosts github.com >/dev/null 2>&1; then
+      echo "[start_aura] github.com resolved"
+      return 0
+    fi
+    echo "[start_aura] waiting for network... (\$i/\$tries)"
+    sleep 3
+  done
+  return 1
+}
+
+repo_is_clean() {
+  git diff --quiet &&
+  git diff --cached --quiet &&
+  [ -z "\$(git ls-files --others --exclude-standard)" ]
+}
+
+if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  CURRENT_BRANCH="\$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "\$DEFAULT_BRANCH")"
+  echo "[start_aura] current branch: \$CURRENT_BRANCH"
+
+  if wait_for_github; then
+    echo "[start_aura] fetching latest code..."
+    if git fetch origin "\$CURRENT_BRANCH"; then
+      if repo_is_clean; then
+        echo "[start_aura] repo clean, pulling latest code..."
+        if git pull --ff-only origin "\$CURRENT_BRANCH"; then
+          echo "[start_aura] git pull complete"
+        else
+          echo "[start_aura] git pull failed, continuing with local files"
+        fi
+      else
+        echo "[start_aura] repo has local changes; skipping auto-pull"
+        git status --short || true
+      fi
+    else
+      echo "[start_aura] git fetch failed, continuing with local files"
+    fi
+  else
+    echo "[start_aura] network not ready, continuing with local files"
+  fi
+else
+  echo "[start_aura] warning: \$PROJECT_DIR is not a git repo"
+fi
+
+source "\$VENV_DIR/bin/activate"
 exec python agent/main.py
 EOF
 
@@ -252,21 +282,19 @@ echo "Setup Complete"
 echo "===================================="
 echo ""
 echo "What this now does:"
-echo "1. Fixes old root-owned aura_env issues"
-echo "2. Reuses aura_env by default"
-echo "3. Rebuilds aura_env only if REBUILD_VENV=1"
-echo "4. Installs all Python/system dependencies into the venv"
+echo "1. Reuses your current aura_env"
+echo "2. Never deletes aura_env"
+echo "3. Updates packages inside the existing venv"
+echo "4. Rewrites start_aura.sh"
 echo "5. Auto-starts agent/main.py on boot"
-echo "6. Auto-applies /dev/ttyACM0 permissions"
-echo "7. Auto-rotates display left on login"
+echo "6. Attempts git fetch/pull on boot only if repo is clean"
+echo "7. Auto-applies /dev/ttyACM0 permissions"
+echo "8. Auto-rotates display left on login"
 echo ""
 echo "Useful commands:"
 echo "systemctl status $SERVICE_NAME"
 echo "journalctl -u $SERVICE_NAME -f"
+echo "cat $PROJECT_DIR/start_aura.sh"
 echo ""
-echo "If you still hit permission issues, run this once:"
-echo "sudo chown -R $USER_NAME:$USER_NAME \"$PROJECT_DIR\""
-echo ""
-echo "Reboot recommended:"
-echo "sudo reboot"
+echo "No reboot required. This script already restarts the service."
 echo ""
