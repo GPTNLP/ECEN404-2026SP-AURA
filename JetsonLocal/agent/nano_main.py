@@ -2536,6 +2536,7 @@ class AuraConsoleApp:
     # =========================
 
 
+
     def _format_live_line(self, line: str):
         line = (line or "").strip()
         if not line:
@@ -2547,7 +2548,23 @@ class AuraConsoleApp:
                 state, detail = [part.strip() for part in body.split("|", 1)]
             else:
                 state, detail = body, ""
-            return f"{state}: {detail}" if detail else state
+
+            state = state.upper()
+            if state == "READY":
+                return None
+            if state == "LISTENING":
+                return "Listening..."
+            if state == "THINKING":
+                return f"Thinking: {detail}" if detail else "Thinking..."
+            if state == "SPEAKING":
+                return f"Speaking: {detail}" if detail else "Speaking..."
+            if state == "VECTORIZING":
+                return f"Vectorizing: {detail}" if detail else "Vectorizing..."
+            if state == "COMMAND":
+                return f"Command: {detail}" if detail else "Command sent"
+            if state == "ERROR":
+                return f"Error: {detail}" if detail else "Error"
+            return None
 
         if line.startswith("=") or line.startswith("-" * 10):
             return None
@@ -2558,12 +2575,7 @@ class AuraConsoleApp:
             return "Heard: " + line.split(":", 1)[1].strip()
 
         if line.startswith("INTENT:"):
-            value = line.split(":", 1)[1].strip().upper()
-            if value == "LLM":
-                return "Mode: CHAT"
-            if value == "MOVEMENT":
-                return "Mode: MOVE"
-            return "Mode: " + value
+            return None
 
         if line.startswith("MOVEMENT:"):
             value = line.split(":", 1)[1].strip()
@@ -2598,44 +2610,25 @@ class AuraConsoleApp:
             return "Camera idle"
         if "[STARTUP] LLM warmup skipped" in line:
             return "LLM warmup skipped"
-        if "[CAMERA] ready" in line:
-            return "Camera ready"
         if "[SERIAL] Connect failed:" in line:
             return "ESP32 not connected"
 
-        if "[UI]" in line or "[UI ERROR]" in line:
-            return line
-
         if "[RAG JOB]" in line:
             text = line.split("[RAG JOB]", 1)[-1].strip()
-            return f"[RAG] {text}"[:120]
-        if "[LightRAG]" in line:
-            text = line.split("[LightRAG]", 1)[-1].strip()
-            return f"[RAG] {text}"[:120]
+            if text:
+                return f"RAG: {text}"[:120]
+            return "RAG job running"
 
-        if "error" in line.lower() or "failed" in line.lower():
+        if "[UI ERROR]" in line:
             return line[:120]
 
-        if (
-            "[STARTUP]" in line
-            or "[RAG]" in line
-            or "[TTS]" in line
-            or "[CAMERA]" in line
-            or "[COMMAND]" in line
-            or "[CHAT]" in line
-            or "[VOICE]" in line
-            or "[WS]" in line
-            or "[STATUS]" in line
-            or "[REGISTER]" in line
-            or "[CONFIG]" in line
-            or "[FLUSH]" in line
-        ):
+        low = line.lower()
+        if "traceback" in low:
+            return "Python traceback"
+        if "error" in low or "failed" in low:
             return line[:120]
 
-        if line.startswith("["):
-            return line[:120]
-
-        return line[:120] if any(ch.isalpha() for ch in line) else None
+        return None
 
     # =========================
     # Journal reader
