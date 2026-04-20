@@ -702,7 +702,7 @@ export default function SimulatorPage() {
                 );
               })}
 
-              {loading && (
+              {loading && (history.length === 0 || history[history.length - 1].content === "") && (
                 <div className="simulator-message-row assistant">
                   <div className="simulator-message assistant typing">
                     <div className="simulator-message-top">

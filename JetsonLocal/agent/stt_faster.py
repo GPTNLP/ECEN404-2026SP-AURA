@@ -46,6 +46,14 @@ DEFAULT_TASK = "transcribe"
 
 WAKE_COOLDOWN_SECONDS = 0.8
 
+# Initial prompt biases Whisper toward electronics/lab vocabulary.
+# Without this, "MOSFET" gets transcribed as "most fit", "op-amp" as "op amp", etc.
+_INITIAL_PROMPT = (
+    "Electronics lab assistant. Vocabulary: MOSFET, op-amp, resistor, capacitor, "
+    "inductor, oscilloscope, multimeter, breadboard, Arduino, Jetson, voltage, current, "
+    "frequency, bandwidth, Ohm's law, circuit, schematic, datasheet, microcontroller."
+)
+
 # Optional: manually force a specific mic by index.
 # Set to an integer like 1, 2, 3 if you know the correct input device.
 MANUAL_INPUT_DEVICE = None
@@ -598,9 +606,9 @@ class STTService:
 
         mono = mono * NEAR_FIELD_BOOST
 
-        peak = np.max(np.abs(mono)) if len(mono) else 0.0
-        if peak > 0 and peak < 0.25:
-            mono = mono / peak * min(0.55, peak * 2.2)
+        peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
+        if peak > 0.001:
+            mono = (mono / peak) * 0.5
 
         mono = np.nan_to_num(mono, nan=0.0, posinf=0.0, neginf=0.0)
         mono = np.clip(mono, -1.0, 1.0)
@@ -619,12 +627,19 @@ class STTService:
         if len(audio) == 0:
             return np.zeros(1, dtype=np.float32)
 
-        duration = len(audio) / orig_sr
-        old_times = np.linspace(0, duration, num=len(audio), endpoint=False)
-        new_length = max(1, int(duration * target_sr))
-        new_times = np.linspace(0, duration, num=new_length, endpoint=False)
+        try:
+            from scipy.signal import resample_poly
+            from math import gcd
+            g = gcd(int(target_sr), int(orig_sr))
+            up, down = int(target_sr) // g, int(orig_sr) // g
+            out = resample_poly(audio, up, down).astype(np.float32)
+        except Exception:
+            duration = len(audio) / orig_sr
+            old_times = np.linspace(0, duration, num=len(audio), endpoint=False)
+            new_length = max(1, int(duration * target_sr))
+            new_times = np.linspace(0, duration, num=new_length, endpoint=False)
+            out = np.interp(new_times, old_times, audio).astype(np.float32)
 
-        out = np.interp(new_times, old_times, audio).astype(np.float32)
         out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
         return out
 
@@ -750,14 +765,16 @@ class STTService:
             audio_16k,
             task=self.task,
             language=self.language,
+            initial_prompt=_INITIAL_PROMPT,
             vad_filter=True,
             vad_parameters={
                 "min_silence_duration_ms": 250,
                 "speech_pad_ms": 120,
             },
-            beam_size=2,
-            best_of=2,
+            beam_size=5,
+            best_of=3,
             temperature=0.0,
+            no_speech_threshold=0.5,
             condition_on_previous_text=False,
             without_timestamps=True,
         )
