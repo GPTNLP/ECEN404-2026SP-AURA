@@ -76,9 +76,9 @@ app = FastAPI(title="AURA Jetson Agent")
 api = ApiClient()
 
 runtime_config = {
-    "poll_seconds": 5.0,
+    "poll_seconds": 1.0,
     "heartbeat_seconds": 3,
-    "status_seconds": 3,
+    "status_seconds": 1,
 }
 
 # Set by ws_command_loop() each time the cloud pushes a command notification.

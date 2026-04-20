@@ -61,7 +61,7 @@ const API_BASE =
 const DEVICE_ID =
   (import.meta.env.VITE_DEVICE_ID as string | undefined)?.trim() || "jetson-001";
 
-const STALE_AFTER_SECONDS = 15;
+const STALE_AFTER_SECONDS = 20;
 
 function thermalStatus(tempC?: number | null): HealthStatus {
   if (tempC == null) return "WARN";
@@ -187,7 +187,7 @@ export default function DashboardPage() {
     void load();
     const id = window.setInterval(() => {
       void load();
-    }, 2000);
+    }, 1000);
     const clock = window.setInterval(() => setNowMs(Date.now()), 1000);
 
     return () => {
