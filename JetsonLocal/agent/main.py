@@ -153,6 +153,23 @@ def get_voice_status_source() -> Optional[STTService]:
     return button_stt_service or stt_service
 
 
+async def dispatch_movement_command(cmd: str, value: str = "") -> str:
+    cmd = (cmd or "").strip().lower()
+    value = value or ""
+
+    if cmd == "stop":
+        quiet_print("command_stop_requested", "[COMMAND] stop override requested")
+        set_ui_state("COMMAND", "stop override")
+        await asyncio.to_thread(serial_link.send_command, cmd, value)
+        quiet_print("command_stop_sent", "[COMMAND] stop override sent")
+        return "Sent stop override: ESP should stop and return home"
+
+    quiet_print("command_move_requested", f"[COMMAND] movement requested: {cmd}")
+    set_ui_state("COMMAND", cmd)
+    await asyncio.to_thread(serial_link.send_command, cmd, value)
+    return f"Sent movement command: {cmd}"
+
+
 # -------------------------------------------------------------------
 # LOGGING HELPERS
 # -------------------------------------------------------------------
@@ -973,19 +990,21 @@ async def command_loop():
 
                 if cmd in MOVEMENT_COMMANDS:
                     try:
-                        serial_link.send_command(cmd, payload.get("value", ""))
-                        set_ui_state("COMMAND", cmd)
+                        note = await dispatch_movement_command(cmd, payload.get("value", ""))
                         await asyncio.to_thread(
                             api.ack_command,
                             {
                                 "command_id": command_id,
                                 "device_id": DEVICE_ID,
                                 "status": "completed",
-                                "note": f"Sent movement command: {cmd}",
+                                "note": note,
                             },
                         )
                         quiet_print("command", f"[COMMAND] ok {cmd}")
-                        set_ui_state("READY", "Ready")
+                        if cmd == "stop":
+                            set_ui_state("READY", "Stop sent")
+                        else:
+                            set_ui_state("READY", "Ready")
                     except Exception as e:
                         set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(

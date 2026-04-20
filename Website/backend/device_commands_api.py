@@ -85,6 +85,70 @@ def _is_active_status(status: str | None) -> bool:
     return status in {"pending", "delivered"}
 
 
+def _cancel_pending_movement_commands(
+    commands: list[dict],
+    device_id: str,
+    reason: str,
+) -> None:
+    now_s = int(time.time())
+    for item in commands:
+        if item.get("device_id") != device_id:
+            continue
+        if item.get("command") not in MOVEMENT_COMMANDS:
+            continue
+        if item.get("status") != "pending":
+            continue
+
+        item["status"] = "cancelled"
+        item["acked_at"] = now_s
+        item["note"] = reason
+
+
+
+def _select_next_command(commands: list[dict], device_id: str) -> dict | None:
+    now_s = int(time.time())
+
+    latest_stop_index: int | None = None
+    for idx in range(len(commands) - 1, -1, -1):
+        item = commands[idx]
+        if item.get("device_id") != device_id:
+            continue
+        if item.get("status") != "pending":
+            continue
+        if item.get("command") == "stop":
+            latest_stop_index = idx
+            break
+
+    if latest_stop_index is not None:
+        next_cmd = commands[latest_stop_index]
+
+        for idx, item in enumerate(commands):
+            if idx == latest_stop_index:
+                continue
+            if item.get("device_id") != device_id:
+                continue
+            if item.get("command") not in MOVEMENT_COMMANDS:
+                continue
+            if item.get("status") != "pending":
+                continue
+
+            item["status"] = "cancelled"
+            item["acked_at"] = now_s
+            item["note"] = "Superseded by stop override"
+
+        next_cmd["status"] = "delivered"
+        next_cmd["delivered_at"] = now_s
+        return next_cmd
+
+    for item in commands:
+        if item.get("device_id") == device_id and item.get("status") == "pending":
+            item["status"] = "delivered"
+            item["delivered_at"] = now_s
+            return item
+
+    return None
+
+
 class DeviceCommandIn(BaseModel):
     device_id: str
     command: str
@@ -140,16 +204,11 @@ async def queue_device_command(payload: DeviceCommandIn, request: Request):
     now_s = int(time.time())
 
     if payload.command in MOVEMENT_COMMANDS:
-        filtered: list[dict] = []
-        for item in commands:
-            same_device = item.get("device_id") == payload.device_id
-            same_kind = item.get("command") in MOVEMENT_COMMANDS
-            active = _is_active_status(item.get("status"))
-
-            if same_device and same_kind and active:
-                continue
-            filtered.append(item)
-        commands = filtered
+        _cancel_pending_movement_commands(
+            commands,
+            payload.device_id,
+            f"Superseded by new movement command: {payload.command}",
+        )
 
     entry = {
         "id": f"{payload.device_id}-{now_ms}",
@@ -179,15 +238,7 @@ def get_next_device_command(
     _require_device_secret(x_device_secret)
 
     commands = _load_commands()
-    next_cmd = None
-
-    for item in commands:
-        if item.get("device_id") == device_id and item.get("status") == "pending":
-            item["status"] = "delivered"
-            item["delivered_at"] = int(time.time())
-            next_cmd = item
-            break
-
+    next_cmd = _select_next_command(commands, device_id)
     _save_commands(commands)
 
     return {
