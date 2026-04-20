@@ -119,6 +119,8 @@ class AuraConsoleApp:
 
         self._llm_thinking = False
         self._llm_history = []
+        self._llm_input_buffer = ""
+        self._llm_input_var = tk.StringVar(value="")
         self._osk_shift = False
         self._osk_caps = False
         self._osk_mode = "alpha"
@@ -130,6 +132,7 @@ class AuraConsoleApp:
         self._rag_dataset_loaded = False
 
         self._build_ui()
+        self.root.bind("<KeyPress>", self._handle_root_keypress, add="+")
         self.root.after(300, self._best_effort_disable_system_keyboard)
         self._start_reader()
         self._poll_logs()
@@ -326,6 +329,82 @@ class AuraConsoleApp:
                 widget.bind(sequence, self._passive_text_click)
             except Exception:
                 pass
+
+    def _llm_input_click(self, event=None):
+        self._best_effort_disable_system_keyboard()
+        try:
+            self.root.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _refresh_llm_input_display(self):
+        cursor = "▌" if (self.view_mode == "llm" and self.ui_mode == "home" and not self._llm_thinking) else ""
+        self._llm_input_var.set(f"{self._llm_input_buffer}{cursor}")
+
+    def _llm_set_input_text(self, text: str):
+        self._llm_input_buffer = text or ""
+        self._refresh_llm_input_display()
+
+    def _llm_append_input_text(self, text: str):
+        if not text:
+            return
+        self._llm_input_buffer += text
+        self._refresh_llm_input_display()
+
+    def _llm_backspace(self):
+        if self._llm_input_buffer:
+            self._llm_input_buffer = self._llm_input_buffer[:-1]
+            self._refresh_llm_input_display()
+
+    def _handle_root_keypress(self, event):
+        if self.ui_mode != "home" or self.view_mode != "llm":
+            return
+        if self._llm_thinking:
+            return "break"
+
+        self._best_effort_disable_system_keyboard()
+
+        state = getattr(event, "state", 0) or 0
+        ctrl_pressed = bool(state & 0x4)
+        keysym = event.keysym or ""
+        char = event.char or ""
+
+        if keysym in {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Super_L", "Super_R"}:
+            return "break"
+
+        if ctrl_pressed:
+            low = keysym.lower()
+            if low == "v":
+                try:
+                    clip = self.root.clipboard_get()
+                except Exception:
+                    clip = ""
+                if clip:
+                    self._llm_append_input_text(clip)
+                return "break"
+            if low == "u":
+                self._llm_set_input_text("")
+                return "break"
+            return "break"
+
+        if keysym in {"BackSpace"}:
+            self._llm_backspace()
+            return "break"
+        if keysym in {"Return", "KP_Enter"}:
+            self._llm_submit()
+            return "break"
+        if keysym == "Tab":
+            self._llm_append_input_text("    ")
+            return "break"
+        if keysym == "space" or char == " ":
+            self._llm_append_input_text(" ")
+            return "break"
+        if len(char) == 1 and char.isprintable():
+            self._llm_append_input_text(char)
+            return "break"
+
+        return "break"
 
     def _build_home_ui(self, parent, sub_font, section_font, log_font, button_font):
         mode_card = tk.Frame(
@@ -637,7 +716,7 @@ class AuraConsoleApp:
             font=llm_font,
             padx=12,
             pady=12,
-            height=7,
+            height=6,
             state="disabled",
             yscrollcommand=self.llm_chat_scroll.set,
         )
@@ -668,26 +747,32 @@ class AuraConsoleApp:
             padx=4,
             pady=4,
         )
-        composer_wrap.pack(fill="x", padx=8, pady=(0, 6))
+        composer_wrap.pack(fill="x", padx=8, pady=(0, 4))
 
-        self.llm_entry = tk.Entry(
+        entry_shell = tk.Frame(
             composer_wrap,
             bg="#0b1a11",
+            highlightthickness=0,
+            bd=0,
+        )
+        entry_shell.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.llm_entry = tk.Label(
+            entry_shell,
+            textvariable=self._llm_input_var,
+            bg="#0b1a11",
             fg="#ffffff",
-            insertbackground="#ffffff",
-            disabledbackground="#0b1a11",
-            disabledforeground="#cbd5e1",
             relief="flat",
             font=button_font,
             bd=0,
-            takefocus=0,
+            anchor="w",
+            justify="left",
+            padx=10,
+            pady=12,
         )
-        self.llm_entry.pack(side="left", fill="x", expand=True, ipady=12, padx=(0, 6))
-        self.llm_entry.bind("<Return>", lambda _e: self._llm_submit())
-        self.llm_entry.bind("<Button-1>", self._prevent_system_keyboard_focus)
-        self.llm_entry.bind("<ButtonRelease-1>", self._prevent_system_keyboard_focus)
-        self.llm_entry.bind("<B1-Motion>", self._prevent_system_keyboard_focus)
-        self.llm_entry.bind("<FocusIn>", self._prevent_system_keyboard_focus)
+        self.llm_entry.pack(fill="x", expand=True)
+        for sequence in ("<Button-1>", "<ButtonRelease-1>", "<B1-Motion>", "<FocusIn>"):
+            self.llm_entry.bind(sequence, self._llm_input_click)
 
         self.llm_send_btn = tk.Button(
             composer_wrap,
@@ -709,6 +794,8 @@ class AuraConsoleApp:
         )
         self.llm_send_btn.pack(side="right")
 
+        self._refresh_llm_input_display()
+
         self._build_osk(chat_card)
 
     def _build_osk(self, parent):
@@ -716,7 +803,7 @@ class AuraConsoleApp:
         sh = self.root.winfo_screenheight()
         self._osk_key_font = tkfont.Font(
             family="Courier",
-            size=max(8, int(sw * 0.0088)),
+            size=max(7, int(sw * 0.0080)),
             weight="bold",
         )
         self._osk_keyboard_bg = "#06150d"
@@ -729,8 +816,8 @@ class AuraConsoleApp:
         self._osk_outer = tk.Frame(
             parent,
             bg=self._osk_keyboard_bg,
-            pady=2,
-            padx=4,
+            pady=1,
+            padx=3,
             highlightbackground=self._osk_key_border,
             highlightthickness=1,
         )
@@ -805,13 +892,13 @@ class AuraConsoleApp:
             bd=0,
             cursor="hand2",
             padx=0,
-            pady=3,
+            pady=2,
             height=self._osk_key_height,
             highlightthickness=1,
             highlightbackground=self._osk_key_border,
             highlightcolor=self._osk_key_border,
         )
-        btn.grid(row=0, column=column, sticky="nsew", padx=2, pady=1)
+        btn.grid(row=0, column=column, sticky="nsew", padx=2, pady=0)
 
     def _osk_key(self, key: str):
         self._best_effort_disable_system_keyboard()
@@ -820,10 +907,11 @@ class AuraConsoleApp:
         except Exception:
             pass
 
+        if self._llm_thinking:
+            return
+
         if key == "⌫":
-            cur = self.llm_entry.get()
-            if cur:
-                self.llm_entry.delete(len(cur) - 1, "end")
+            self._llm_backspace()
             return
         if key == "SHIFT":
             self._osk_shift = not self._osk_shift
@@ -849,22 +937,22 @@ class AuraConsoleApp:
             self._render_osk()
             return
         if key == "CLR":
-            self.llm_entry.delete(0, "end")
+            self._llm_set_input_text("")
             return
         if key == "SPACE":
-            self.llm_entry.insert("end", " ")
+            self._llm_append_input_text(" ")
             if self._osk_mode == "alpha" and self._osk_shift and not self._osk_caps:
                 self._osk_shift = False
                 self._render_osk()
             return
         if key == "TAB":
-            self.llm_entry.insert("end", "    ")
+            self._llm_append_input_text("    ")
             return
         if key == "↩":
             self._llm_submit()
             return
 
-        self.llm_entry.insert("end", key)
+        self._llm_append_input_text(key)
         if self._osk_mode == "alpha" and self._osk_shift and not self._osk_caps:
             self._osk_shift = False
             self._render_osk()
@@ -979,7 +1067,7 @@ class AuraConsoleApp:
             anchor="w",
             justify="left",
             padx=14,
-            pady=3,
+            pady=2,
         ).pack(fill="x", pady=(0, 6))
 
         tk.Label(
@@ -1200,6 +1288,7 @@ class AuraConsoleApp:
             self.llm_panel.pack(fill="both", expand=True)
             self.llm_btn.configure(**active)
             self.root.focus_set()
+            self._refresh_llm_input_display()
             self.root.after(80, self._best_effort_disable_system_keyboard)
         elif mode == "live":
             self.live_panel.pack(fill="both", expand=True)
@@ -1444,14 +1533,14 @@ class AuraConsoleApp:
 
     def _llm_submit(self):
         self._best_effort_disable_system_keyboard()
-        query = self.llm_entry.get().strip()
+        query = self._llm_input_buffer.strip()
         if not query or self._llm_thinking:
             return
 
-        self.llm_entry.delete(0, "end")
+        self._llm_set_input_text("")
         self._llm_thinking = True
         self.llm_send_btn.configure(state="disabled", bg="#0d2618")
-        self.llm_entry.configure(state="disabled")
+        self._refresh_llm_input_display()
 
         self._llm_history.append(("user", query))
         # Reserve an assistant slot that we'll fill progressively via streaming
@@ -1515,8 +1604,8 @@ class AuraConsoleApp:
                 self._llm_history.append(("assistant", answer))
         self._llm_redraw()
         self.llm_send_btn.configure(state="normal", bg="#14f195")
-        self.llm_entry.configure(state="normal")
         self.root.focus_set()
+        self._refresh_llm_input_display()
         self.root.after(40, self._best_effort_disable_system_keyboard)
 
     def _llm_redraw(self):
