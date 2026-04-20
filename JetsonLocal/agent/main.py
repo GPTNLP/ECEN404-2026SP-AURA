@@ -1424,23 +1424,22 @@ async def command_loop():
                         set_ui_state("READY", "Flushing models")
                         flushed = []
 
-                        # Unload LLM from Ollama by setting keep_alive=0
-                        try:
-                            _flush_ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
-                            requests.post(
-                                f"{_flush_ollama_url}/api/generate",
-                                json={
-                                    "model": DEFAULT_MODEL,
-                                    "prompt": "",
-                                    "stream": False,
-                                    "keep_alive": 0,
-                                },
-                                timeout=15.0,
-                            )
-                            flushed.append("llm")
-                            print(f"[FLUSH] LLM '{DEFAULT_MODEL}' unloaded from Ollama VRAM")
-                        except Exception as _fe:
-                            print(f"[FLUSH] LLM unload skipped: {_fe}")
+                        # Unload LLM and embed model from Ollama by setting keep_alive=0
+                        _flush_ollama_url = os.getenv("AURA_OLLAMA_URL", "http://127.0.0.1:11434")
+                        for _flush_model, _flush_label, _flush_endpoint, _flush_key in [
+                            (DEFAULT_MODEL,   "llm",   "/api/generate", "prompt"),
+                            (EMBEDDING_MODEL, "embed", "/api/embed",    "input"),
+                        ]:
+                            try:
+                                requests.post(
+                                    f"{_flush_ollama_url}{_flush_endpoint}",
+                                    json={"model": _flush_model, _flush_key: "", "stream": False, "keep_alive": 0},
+                                    timeout=15.0,
+                                )
+                                flushed.append(_flush_label)
+                                print(f"[FLUSH] '{_flush_model}' unloaded from Ollama VRAM")
+                            except Exception as _fe:
+                                print(f"[FLUSH] '{_flush_model}' unload skipped: {_fe}")
 
                         # Unload Whisper STT model
                         if stt_service is not None:
@@ -1495,7 +1494,7 @@ async def command_loop():
                         except Exception as _ue:
                             print(f"[RELOAD_LLM] unload step skipped: {_ue}")
 
-                        # Step 2: reload onto GPU
+                        # Step 2: reload LLM onto GPU
                         try:
                             requests.post(
                                 f"{_reload_url}/api/generate",
@@ -1517,6 +1516,22 @@ async def command_loop():
                             print(f"[RELOAD_LLM] '{DEFAULT_MODEL}' reloaded onto GPU (num_gpu={_num_gpu})")
                         except Exception as _le:
                             raise RuntimeError(f"GPU reload failed: {_le}")
+
+                        # Step 3: reload embed model onto GPU
+                        try:
+                            requests.post(
+                                f"{_reload_url}/api/embed",
+                                json={
+                                    "model": EMBEDDING_MODEL,
+                                    "input": "warmup",
+                                    "keep_alive": _keep_alive,
+                                    "options": {"num_gpu": _num_gpu},
+                                },
+                                timeout=60.0,
+                            )
+                            print(f"[RELOAD_LLM] '{EMBEDDING_MODEL}' reloaded onto GPU (num_gpu={_num_gpu})")
+                        except Exception as _ee:
+                            print(f"[RELOAD_LLM] embed model reload skipped (non-fatal): {_ee}")
 
                         await asyncio.to_thread(
                             api.ack_command,

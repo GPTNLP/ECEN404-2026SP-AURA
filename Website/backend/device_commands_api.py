@@ -388,6 +388,9 @@ async def chat_via_jetson_stream(payload: DeviceCommandIn, request: Request):
     commands.append(entry)
     _save_commands(commands)
 
+    # Wake the Jetson immediately so it doesn't wait for the 5-second HTTP poll.
+    await _ws_push(payload.device_id, {"notify": "command"})
+
     # Register queue before returning so ack_partial writes never miss
     q: _queue.SimpleQueue = _queue.SimpleQueue()
     _stream_queues[command_id] = q
