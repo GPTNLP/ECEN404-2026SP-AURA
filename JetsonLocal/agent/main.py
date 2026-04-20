@@ -107,6 +107,9 @@ voice_loaded = False
 voice_idle_seconds = 0
 voice_request_lock: Optional[asyncio.Lock] = None
 tts_service = TTSService()
+button_stt_service: Optional[STTService] = None
+voice_button_phase = "idle"
+voice_button_detail = "Press the mic to talk."
 
 
 def quiet_print(key: str, message: str) -> None:
@@ -138,6 +141,16 @@ def truncate_for_ui(text: str, limit: int = 80) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 3] + "..."
+
+
+def set_voice_button_state(phase: str, detail: str = "") -> None:
+    global voice_button_phase, voice_button_detail
+    voice_button_phase = (phase or "idle").strip().lower()
+    voice_button_detail = (detail or "").strip()
+
+
+def get_voice_status_source() -> Optional[STTService]:
+    return button_stt_service or stt_service
 
 
 # -------------------------------------------------------------------
@@ -270,6 +283,8 @@ async def speak_with_timeout(text: str, ui_detail: str = "") -> bool:
         return False
 
     detail = truncate_for_ui(ui_detail or text)
+    if button_stt_service is not None:
+        set_voice_button_state("speaking", detail)
     set_ui_state("SPEAKING", detail)
     quiet_print("voice_speaking", f"[VOICE] speaking: {truncate_for_ui(text, 120)}")
 
@@ -329,6 +344,8 @@ async def handle_voice_text(
 
     set_ui_state("THINKING", truncate_for_ui(text))
     quiet_print("voice_question_received", f"[VOICE] question received: {text}")
+    if button_stt_service is not None:
+        set_voice_button_state("processing", "Thinking...")
 
     result = {
         "ok": True,
@@ -523,6 +540,141 @@ def build_stt_service(unload_after_idle_seconds: float = 3600.0) -> STTService:
     )
 
 
+async def cleanup_button_voice_session() -> None:
+    global button_stt_service, voice_loaded, voice_idle_seconds
+
+    temp_service = button_stt_service
+    button_stt_service = None
+
+    if temp_service is not None:
+        try:
+            await asyncio.to_thread(temp_service.cancel_manual_capture)
+        except Exception:
+            pass
+        try:
+            await asyncio.to_thread(temp_service.unload_model)
+        except Exception:
+            pass
+        try:
+            temp_service.stop()
+        except Exception:
+            pass
+
+    voice_loaded = False
+    voice_idle_seconds = 0
+
+
+async def start_button_voice_capture() -> dict:
+    global button_stt_service, voice_loaded, voice_idle_seconds
+
+    if voice_request_lock is None:
+        raise RuntimeError("Voice system lock is not ready yet.")
+
+    async with voice_request_lock:
+        if button_stt_service is not None:
+            return {
+                "ok": True,
+                "phase": voice_button_phase,
+                "detail": voice_button_detail,
+                "model_loaded": voice_loaded,
+            }
+
+        if stt_task and not stt_task.done():
+            await stop_voice_loop()
+
+        temp_service = build_stt_service(unload_after_idle_seconds=0.0)
+        button_stt_service = temp_service
+        voice_loaded = False
+        voice_idle_seconds = 0
+
+        try:
+            set_voice_button_state("loading", "Loading speech model...")
+            set_ui_state("LISTENING", "Loading speech model")
+            quiet_print("voice_button_load", "[VOICE] button capture loading model")
+
+            await asyncio.to_thread(temp_service.start_manual_capture, 0.12)
+            voice_loaded = True
+
+            set_voice_button_state("listening", "Listening... tap again to stop.")
+            set_ui_state("LISTENING", "Tap-to-talk listening")
+
+            return {
+                "ok": True,
+                "phase": "listening",
+                "detail": "Listening... tap again to stop.",
+                "model_loaded": True,
+            }
+        except Exception:
+            await cleanup_button_voice_session()
+            set_voice_button_state("idle", "Press the mic to talk.")
+            raise
+
+
+async def stop_button_voice_capture() -> dict:
+    global voice_idle_seconds
+
+    if voice_request_lock is None:
+        raise RuntimeError("Voice system lock is not ready yet.")
+
+    async with voice_request_lock:
+        temp_service = button_stt_service
+        if temp_service is None:
+            return {
+                "ok": False,
+                "phase": "idle",
+                "detail": "No active voice capture.",
+                "transcript": "",
+                "response_text": "",
+            }
+
+        try:
+            set_voice_button_state("processing", "Processing your speech...")
+            set_ui_state("THINKING", "Processing speech")
+
+            heard_text = await asyncio.to_thread(temp_service.finish_manual_capture)
+            final_text = normalize_text(heard_text)
+
+            if not final_text:
+                return {
+                    "ok": False,
+                    "phase": "idle",
+                    "transcript": "",
+                    "intent": "empty",
+                    "movement": None,
+                    "action": "no_speech",
+                    "response_text": "I did not hear anything.",
+                    "spoken": False,
+                }
+
+            if looks_like_weak_transcript(final_text):
+                return {
+                    "ok": False,
+                    "phase": "idle",
+                    "transcript": final_text,
+                    "intent": "empty",
+                    "movement": None,
+                    "action": "weak_transcript",
+                    "response_text": "Please try again and say a little more.",
+                    "spoken": False,
+                }
+
+            movement = detect_last_movement_command(final_text)
+            intent = classify_intent(final_text)
+
+            quiet_print("voice_button_heard", f"[VOICE] button heard: {final_text}")
+            result = await handle_voice_text(
+                final_text,
+                intent,
+                movement,
+                speak_response=True,
+            )
+            return {"ok": True, "phase": "idle", **result}
+        finally:
+            await cleanup_button_voice_session()
+            set_voice_button_state("idle", "Press the mic to talk.")
+            set_ui_state("READY", "Voice idle")
+
+
 async def capture_single_voice_request() -> dict:
     global stt_service, voice_running, voice_loaded, voice_idle_seconds
 
@@ -542,6 +694,7 @@ async def capture_single_voice_request() -> dict:
         try:
             set_ui_state("LISTENING", "Tap-to-talk listening")
             quiet_print("voice_button_load", "[VOICE] button capture loading model")
+            temp_service.is_running = True
             await asyncio.to_thread(temp_service._ensure_model_loaded)
             voice_loaded = True
 
@@ -678,6 +831,7 @@ async def stop_voice_loop():
     voice_running = False
     voice_loaded = False
     quiet_print("voice_stop", "[VOICE] stopped")
+    set_voice_button_state("idle", "Press the mic to talk.")
     set_ui_state("READY", "Voice stopped")
 
 
@@ -702,8 +856,10 @@ async def status_loop():
     while True:
         payload = build_status_payload()
 
-        if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
-            voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+        source = get_voice_status_source()
+
+        if source is not None and getattr(source, "last_audio_activity_ts", None):
+            voice_idle_seconds = max(0, int(time.time() - source.last_audio_activity_ts))
         else:
             voice_idle_seconds = 0
 
@@ -713,13 +869,15 @@ async def status_loop():
             "running": voice_running,
             "model_loaded": voice_loaded,
             "idle_seconds": voice_idle_seconds,
-            "device_index": stt_service.input_device if stt_service else None,
-            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
-            "channels": stt_service.channels if stt_service else None,
-            "noise_floor": stt_service.noise_floor if stt_service else None,
-            "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+            "device_index": source.input_device if source else None,
+            "device_sample_rate": source.device_sample_rate if source else None,
+            "channels": source.channels if source else None,
+            "noise_floor": source.noise_floor if source else None,
+            "unload_after_idle_seconds": getattr(source, "unload_after_idle_seconds", None) if source else None,
             "tts_ready": True,
             "tts_device": tts_service.device,
+            "button_phase": voice_button_phase,
+            "button_detail": voice_button_detail,
         }
         payload["extra"]["esp32"] = serial_link.get_health()
 
@@ -1674,6 +1832,7 @@ async def lifespan(app_instance: FastAPI):
 
     quiet_print("tts", f"[TTS] ready device={tts_service.device}")
     voice_request_lock = asyncio.Lock()
+    set_voice_button_state("idle", "Press the mic to talk.")
 
     try:
         rag_manager.initialize()
@@ -1743,8 +1902,10 @@ app.router.lifespan_context = lifespan
 async def health():
     global voice_idle_seconds
 
-    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
-        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    source = get_voice_status_source()
+
+    if source is not None and getattr(source, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - source.last_audio_activity_ts))
     else:
         voice_idle_seconds = 0
 
@@ -1760,13 +1921,15 @@ async def health():
             "enabled": voice_enabled,
             "running": voice_running,
             "model_loaded": voice_loaded,
-            "device_index": stt_service.input_device if stt_service else None,
-            "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
-            "channels": stt_service.channels if stt_service else None,
-            "noise_floor": stt_service.noise_floor if stt_service else None,
+            "device_index": source.input_device if source else None,
+            "device_sample_rate": source.device_sample_rate if source else None,
+            "channels": source.channels if source else None,
+            "noise_floor": source.noise_floor if source else None,
             "idle_seconds": voice_idle_seconds,
-            "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+            "unload_after_idle_seconds": getattr(source, "unload_after_idle_seconds", None) if source else None,
             "tts_device": tts_service.device,
+            "button_phase": voice_button_phase,
+            "button_detail": voice_button_detail,
         },
     }
 
@@ -1775,8 +1938,10 @@ async def health():
 async def voice_status():
     global voice_idle_seconds
 
-    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
-        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    source = get_voice_status_source()
+
+    if source is not None and getattr(source, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - source.last_audio_activity_ts))
     else:
         voice_idle_seconds = 0
 
@@ -1786,12 +1951,14 @@ async def voice_status():
         "running": voice_running,
         "model_loaded": voice_loaded,
         "idle_seconds": voice_idle_seconds,
-        "device_index": stt_service.input_device if stt_service else None,
-        "device_sample_rate": stt_service.device_sample_rate if stt_service else None,
-        "channels": stt_service.channels if stt_service else None,
-        "noise_floor": stt_service.noise_floor if stt_service else None,
-        "unload_after_idle_seconds": getattr(stt_service, "unload_after_idle_seconds", None) if stt_service else None,
+        "device_index": source.input_device if source else None,
+        "device_sample_rate": source.device_sample_rate if source else None,
+        "channels": source.channels if source else None,
+        "noise_floor": source.noise_floor if source else None,
+        "unload_after_idle_seconds": getattr(source, "unload_after_idle_seconds", None) if source else None,
         "tts_device": tts_service.device,
+        "button_phase": voice_button_phase,
+        "button_detail": voice_button_detail,
     }
 
 
@@ -1822,6 +1989,28 @@ async def voice_listen_once():
     except Exception as e:
         set_ui_state("ERROR", truncate_for_ui(str(e)))
         raise HTTPException(status_code=500, detail=f"Failed to handle voice request: {e}")
+
+
+@app.post("/voice/button/start")
+async def voice_button_start():
+    try:
+        result = await start_button_voice_capture()
+        return {"ok": True, **result}
+    except Exception as e:
+        set_ui_state("ERROR", truncate_for_ui(str(e)))
+        set_voice_button_state("idle", f"Voice start failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to start button voice capture: {e}")
+
+
+@app.post("/voice/button/stop")
+async def voice_button_stop():
+    try:
+        result = await stop_button_voice_capture()
+        return {"ok": True, **result, "running": False, "model_loaded": False}
+    except Exception as e:
+        set_ui_state("ERROR", truncate_for_ui(str(e)))
+        set_voice_button_state("idle", f"Voice stop failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop button voice capture: {e}")
 
 
 # -------------------------------------------------------------------
@@ -1985,9 +2174,10 @@ async def status():
     global voice_idle_seconds
 
     payload = build_status_payload()
+    source = get_voice_status_source()
 
-    if stt_service is not None and getattr(stt_service, "last_audio_activity_ts", None):
-        voice_idle_seconds = max(0, int(time.time() - stt_service.last_audio_activity_ts))
+    if source is not None and getattr(source, "last_audio_activity_ts", None):
+        voice_idle_seconds = max(0, int(time.time() - source.last_audio_activity_ts))
     else:
         voice_idle_seconds = 0
 
@@ -1998,6 +2188,8 @@ async def status():
         "model_loaded": voice_loaded,
         "idle_seconds": voice_idle_seconds,
         "tts_device": tts_service.device,
+        "button_phase": voice_button_phase,
+        "button_detail": voice_button_detail,
     }
     return payload
 

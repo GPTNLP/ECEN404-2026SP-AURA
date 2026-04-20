@@ -5,6 +5,7 @@ import re
 import gc
 import time
 import asyncio
+import threading
 from datetime import datetime
 from typing import Awaitable, Callable, Optional, Tuple
 
@@ -395,6 +396,10 @@ class STTService:
         self.last_audio_activity_ts = time.time()
         self.last_transcribe_ts = 0.0
         self.consecutive_record_errors = 0
+        self._manual_stream = None
+        self._manual_chunks = []
+        self._manual_lock = threading.Lock()
+        self._manual_status = None
 
         _require_sounddevice()
         self._resolve_input_device()
@@ -759,6 +764,83 @@ class STTService:
         text = " ".join(seg.text.strip() for seg in segments).strip()
 
         return text
+
+    def _manual_capture_callback(self, indata, frames, time_info, status):
+        if status:
+            self._manual_status = str(status)
+
+        chunk = np.array(indata, dtype=np.float32, copy=True)
+        if chunk.size == 0:
+            return
+
+        with self._manual_lock:
+            self._manual_chunks.append(chunk)
+
+        self.last_audio_activity_ts = time.time()
+
+    def start_manual_capture(self, chunk_seconds: float = 0.12) -> None:
+        if self._manual_stream is not None:
+            raise RuntimeError("Manual capture is already running.")
+
+        self.is_running = True
+        self._ensure_model_loaded()
+        self.calibrate_noise_floor()
+
+        with self._manual_lock:
+            self._manual_chunks = []
+
+        self._manual_status = None
+        blocksize = max(1, int(self.device_sample_rate * chunk_seconds))
+
+        self._manual_stream = sd.InputStream(
+            samplerate=self.device_sample_rate,
+            channels=self.channels,
+            dtype="float32",
+            device=self.input_device,
+            blocksize=blocksize,
+            callback=self._manual_capture_callback,
+        )
+        self._manual_stream.start()
+        self.last_audio_activity_ts = time.time()
+
+    def finish_manual_capture(self) -> str:
+        if self._manual_stream is None:
+            raise RuntimeError("Manual capture is not running.")
+
+        stream = self._manual_stream
+        self._manual_stream = None
+
+        try:
+            stream.stop()
+        finally:
+            stream.close()
+
+        with self._manual_lock:
+            chunks = list(self._manual_chunks)
+            self._manual_chunks = []
+
+        self.is_running = False
+
+        if not chunks:
+            return ""
+
+        audio = np.concatenate(chunks, axis=0)
+        return self._transcribe_audio_array(audio)
+
+    def cancel_manual_capture(self) -> None:
+        stream = self._manual_stream
+        self._manual_stream = None
+
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+
+        with self._manual_lock:
+            self._manual_chunks = []
+
+        self.is_running = False
 
     def listen_for_wake_word(self, chunk_seconds: float = WAKE_CHUNK_SECONDS):
         if not self.is_running:
