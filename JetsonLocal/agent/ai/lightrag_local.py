@@ -215,6 +215,39 @@ class _QueryCache:
         self._entries.clear()
 
 
+# Matches conversational inputs that should bypass RAG retrieval entirely.
+# These queries have no domain content — running them through FAISS/BM25 produces
+# irrelevant passages that confuse the LLM into bizarre answers (e.g. "hi" causing
+# a response about indigenous perspectives in corporate mergers from the top-scoring
+# chunks of whatever document happens to be loaded).
+_CONVERSATIONAL_RE = re.compile(
+    r"^("
+    r"hi+|he+y+|hello+|howdy|hiya|greetings|sup|yo+|"
+    r"good\s*(morning|afternoon|evening|night|day)|"
+    r"thanks?(\s+you)?|thank\s+you|thx|ty|"
+    r"ok(ay)?\.?|got\s+it|"
+    r"how\s+are\s+you(\s+doing)?|what.?s\s+up|"
+    r"who\s+are\s+you|what\s+can\s+you\s+do|tell\s+me\s+about\s+yourself|"
+    r"what\s+(are|is)\s+your\s+name|"
+    r"bye|goodbye|see\s+ya?|farewell|take\s+care"
+    r")[\s!?.]*$",
+    re.IGNORECASE,
+)
+
+_CONVERSATIONAL_SYSTEM = (
+    "You are AURA, an AI lab assistant robot for Texas A&M ELEN senior design. "
+    "Respond naturally and briefly to conversational messages. "
+    "For greetings, welcome the user and mention you can answer questions about the "
+    "loaded lab materials. For thanks or acknowledgments, respond warmly. "
+    "Keep responses to 1-3 sentences."
+)
+
+
+def _is_conversational(query: str) -> bool:
+    """Return True for greetings and off-topic fillers that should bypass RAG retrieval."""
+    return bool(_CONVERSATIONAL_RE.match(query.strip()))
+
+
 def _tokenize(s: str) -> List[str]:
     s = (s or "").lower()
     out: List[str] = []
@@ -1240,6 +1273,23 @@ class LightRAG:
                 "answer": "Database is empty. Build the database first.",
                 "sources": [], "hits": [],
             }
+
+        # Short-circuit: conversational inputs (greetings, thanks, meta-questions)
+        # have no domain content.  Running them through FAISS/BM25 retrieves random
+        # high-scoring passages that are completely unrelated to the query, then the
+        # LLM produces a confusing answer that mixes those passages with the greeting.
+        # Skip retrieval entirely and respond conversationally via the fast client.
+        if _is_conversational(query):
+            answer = await self._fast_client.generate(
+                prompt=query,
+                system=_CONVERSATIONAL_SYSTEM,
+                timeout_s=30.0,
+                num_predict=128,
+                num_ctx=512,
+                temperature=0.7,
+                on_token=on_token,
+            )
+            return {"answer": answer, "sources": [], "hits": [], "_cache": "conversational"}
 
         mode      = (param.mode or "hybrid").lower()
         top_k     = max(1, int(param.top_k))
