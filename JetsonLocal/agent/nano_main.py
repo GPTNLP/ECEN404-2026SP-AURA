@@ -5,6 +5,7 @@ import queue
 import re
 import subprocess
 import os
+import shutil
 import threading
 import tkinter as tk
 from collections import Counter
@@ -23,7 +24,6 @@ except Exception as exc:
 
 SERVICE_NAME = "aura-agent.service"
 API_BASE = "http://127.0.0.1:8000"
-TTS_SETTINGS_PATH = os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/tts_settings.json")
 
 MAX_LOG_LINES = 220
 MAX_RAW_LOG_LINES = 600
@@ -118,6 +118,11 @@ class AuraConsoleApp:
         )
         self._pending_volume_job = None
         self._pending_brightness_job = None
+        self._wifi_enabled = False
+        self._wifi_busy = False
+        self._wifi_networks = []
+        self._wifi_status_text = tk.StringVar(value="Checking Wi-Fi...")
+        self._wifi_toggle_text = tk.StringVar(value="OFF")
 
         self._llm_thinking = False
         self._llm_history = []
@@ -425,78 +430,6 @@ class AuraConsoleApp:
             except Exception:
                 pass
 
-
-    def _load_tts_volume_setting(self):
-        try:
-            with open(TTS_SETTINGS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            percent = int(float(data.get("volume_percent", 50)))
-            return max(0, min(100, percent))
-        except Exception:
-            return None
-
-    def _save_tts_volume_setting(self, percent: int) -> bool:
-        try:
-            os.makedirs(os.path.dirname(TTS_SETTINGS_PATH), exist_ok=True)
-            payload = {"volume_percent": max(0, min(100, int(percent)))}
-            with open(TTS_SETTINGS_PATH, "w", encoding="utf-8") as f:
-                json.dump(payload, f)
-            return True
-        except Exception:
-            return False
-
-    def _set_voice_result(self, text: str, *, follow_top: bool = True):
-        if not hasattr(self, "voice_result_box"):
-            self.voice_result_text.set(text or "")
-            return
-
-        value = (text or "").strip() or " "
-        self.voice_result_box.configure(state="normal")
-        self.voice_result_box.delete("1.0", "end")
-        self.voice_result_box.insert("end", value, "voice_body")
-        if follow_top:
-            self.voice_result_box.see("1.0")
-        self.voice_result_box.configure(state="disabled")
-
-    def _set_voice_result_structured(self, transcript: str = "", response_text: str = "", action: str = ""):
-        if not hasattr(self, "voice_result_box"):
-            pieces = []
-            if transcript:
-                pieces.append(f'Heard: "{transcript}"')
-            if response_text:
-                pieces.append(f'AURA said: "{response_text}"')
-            if action and not pieces:
-                pieces.append(f"Action: {action}")
-            self.voice_result_text.set("\n\n".join(pieces) or "No voice result.")
-            return
-
-        transcript = (transcript or "").strip()
-        response_text = (response_text or "").strip()
-        action = (action or "").strip()
-
-        self.voice_result_box.configure(state="normal")
-        self.voice_result_box.delete("1.0", "end")
-
-        if transcript:
-            self.voice_result_box.insert("end", "HEARD\n", "voice_label")
-            self.voice_result_box.insert("end", transcript + "\n\n", "voice_body")
-
-        if response_text:
-            label = "AURA SAID"
-            if action and action not in {"llm", "unknown"}:
-                label = f"AURA SAID ({action.upper()})"
-            self.voice_result_box.insert("end", label + "\n", "voice_label")
-            self.voice_result_box.insert("end", response_text, "voice_body")
-        elif action:
-            self.voice_result_box.insert("end", "ACTION\n", "voice_label")
-            self.voice_result_box.insert("end", action, "voice_body")
-
-        if not transcript and not response_text and not action:
-            self.voice_result_box.insert("end", "No voice result.", "voice_muted")
-
-        self.voice_result_box.see("1.0")
-        self.voice_result_box.configure(state="disabled")
-
     def _llm_input_click(self, event=None):
         self._best_effort_disable_system_keyboard()
         try:
@@ -701,64 +634,18 @@ class AuraConsoleApp:
             pady=2,
         ).pack(fill="x")
 
-        voice_result_wrap = tk.Frame(
+        tk.Label(
             self.voice_card,
-            bg="#04130b",
-            highlightbackground="#14532d",
-            highlightthickness=1,
-        )
-        voice_result_wrap.pack(fill="x", padx=14, pady=(0, 12))
-        voice_result_wrap.pack_propagate(False)
-        voice_result_wrap.configure(height=max(118, int(self.root.winfo_screenheight() * 0.145)))
-
-        self.voice_result_scroll = tk.Scrollbar(
-            voice_result_wrap,
-            orient="vertical",
-            width=20,
-            troughcolor="#04130b",
-            activebackground="#14f195",
-            bg="#0b1a11",
-            highlightthickness=0,
-            relief="flat",
-        )
-        self.voice_result_scroll.pack(side="right", fill="y")
-
-        voice_result_font = tkfont.Font(
-            family="Courier",
-            size=max(10, int(self.root.winfo_screenwidth() * 0.0125)),
-            weight="bold",
-        )
-        voice_result_label_font = tkfont.Font(
-            family="Courier",
-            size=max(10, int(self.root.winfo_screenwidth() * 0.0125)),
-            weight="bold",
-        )
-
-        self.voice_result_box = tk.Text(
-            voice_result_wrap,
-            bg="#04130b",
-            fg="#dcfce7",
-            insertbackground="#dcfce7",
-            relief="flat",
-            wrap="word",
-            font=voice_result_font,
-            padx=10,
-            pady=8,
-            height=5,
-            state="disabled",
-            spacing1=2,
-            spacing2=2,
-            spacing3=4,
-            yscrollcommand=self.voice_result_scroll.set,
-        )
-        self.voice_result_box.pack(side="left", fill="both", expand=True)
-        self.voice_result_scroll.config(command=self.voice_result_box.yview)
-        self._make_text_passive(self.voice_result_box)
-        self.voice_result_box.tag_configure("voice_label", foreground="#14f195", font=voice_result_label_font)
-        self.voice_result_box.tag_configure("voice_body", foreground="#dcfce7", font=voice_result_font)
-        self.voice_result_box.tag_configure("voice_muted", foreground="#86efac", font=voice_result_font)
-
-        self._set_voice_result("Last voice result will appear here.")
+            textvariable=self.voice_result_text,
+            fg="#94a3b8",
+            bg="#0b0f14",
+            font=info_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
+            padx=14,
+            pady=0,
+        ).pack(fill="x", pady=(0, 12))
 
         self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
         self.home_console_panel.pack(fill="both", expand=True)
@@ -1462,6 +1349,139 @@ class AuraConsoleApp:
         )
         self.brightness_scale.pack(fill="x", padx=18, pady=(0, 12))
 
+        wifi_section = tk.Frame(settings_card, bg="#0b0f14")
+        wifi_section.pack(fill="both", expand=True, padx=14, pady=(8, 14))
+
+        wifi_row = tk.Frame(wifi_section, bg="#0b0f14")
+        wifi_row.pack(fill="x", pady=(6, 8))
+
+        tk.Label(
+            wifi_row,
+            text="Wi-Fi",
+            fg="#e2e8f0",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="w",
+        ).pack(side="left")
+
+        self.wifi_toggle_button = tk.Button(
+            wifi_row,
+            textvariable=self._wifi_toggle_text,
+            command=self._toggle_wifi,
+            font=value_font,
+            bg="#111827",
+            fg="#cbd5e1",
+            activebackground="#1f2937",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=18,
+            pady=6,
+            width=6,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.wifi_toggle_button.pack(side="right")
+
+        tk.Label(
+            wifi_section,
+            textvariable=self._wifi_status_text,
+            fg="#cbd5e1",
+            bg="#0b0f14",
+            font=slider_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(520, int(self.root.winfo_screenwidth() * 0.72)),
+            pady=2,
+        ).pack(fill="x", pady=(0, 10))
+
+        wifi_list_wrap = tk.Frame(
+            wifi_section,
+            bg="#04130b",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        wifi_list_wrap.pack(fill="x")
+        wifi_list_wrap.pack_propagate(False)
+        wifi_list_wrap.configure(height=max(180, int(self.root.winfo_screenheight() * 0.22)))
+
+        wifi_scroll = tk.Scrollbar(
+            wifi_list_wrap,
+            orient="vertical",
+            width=22,
+            troughcolor="#04130b",
+            activebackground="#14f195",
+            bg="#0b1a11",
+            highlightthickness=0,
+            relief="flat",
+        )
+        wifi_scroll.pack(side="right", fill="y")
+
+        self.wifi_listbox = tk.Listbox(
+            wifi_list_wrap,
+            bg="#04130b",
+            fg="#dcfce7",
+            selectbackground="#14532d",
+            selectforeground="#ffffff",
+            activestyle="none",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=slider_font,
+            height=5,
+            yscrollcommand=wifi_scroll.set,
+        )
+        self.wifi_listbox.pack(side="left", fill="both", expand=True, padx=8, pady=8)
+        self.wifi_listbox.bind("<<ListboxSelect>>", self._on_wifi_select)
+        wifi_scroll.config(command=self.wifi_listbox.yview)
+
+        wifi_actions = tk.Frame(wifi_section, bg="#0b0f14")
+        wifi_actions.pack(fill="x", pady=(10, 0))
+
+        self.wifi_refresh_button = tk.Button(
+            wifi_actions,
+            text="Refresh",
+            command=self._refresh_wifi_list,
+            font=slider_font,
+            bg="#111827",
+            fg="#ecfeff",
+            activebackground="#0f172a",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=16,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.wifi_refresh_button.pack(side="right")
+
+        self.wifi_connect_button = tk.Button(
+            wifi_actions,
+            text="Connect",
+            command=self._connect_selected_wifi,
+            font=slider_font,
+            bg="#14f195",
+            fg="#04130b",
+            activebackground="#22c55e",
+            activeforeground="#04130b",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=16,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.wifi_connect_button.pack(side="right", padx=(0, 8))
+
+        self._set_wifi_toggle_visual(False)
+
     # =========================
     # View switching / actions
     # =========================
@@ -1574,11 +1594,435 @@ class AuraConsoleApp:
             except Exception:
                 pass
 
+    def _run_quiet_cmd(self, args, timeout: float = 12.0):
+        try:
+            proc = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
+        except Exception as exc:
+            return 999, "", str(exc)
+
+    def _wifi_nmcli_ready(self) -> bool:
+        return shutil.which("nmcli") is not None
+
+    def _wifi_security_requires_password(self, security: str) -> bool:
+        security = (security or "").strip().upper()
+        return bool(security and security not in {"--", "NONE", "OPEN"})
+
+    def _wifi_security_is_enterprise(self, security: str) -> bool:
+        security = (security or "").upper()
+        return any(token in security for token in ("802.1X", "EAP", "ENTERPRISE"))
+
+    def _set_wifi_toggle_visual(self, enabled: bool):
+        self._wifi_enabled = bool(enabled)
+        self._wifi_toggle_text.set("ON" if enabled else "OFF")
+        if hasattr(self, "wifi_toggle_button"):
+            self.wifi_toggle_button.configure(
+                bg="#14f195" if enabled else "#111827",
+                fg="#04130b" if enabled else "#cbd5e1",
+                activebackground="#22c55e" if enabled else "#1f2937",
+                activeforeground="#04130b" if enabled else "#ffffff",
+                textvariable=self._wifi_toggle_text,
+            )
+
+    def _wifi_parse_list(self, raw: str):
+        best_by_ssid = {}
+        for line in (raw or "").splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(":", 3)
+            if len(parts) < 4:
+                continue
+            in_use, ssid, signal, security = parts
+            ssid = (ssid or "").strip() or "<Hidden network>"
+            try:
+                signal_num = int(float(signal or 0))
+            except Exception:
+                signal_num = 0
+            item = {
+                "ssid": ssid,
+                "signal": signal_num,
+                "security": (security or "--").strip() or "--",
+                "connected": (in_use or "").strip() == "*",
+            }
+            prev = best_by_ssid.get(ssid)
+            if (
+                prev is None
+                or (item["connected"] and not prev["connected"])
+                or (item["signal"] > prev["signal"] and item["connected"] == prev["connected"])
+            ):
+                best_by_ssid[ssid] = item
+
+        items = list(best_by_ssid.values())
+        items.sort(key=lambda x: (not x["connected"], -x["signal"], x["ssid"].lower()))
+        return items
+
+    def _wifi_scan_snapshot(self, *, rescan: bool = False):
+        if not self._wifi_nmcli_ready():
+            return {
+                "ok": False,
+                "enabled": False,
+                "networks": [],
+                "message": "NetworkManager (nmcli) is not installed.",
+            }
+
+        rc, out, err = self._run_quiet_cmd(["nmcli", "radio", "wifi"], timeout=6.0)
+        enabled = out.strip().lower() == "enabled"
+        if rc != 0 and not out:
+            return {
+                "ok": False,
+                "enabled": False,
+                "networks": [],
+                "message": err or "Could not read Wi-Fi radio state.",
+            }
+
+        if not enabled:
+            return {
+                "ok": True,
+                "enabled": False,
+                "networks": [],
+                "message": "Wi-Fi is turned off.",
+            }
+
+        cmd = [
+            "nmcli", "-t", "-e", "no",
+            "-f", "IN-USE,SSID,SIGNAL,SECURITY",
+            "dev", "wifi", "list",
+            "--rescan", "yes" if rescan else "auto",
+        ]
+        rc, out, err = self._run_quiet_cmd(cmd, timeout=18.0 if rescan else 10.0)
+        if rc != 0:
+            return {
+                "ok": False,
+                "enabled": True,
+                "networks": [],
+                "message": err or "Could not scan Wi-Fi networks.",
+            }
+
+        items = self._wifi_parse_list(out)
+        if items:
+            return {
+                "ok": True,
+                "enabled": True,
+                "networks": items,
+                "message": f"Found {len(items)} network(s).",
+            }
+
+        return {
+            "ok": True,
+            "enabled": True,
+            "networks": [],
+            "message": "No Wi-Fi networks found. Tap Refresh to scan again.",
+        }
+
+    def _apply_wifi_snapshot(self, snapshot, *, prefer_ssid: str = ""):
+        snapshot = snapshot or {}
+        enabled = bool(snapshot.get("enabled"))
+        self._wifi_networks = list(snapshot.get("networks") or [])
+        self._set_wifi_toggle_visual(enabled)
+        self._wifi_status_text.set(snapshot.get("message") or ("Wi-Fi is on." if enabled else "Wi-Fi is turned off."))
+
+        if hasattr(self, "wifi_refresh_button"):
+            self.wifi_refresh_button.configure(state="normal" if enabled else "disabled")
+        if hasattr(self, "wifi_connect_button"):
+            self.wifi_connect_button.configure(state="normal" if enabled else "disabled")
+
+        if not hasattr(self, "wifi_listbox"):
+            return
+
+        self.wifi_listbox.configure(state="normal")
+        self.wifi_listbox.delete(0, "end")
+
+        if enabled and self._wifi_networks:
+            for item in self._wifi_networks:
+                marker = "●" if item.get("connected") else "○"
+                security = item.get("security") or "--"
+                row = f"{marker}  {item['ssid']:<24.24}  {item['signal']:>3}%  {security}"
+                self.wifi_listbox.insert("end", row)
+
+            target_index = None
+            if prefer_ssid:
+                for idx, item in enumerate(self._wifi_networks):
+                    if item.get("ssid") == prefer_ssid:
+                        target_index = idx
+                        break
+            if target_index is None:
+                for idx, item in enumerate(self._wifi_networks):
+                    if item.get("connected"):
+                        target_index = idx
+                        break
+            if target_index is None and self._wifi_networks:
+                target_index = 0
+
+            if target_index is not None:
+                self.wifi_listbox.selection_set(target_index)
+                self.wifi_listbox.activate(target_index)
+                self.wifi_listbox.see(target_index)
+        else:
+            placeholder = "Wi-Fi is off." if not enabled else "No networks to show."
+            self.wifi_listbox.insert("end", placeholder)
+            self.wifi_listbox.configure(state="disabled")
+
+    def _refresh_wifi_async(self, *, rescan: bool = False, message: str = ""):
+        self._wifi_busy = True
+        if message:
+            self._wifi_status_text.set(message)
+        elif rescan:
+            self._wifi_status_text.set("Scanning Wi-Fi networks...")
+
+        if hasattr(self, "wifi_toggle_button"):
+            self.wifi_toggle_button.configure(state="disabled")
+        if hasattr(self, "wifi_refresh_button"):
+            self.wifi_refresh_button.configure(state="disabled")
+        if hasattr(self, "wifi_connect_button"):
+            self.wifi_connect_button.configure(state="disabled")
+
+        prefer_ssid = None
+        current = self._get_selected_wifi_info()
+        if current:
+            prefer_ssid = current.get("ssid")
+
+        def _worker():
+            snap = self._wifi_scan_snapshot(rescan=rescan)
+            self.root.after(0, lambda s=snap, p=prefer_ssid: self._finish_wifi_refresh(s, p))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _finish_wifi_refresh(self, snapshot, prefer_ssid=None):
+        self._wifi_busy = False
+        if hasattr(self, "wifi_toggle_button"):
+            self.wifi_toggle_button.configure(state="normal")
+        self._apply_wifi_snapshot(snapshot, prefer_ssid=prefer_ssid or "")
+
+    def _toggle_wifi(self):
+        target_on = not self._wifi_enabled
+        self._wifi_status_text.set("Turning Wi-Fi on..." if target_on else "Turning Wi-Fi off...")
+        if hasattr(self, "wifi_toggle_button"):
+            self.wifi_toggle_button.configure(state="disabled")
+
+        def _worker():
+            if target_on:
+                if shutil.which("rfkill"):
+                    self._run_quiet_cmd(["rfkill", "unblock", "wifi"], timeout=4.0)
+                rc, out, err = self._run_quiet_cmd(["nmcli", "radio", "wifi", "on"], timeout=8.0)
+                snap = self._wifi_scan_snapshot(rescan=True)
+                if rc == 0:
+                    snap["message"] = "Wi-Fi turned on. Select a network to connect."
+                elif err:
+                    snap["message"] = err
+            else:
+                rc, out, err = self._run_quiet_cmd(["nmcli", "radio", "wifi", "off"], timeout=8.0)
+                if shutil.which("rfkill"):
+                    self._run_quiet_cmd(["rfkill", "block", "wifi"], timeout=4.0)
+                snap = {
+                    "ok": rc == 0,
+                    "enabled": False,
+                    "networks": [],
+                    "message": "Wi-Fi turned off." if rc == 0 else (err or "Could not turn Wi-Fi off."),
+                }
+            self.root.after(0, lambda s=snap: self._finish_wifi_refresh(s))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_wifi_list(self):
+        self._refresh_wifi_async(rescan=True, message="Scanning Wi-Fi networks...")
+
+    def _get_selected_wifi_info(self):
+        if not hasattr(self, "wifi_listbox"):
+            return None
+        sel = self.wifi_listbox.curselection()
+        if not sel:
+            return None
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(self._wifi_networks):
+            return None
+        return self._wifi_networks[idx]
+
+    def _on_wifi_select(self, event=None):
+        info = self._get_selected_wifi_info()
+        if not info:
+            return
+        status = f"Selected {info['ssid']} ({info['signal']}%, {info['security'] or '--'})."
+        if info.get("connected"):
+            status = f"Connected to {info['ssid']} ({info['signal']}%)."
+        self._wifi_status_text.set(status)
+
+    def _connect_selected_wifi(self):
+        info = self._get_selected_wifi_info()
+        if not info:
+            self._wifi_status_text.set("Select a Wi-Fi network first.")
+            return
+
+        security = info.get("security") or "--"
+        if not self._wifi_security_requires_password(security):
+            self._connect_wifi_worker(info["ssid"], "", "", security)
+            return
+
+        self._open_wifi_credentials_dialog(info)
+
+    def _open_wifi_credentials_dialog(self, info):
+        ssid = info.get("ssid", "")
+        security = info.get("security", "--")
+        enterprise = self._wifi_security_is_enterprise(security)
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Wi-Fi Connect")
+        dialog.configure(bg="#05070a")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        shell = tk.Frame(
+            dialog,
+            bg="#0b0f14",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+            padx=16,
+            pady=14,
+        )
+        shell.pack(fill="both", expand=True, padx=12, pady=12)
+
+        title_font = tkfont.Font(family="Courier", size=14, weight="bold")
+        body_font = tkfont.Font(family="Courier", size=11)
+
+        tk.Label(shell, text="CONNECT TO WI-FI", fg="#14f195", bg="#0b0f14", font=title_font).pack(anchor="w")
+        tk.Label(shell, text=f"SSID: {ssid}", fg="#dcfce7", bg="#0b0f14", font=body_font, pady=6).pack(anchor="w")
+        tk.Label(shell, text=f"Security: {security}", fg="#86efac", bg="#0b0f14", font=body_font).pack(anchor="w")
+
+        username_var = tk.StringVar()
+        password_var = tk.StringVar()
+        note = "Enter the password for this network."
+        if enterprise:
+            note = "This looks like enterprise Wi-Fi. Enter username and password."
+        tk.Label(shell, text=note, fg="#cbd5e1", bg="#0b0f14", font=body_font, wraplength=420, justify="left", pady=10).pack(anchor="w")
+
+        if enterprise:
+            tk.Label(shell, text="Username", fg="#e2e8f0", bg="#0b0f14", font=body_font).pack(anchor="w")
+            username_entry = tk.Entry(shell, textvariable=username_var, font=body_font, bg="#04130b", fg="#dcfce7", insertbackground="#dcfce7", relief="flat")
+            username_entry.pack(fill="x", pady=(4, 10))
+        else:
+            username_entry = None
+
+        tk.Label(shell, text="Password", fg="#e2e8f0", bg="#0b0f14", font=body_font).pack(anchor="w")
+        password_entry = tk.Entry(shell, textvariable=password_var, show="*", font=body_font, bg="#04130b", fg="#dcfce7", insertbackground="#dcfce7", relief="flat")
+        password_entry.pack(fill="x", pady=(4, 12))
+
+        show_var = tk.BooleanVar(value=False)
+        def _toggle_show():
+            password_entry.configure(show="" if show_var.get() else "*")
+        tk.Checkbutton(
+            shell,
+            text="Show password",
+            variable=show_var,
+            command=_toggle_show,
+            bg="#0b0f14",
+            fg="#cbd5e1",
+            activebackground="#0b0f14",
+            activeforeground="#ffffff",
+            selectcolor="#052e1c",
+            font=body_font,
+        ).pack(anchor="w")
+
+        error_var = tk.StringVar(value="")
+        tk.Label(shell, textvariable=error_var, fg="#fca5a5", bg="#0b0f14", font=body_font, pady=6).pack(anchor="w")
+
+        btn_row = tk.Frame(shell, bg="#0b0f14")
+        btn_row.pack(fill="x", pady=(8, 0))
+
+        def _submit():
+            username = username_var.get().strip()
+            password = password_var.get()
+            if enterprise and not username:
+                error_var.set("Username is required for this network.")
+                return
+            if not password:
+                error_var.set("Password is required.")
+                return
+            dialog.destroy()
+            self._connect_wifi_worker(ssid, password, username, security)
+
+        cancel_btn = tk.Button(
+            btn_row, text="Cancel", command=dialog.destroy,
+            bg="#111827", fg="#ecfeff", activebackground="#0f172a", activeforeground="#ffffff",
+            relief="flat", bd=0, cursor="hand2", padx=16, pady=10,
+            highlightthickness=1, highlightbackground="#14f195", highlightcolor="#14f195",
+            font=body_font,
+        )
+        cancel_btn.pack(side="right")
+
+        connect_btn = tk.Button(
+            btn_row, text="Connect", command=_submit,
+            bg="#14f195", fg="#04130b", activebackground="#22c55e", activeforeground="#04130b",
+            relief="flat", bd=0, cursor="hand2", padx=16, pady=10,
+            highlightthickness=1, highlightbackground="#14f195", highlightcolor="#14f195",
+            font=body_font,
+        )
+        connect_btn.pack(side="right", padx=(0, 8))
+
+        if username_entry is not None:
+            username_entry.focus_set()
+        else:
+            password_entry.focus_set()
+
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max(40, (self.root.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.root.winfo_rooty() + max(40, (self.root.winfo_height() - dialog.winfo_height()) // 3)
+        dialog.geometry(f"+{x}+{y}")
+
+    def _connect_wifi_worker(self, ssid: str, password: str = "", username: str = "", security: str = ""):
+        self._wifi_status_text.set(f"Connecting to {ssid}...")
+        if hasattr(self, "wifi_refresh_button"):
+            self.wifi_refresh_button.configure(state="disabled")
+        if hasattr(self, "wifi_connect_button"):
+            self.wifi_connect_button.configure(state="disabled")
+        if hasattr(self, "wifi_toggle_button"):
+            self.wifi_toggle_button.configure(state="disabled")
+
+        def _worker():
+            message = ""
+            if self._wifi_security_is_enterprise(security):
+                profile = f"AURA-{ssid}"
+                self._run_quiet_cmd(["nmcli", "connection", "delete", profile], timeout=6.0)
+                rc, out, err = self._run_quiet_cmd([
+                    "nmcli", "connection", "add",
+                    "type", "wifi",
+                    "ifname", "*",
+                    "con-name", profile,
+                    "ssid", ssid,
+                    "wifi-sec.key-mgmt", "wpa-eap",
+                    "802-1x.eap", "peap",
+                    "802-1x.phase2-auth", "mschapv2",
+                    "802-1x.identity", username,
+                    "802-1x.password", password,
+                ], timeout=18.0)
+                if rc == 0:
+                    rc, out, err = self._run_quiet_cmd(["nmcli", "connection", "up", profile], timeout=35.0)
+                message = err or out
+            else:
+                args = ["nmcli", "dev", "wifi", "connect", ssid]
+                if password:
+                    args += ["password", password]
+                rc, out, err = self._run_quiet_cmd(args, timeout=35.0)
+                message = err or out
+
+            snap = self._wifi_scan_snapshot(rescan=False)
+            if rc == 0:
+                snap["message"] = f"Connected to {ssid}."
+            else:
+                snap["message"] = message or f"Could not connect to {ssid}."
+            self.root.after(0, lambda s=snap, p=ssid: self._finish_wifi_refresh(s, p))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
 
     def _load_settings_state(self):
-        volume = self._load_tts_volume_setting()
-        if volume is None:
-            volume = self._get_system_volume()
+        volume = self._get_system_volume()
         if volume is not None:
             self._settings_volume_var.set(volume)
             self._settings_volume_text.set(f"{int(volume)}%")
@@ -1593,6 +2037,7 @@ class AuraConsoleApp:
             self._settings_brightness_text.set(f"{int(self._settings_brightness_var.get())}%")
 
         self._settings_status_text.set("Adjust volume and brightness for the touchscreen.")
+        self._refresh_wifi_async(rescan=False, message="Checking Wi-Fi...")
 
     def _on_volume_change(self, value):
         try:
@@ -1624,15 +2069,8 @@ class AuraConsoleApp:
 
     def _apply_volume(self, percent: int):
         self._pending_volume_job = None
-        mixer_ok = self._best_effort_set_volume(percent)
-        tts_ok = self._save_tts_volume_setting(percent)
-
-        if mixer_ok and tts_ok:
-            self._settings_status_text.set(f"Volume set to {percent}% (system + AURA voice).")
-        elif tts_ok:
-            self._settings_status_text.set(f"AURA voice volume set to {percent}% (system mixer unchanged).")
-        elif mixer_ok:
-            self._settings_status_text.set(f"System volume set to {percent}% (AURA voice file not updated).")
+        if self._best_effort_set_volume(percent):
+            self._settings_status_text.set(f"Volume set to {percent}%.")
         else:
             self._settings_status_text.set("Could not change volume on this device.")
 
@@ -1918,7 +2356,7 @@ class AuraConsoleApp:
 
         if err:
             self.voice_status_text.set("Voice request failed.")
-            self._set_voice_result(err)
+            self.voice_result_text.set(err)
             return
 
         transcript = (result or {}).get("transcript", "").strip()
@@ -1927,14 +2365,13 @@ class AuraConsoleApp:
 
         if transcript:
             self.voice_status_text.set(f"Done ({action}).")
-            self._set_voice_result_structured(
-                transcript=transcript,
-                response_text=response_text,
-                action=action,
-            )
+            pieces = [f'Heard: "{transcript}"']
+            if response_text:
+                pieces.append(f'Result: "{response_text}"')
+            self.voice_result_text.set("   ".join(pieces))
         else:
             self.voice_status_text.set("No speech detected.")
-            self._set_voice_result(
+            self.voice_result_text.set(
                 response_text or "Try again and speak a little closer to the mic."
             )
 
@@ -1972,13 +2409,13 @@ class AuraConsoleApp:
             return None
 
         if "[VOICE] question received:" in line:
-            return None
+            return "Heard: " + line.split(":", 1)[1].strip()
         if "[VOICE] speaking:" in line:
             return "Speaking..."
         if "[VOICE] answered:" in line:
             return "Done."
         if "[VOICE] button heard:" in line:
-            return None
+            return "Heard: " + line.split(":", 1)[1].strip()
         if "[VOICE] button capture loading model" in line:
             return "Loading speech model..."
         if "[AURA] Listening for command..." in line:
