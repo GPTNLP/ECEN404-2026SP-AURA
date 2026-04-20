@@ -244,8 +244,14 @@ _CONVERSATIONAL_SYSTEM = (
 
 
 def _is_conversational(query: str) -> bool:
-    """Return True for greetings and off-topic fillers that should bypass RAG retrieval."""
-    return bool(_CONVERSATIONAL_RE.match(query.strip()))
+    """Return True for greetings, off-topic fillers, and garbage inputs that should
+    bypass RAG retrieval. Includes single/double-character inputs — these are never
+    valid domain questions and sending them through FAISS produces random high-scoring
+    passages that hopelessly confuse the answer generation."""
+    stripped = query.strip()
+    if len(stripped) <= 2:
+        return True
+    return bool(_CONVERSATIONAL_RE.match(stripped))
 
 
 def _tokenize(s: str) -> List[str]:

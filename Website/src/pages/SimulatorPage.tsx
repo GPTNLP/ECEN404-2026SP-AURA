@@ -309,27 +309,26 @@ export default function SimulatorPage() {
 
     const userMsg: ChatMsg = { role: "user", content: q, ts: Math.floor(Date.now() / 1000) };
     const optimisticHistory = [...history, userMsg];
-    setHistory(optimisticHistory);
+
+    // Show placeholder assistant bubble immediately — before any network ops so the
+    // user sees feedback instantly. The typing indicator shows until the first SSE
+    // text arrives (detected by placeholder content still being "").
+    const placeholderTs = Math.floor(Date.now() / 1000);
+    const placeholderMsg: ChatMsg = { role: "assistant", content: "", ts: placeholderTs };
+    setHistory([...optimisticHistory, placeholderMsg]);
 
     const t0 = performance.now();
     let sessionId = activeSessionId;
     const inferredTitle = activeSessionId ? activeSessionTitle : buildSessionTitle(loadedDb);
 
     try {
-      if (!sessionId) {
-        sessionId = await createSession(inferredTitle, optimisticHistory);
-      } else {
-        await saveSession(sessionId, optimisticHistory, inferredTitle);
-      }
-
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
 
-      // SSE streaming path: add a placeholder assistant bubble and fill it as
-      // sentences arrive, so the user sees the response being typed in real-time.
-      const placeholderMsg: ChatMsg = { role: "assistant", content: "", ts: Math.floor(Date.now() / 1000) };
-      setHistory([...optimisticHistory, placeholderMsg]);
-
+      // Fire SSE immediately — do NOT await session create/save first.
+      // Session persistence happens after streaming completes so the RTT to Azure
+      // does not block time-to-first-text. We pass the existing sessionId if we have
+      // one (Jetson uses it for local chat logging); null for new chats is fine.
       const res = await fetch(`${API_URL}/device/admin/chat/stream`, {
         method: "POST",
         headers,
@@ -340,7 +339,7 @@ export default function SimulatorPage() {
           payload: {
             db_name: loadedDb,
             query: q,
-            session_id: sessionId,
+            session_id: sessionId ?? null,
           },
         }),
         signal: controller.signal,
@@ -352,7 +351,8 @@ export default function SimulatorPage() {
         throw new Error(errDetail);
       }
 
-      // Read the SSE stream and progressively update the placeholder bubble
+      // Read the SSE stream and progressively update the placeholder bubble.
+      // The typing indicator disappears automatically once content !== "" (see render).
       let accumulated = "";
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
@@ -377,7 +377,7 @@ export default function SimulatorPage() {
               const current = accumulated;
               setHistory(prev => {
                 const next = [...prev];
-                next[next.length - 1] = { role: "assistant", content: current, ts: placeholderMsg.ts };
+                next[next.length - 1] = { role: "assistant", content: current, ts: placeholderTs };
                 return next;
               });
             }
@@ -388,12 +388,14 @@ export default function SimulatorPage() {
       }
 
       const answer = accumulated.trim() || "(No answer returned)";
-
-      const finalHistory = [...optimisticHistory, { role: "assistant" as const, content: answer, ts: placeholderMsg.ts }];
+      const finalHistory = [...optimisticHistory, { role: "assistant" as const, content: answer, ts: placeholderTs }];
       setHistory(finalHistory);
       setActiveSessionTitle(inferredTitle);
 
-      if (sessionId) {
+      // Session persistence after streaming — no longer on the critical latency path.
+      if (!sessionId) {
+        sessionId = await createSession(inferredTitle, finalHistory);
+      } else {
         await saveSession(sessionId, finalHistory, inferredTitle);
       }
 
@@ -407,7 +409,7 @@ export default function SimulatorPage() {
           db: loadedDb,
           device_id: DEVICE_ID,
           session_id: sessionId,
-          command_status: "completed", // <-- Hardcode to "completed" since the stream finished successfully
+          command_status: "completed",
         },
       });
     } catch (err: any) {
@@ -423,11 +425,7 @@ export default function SimulatorPage() {
       setHistory(erroredHistory);
 
       if (sessionId) {
-        try {
-          await saveSession(sessionId, erroredHistory, inferredTitle);
-        } catch {
-          // ignore secondary save failure
-        }
+        try { await saveSession(sessionId, erroredHistory, inferredTitle); } catch { /* */ }
       }
 
       const latency = Math.round(performance.now() - t0);
@@ -436,11 +434,7 @@ export default function SimulatorPage() {
         prompt: q,
         response_preview: msg.slice(0, 600),
         latency_ms: latency,
-        meta: {
-          db: loadedDb,
-          device_id: DEVICE_ID,
-          session_id: sessionId,
-        },
+        meta: { db: loadedDb, device_id: DEVICE_ID, session_id: sessionId },
       });
     } finally {
       setLoading(false);
