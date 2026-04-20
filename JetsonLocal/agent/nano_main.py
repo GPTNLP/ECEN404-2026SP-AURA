@@ -300,8 +300,6 @@ class AuraConsoleApp:
         self._show_home()
 
     def _compute_version_label(self) -> str:
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
         def _git_out(args):
             try:
                 proc = subprocess.run(
@@ -317,11 +315,35 @@ class AuraConsoleApp:
             except Exception:
                 return None
 
-        inside_repo = _git_out(["git", "-C", repo_root, "rev-parse", "--is-inside-work-tree"])
-        if inside_repo != "true":
+        def _find_repo_root():
+            seeds = [
+                os.path.dirname(os.path.abspath(__file__)),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+                os.getcwd(),
+            ]
+
+            seen = set()
+            for seed in seeds:
+                cur = os.path.abspath(seed)
+                while cur and cur not in seen:
+                    seen.add(cur)
+                    if os.path.isdir(os.path.join(cur, ".git")):
+                        return cur
+                    inside = _git_out(["git", "-C", cur, "rev-parse", "--is-inside-work-tree"])
+                    if inside == "true":
+                        top = _git_out(["git", "-C", cur, "rev-parse", "--show-toplevel"])
+                        return top or cur
+                    parent = os.path.dirname(cur)
+                    if parent == cur:
+                        break
+                    cur = parent
+            return None
+
+        repo_root = _find_repo_root()
+        if not repo_root:
             return "BUILD LOCAL"
 
-        commit_count = _git_out(["git", "-C", repo_root, "rev-list", "--count", "--first-parent", "HEAD"])
+        commit_count = _git_out(["git", "-C", repo_root, "rev-list", "--count", "HEAD"])
         if commit_count:
             try:
                 return f"BUILD {int(commit_count):04d}"
