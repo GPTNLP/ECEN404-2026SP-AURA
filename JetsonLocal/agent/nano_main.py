@@ -23,6 +23,7 @@ except Exception as exc:
 
 SERVICE_NAME = "aura-agent.service"
 API_BASE = "http://127.0.0.1:8000"
+TTS_SETTINGS_PATH = os.path.expanduser("~/SDP/AURA/JetsonLocal/storage/tts_settings.json")
 
 MAX_LOG_LINES = 220
 MAX_RAW_LOG_LINES = 600
@@ -101,14 +102,12 @@ class AuraConsoleApp:
         self.vision_meta_text = tk.StringVar(value="")
         self.detection_text = tk.StringVar(value="No detections yet.")
         self.voice_status_text = tk.StringVar(
-            value="Press the mic, wait for listening, then tap again to stop."
+            value="Press the mic, speak once, and AURA will respond."
         )
         self.voice_result_text = tk.StringVar(
             value="Last voice result will appear here."
         )
         self.voice_busy = False
-        self.voice_phase = "idle"
-        self._voice_poll_job = None
 
         self._settings_volume_var = tk.DoubleVar(value=50.0)
         self._settings_brightness_var = tk.DoubleVar(value=100.0)
@@ -426,6 +425,78 @@ class AuraConsoleApp:
             except Exception:
                 pass
 
+
+    def _load_tts_volume_setting(self):
+        try:
+            with open(TTS_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            percent = int(float(data.get("volume_percent", 50)))
+            return max(0, min(100, percent))
+        except Exception:
+            return None
+
+    def _save_tts_volume_setting(self, percent: int) -> bool:
+        try:
+            os.makedirs(os.path.dirname(TTS_SETTINGS_PATH), exist_ok=True)
+            payload = {"volume_percent": max(0, min(100, int(percent)))}
+            with open(TTS_SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            return True
+        except Exception:
+            return False
+
+    def _set_voice_result(self, text: str, *, follow_top: bool = True):
+        if not hasattr(self, "voice_result_box"):
+            self.voice_result_text.set(text or "")
+            return
+
+        value = (text or "").strip() or " "
+        self.voice_result_box.configure(state="normal")
+        self.voice_result_box.delete("1.0", "end")
+        self.voice_result_box.insert("end", value, "voice_body")
+        if follow_top:
+            self.voice_result_box.see("1.0")
+        self.voice_result_box.configure(state="disabled")
+
+    def _set_voice_result_structured(self, transcript: str = "", response_text: str = "", action: str = ""):
+        if not hasattr(self, "voice_result_box"):
+            pieces = []
+            if transcript:
+                pieces.append(f'Heard: "{transcript}"')
+            if response_text:
+                pieces.append(f'AURA said: "{response_text}"')
+            if action and not pieces:
+                pieces.append(f"Action: {action}")
+            self.voice_result_text.set("\n\n".join(pieces) or "No voice result.")
+            return
+
+        transcript = (transcript or "").strip()
+        response_text = (response_text or "").strip()
+        action = (action or "").strip()
+
+        self.voice_result_box.configure(state="normal")
+        self.voice_result_box.delete("1.0", "end")
+
+        if transcript:
+            self.voice_result_box.insert("end", "HEARD\n", "voice_label")
+            self.voice_result_box.insert("end", transcript + "\n\n", "voice_body")
+
+        if response_text:
+            label = "AURA SAID"
+            if action and action not in {"llm", "unknown"}:
+                label = f"AURA SAID ({action.upper()})"
+            self.voice_result_box.insert("end", label + "\n", "voice_label")
+            self.voice_result_box.insert("end", response_text, "voice_body")
+        elif action:
+            self.voice_result_box.insert("end", "ACTION\n", "voice_label")
+            self.voice_result_box.insert("end", action, "voice_body")
+
+        if not transcript and not response_text and not action:
+            self.voice_result_box.insert("end", "No voice result.", "voice_muted")
+
+        self.voice_result_box.see("1.0")
+        self.voice_result_box.configure(state="disabled")
+
     def _llm_input_click(self, event=None):
         self._best_effort_disable_system_keyboard()
         try:
@@ -630,18 +701,64 @@ class AuraConsoleApp:
             pady=2,
         ).pack(fill="x")
 
-        tk.Label(
+        voice_result_wrap = tk.Frame(
             self.voice_card,
-            textvariable=self.voice_result_text,
-            fg="#94a3b8",
-            bg="#0b0f14",
-            font=info_font,
-            anchor="w",
-            justify="left",
-            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
-            padx=14,
-            pady=0,
-        ).pack(fill="x", pady=(0, 12))
+            bg="#04130b",
+            highlightbackground="#14532d",
+            highlightthickness=1,
+        )
+        voice_result_wrap.pack(fill="x", padx=14, pady=(0, 12))
+        voice_result_wrap.pack_propagate(False)
+        voice_result_wrap.configure(height=max(118, int(self.root.winfo_screenheight() * 0.145)))
+
+        self.voice_result_scroll = tk.Scrollbar(
+            voice_result_wrap,
+            orient="vertical",
+            width=20,
+            troughcolor="#04130b",
+            activebackground="#14f195",
+            bg="#0b1a11",
+            highlightthickness=0,
+            relief="flat",
+        )
+        self.voice_result_scroll.pack(side="right", fill="y")
+
+        voice_result_font = tkfont.Font(
+            family="Courier",
+            size=max(10, int(self.root.winfo_screenwidth() * 0.0125)),
+            weight="bold",
+        )
+        voice_result_label_font = tkfont.Font(
+            family="Courier",
+            size=max(10, int(self.root.winfo_screenwidth() * 0.0125)),
+            weight="bold",
+        )
+
+        self.voice_result_box = tk.Text(
+            voice_result_wrap,
+            bg="#04130b",
+            fg="#dcfce7",
+            insertbackground="#dcfce7",
+            relief="flat",
+            wrap="word",
+            font=voice_result_font,
+            padx=10,
+            pady=8,
+            height=5,
+            state="disabled",
+            spacing1=2,
+            spacing2=2,
+            spacing3=4,
+            yscrollcommand=self.voice_result_scroll.set,
+        )
+        self.voice_result_box.pack(side="left", fill="both", expand=True)
+        self.voice_result_scroll.config(command=self.voice_result_box.yview)
+        self._make_text_passive(self.voice_result_box)
+        self.voice_result_box.tag_configure("voice_label", foreground="#14f195", font=voice_result_label_font)
+        self.voice_result_box.tag_configure("voice_body", foreground="#dcfce7", font=voice_result_font)
+        self.voice_result_box.tag_configure("voice_muted", foreground="#86efac", font=voice_result_font)
+
+        self._set_voice_result("Last voice result will appear here.")
 
         self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
         self.home_console_panel.pack(fill="both", expand=True)
@@ -1459,7 +1576,9 @@ class AuraConsoleApp:
 
 
     def _load_settings_state(self):
-        volume = self._get_system_volume()
+        volume = self._load_tts_volume_setting()
+        if volume is None:
+            volume = self._get_system_volume()
         if volume is not None:
             self._settings_volume_var.set(volume)
             self._settings_volume_text.set(f"{int(volume)}%")
@@ -1505,8 +1624,15 @@ class AuraConsoleApp:
 
     def _apply_volume(self, percent: int):
         self._pending_volume_job = None
-        if self._best_effort_set_volume(percent):
-            self._settings_status_text.set(f"Volume set to {percent}%.")
+        mixer_ok = self._best_effort_set_volume(percent)
+        tts_ok = self._save_tts_volume_setting(percent)
+
+        if mixer_ok and tts_ok:
+            self._settings_status_text.set(f"Volume set to {percent}% (system + AURA voice).")
+        elif tts_ok:
+            self._settings_status_text.set(f"AURA voice volume set to {percent}% (system mixer unchanged).")
+        elif mixer_ok:
+            self._settings_status_text.set(f"System volume set to {percent}% (AURA voice file not updated).")
         else:
             self._settings_status_text.set("Could not change volume on this device.")
 
@@ -1761,113 +1887,38 @@ class AuraConsoleApp:
     # Voice
     # =========================
 
-    def _set_voice_phase(self, phase: str, detail: str = ""):
-        self.voice_phase = (phase or "idle").strip().lower()
-        active = self.voice_phase in {"loading", "listening", "processing", "speaking"}
-        self.voice_busy = active
-
+    def _set_voice_busy(self, busy: bool, status: str = ""):
+        self.voice_busy = busy
         if hasattr(self, "voice_button"):
-            label_map = {
-                "idle": "Tap Mic",
-                "loading": "Loading...",
-                "listening": "Stop Mic",
-                "processing": "Processing...",
-                "speaking": "Speaking...",
-                "error": "Tap Mic",
-            }
-            self.voice_button.configure(text=label_map.get(self.voice_phase, "Tap Mic"))
-
-        if self.voice_phase == "idle":
-            self.voice_status_text.set(detail or "Press the mic, wait for listening, then tap again to stop.")
-        elif self.voice_phase == "loading":
-            self.voice_status_text.set(detail or "Loading speech model...")
-        elif self.voice_phase == "listening":
-            self.voice_status_text.set(detail or "Listening... tap again to stop.")
-        elif self.voice_phase == "processing":
-            self.voice_status_text.set(detail or "Processing your speech...")
-        elif self.voice_phase == "speaking":
-            self.voice_status_text.set(detail or "Speaking...")
-        elif self.voice_phase == "error":
-            self.voice_status_text.set(detail or "Voice request failed.")
-
-    def _start_voice_poll(self):
-        if self._voice_poll_job is None:
-            self._voice_poll_status()
-
-    def _stop_voice_poll(self):
-        if self._voice_poll_job is not None:
-            try:
-                self.root.after_cancel(self._voice_poll_job)
-            except Exception:
-                pass
-            self._voice_poll_job = None
-
-    def _voice_poll_status(self):
-        self._voice_poll_job = None
-        if not self.running:
-            return
-
-        def _worker():
-            try:
-                result = self._http_json("GET", "/voice/status", timeout=1.2)
-                self.root.after(0, lambda r=result: self._apply_voice_status(r))
-            except Exception:
-                pass
-
-        threading.Thread(target=_worker, daemon=True).start()
-        self._voice_poll_job = self.root.after(350, self._voice_poll_status)
-
-    def _apply_voice_status(self, result):
-        phase = ((result or {}).get("button_phase") or "").strip().lower()
-        detail = (result or {}).get("button_detail", "").strip()
-        if phase:
-            self._set_voice_phase(phase, detail)
+            self.voice_button.configure(text="Listening..." if busy else "Tap Mic")
+        self.voice_status_text.set(
+            status or ("Listening for your question..." if busy else "Press the mic, speak once, and AURA will respond.")
+        )
 
     def _run_voice_button(self):
-        if self.voice_phase in {"idle", "error"}:
-            self._set_voice_phase("loading", "Loading speech model...")
-            self.voice_result_text.set("AURA is loading the speech model.")
-            self._start_voice_poll()
-
-            def _call_start():
-                try:
-                    result = self._http_json_post("/voice/button/start", {}, timeout=45.0)
-                    self.root.after(0, lambda: self._voice_button_start_done(result, None))
-                except Exception as exc:
-                    self.root.after(0, lambda: self._voice_button_start_done(None, str(exc)))
-
-            threading.Thread(target=_call_start, daemon=True).start()
+        if self.voice_busy:
             return
 
-        if self.voice_phase in {"loading", "listening"}:
-            self._set_voice_phase("processing", "Processing your speech...")
+        self._set_voice_busy(True, "Listening for your question...")
+        self.voice_result_text.set(
+            "Speak normally. AURA will process after about 1 second of silence."
+        )
 
-            def _call_stop():
-                try:
-                    result = self._http_json_post("/voice/button/stop", {}, timeout=240.0)
-                    self.root.after(0, lambda: self._voice_request_done(result, None))
-                except Exception as exc:
-                    self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
+        def _call():
+            try:
+                result = self._http_json_post("/voice/listen_once", {}, timeout=180.0)
+                self.root.after(0, lambda: self._voice_request_done(result, None))
+            except Exception as exc:
+                self.root.after(0, lambda: self._voice_request_done(None, str(exc)))
 
-            threading.Thread(target=_call_stop, daemon=True).start()
-
-    def _voice_button_start_done(self, result, err):
-        if err:
-            self._set_voice_phase("error", "Voice start failed.")
-            self.voice_result_text.set(err)
-            self._stop_voice_poll()
-            return
-
-        self._set_voice_phase("listening", (result or {}).get("detail", "Listening... tap again to stop."))
-        self.voice_result_text.set("Speak now, then tap the mic again when you are done.")
+        threading.Thread(target=_call, daemon=True).start()
 
     def _voice_request_done(self, result, err):
-        self._stop_voice_poll()
-        self._set_voice_phase("idle", "Press the mic, wait for listening, then tap again to stop.")
+        self._set_voice_busy(False)
 
         if err:
-            self._set_voice_phase("error", "Voice request failed.")
-            self.voice_result_text.set(err)
+            self.voice_status_text.set("Voice request failed.")
+            self._set_voice_result(err)
             return
 
         transcript = (result or {}).get("transcript", "").strip()
@@ -1876,13 +1927,14 @@ class AuraConsoleApp:
 
         if transcript:
             self.voice_status_text.set(f"Done ({action}).")
-            pieces = [f'Heard: "{transcript}"']
-            if response_text:
-                pieces.append(f'Result: "{response_text}"')
-            self.voice_result_text.set("   ".join(pieces))
+            self._set_voice_result_structured(
+                transcript=transcript,
+                response_text=response_text,
+                action=action,
+            )
         else:
             self.voice_status_text.set("No speech detected.")
-            self.voice_result_text.set(
+            self._set_voice_result(
                 response_text or "Try again and speak a little closer to the mic."
             )
 
@@ -1920,13 +1972,13 @@ class AuraConsoleApp:
             return None
 
         if "[VOICE] question received:" in line:
-            return "Heard: " + line.split(":", 1)[1].strip()
+            return None
         if "[VOICE] speaking:" in line:
             return "Speaking..."
         if "[VOICE] answered:" in line:
             return "Done."
         if "[VOICE] button heard:" in line:
-            return "Heard: " + line.split(":", 1)[1].strip()
+            return None
         if "[VOICE] button capture loading model" in line:
             return "Loading speech model..."
         if "[AURA] Listening for command..." in line:
@@ -2342,10 +2394,6 @@ class AuraConsoleApp:
 
     def on_close(self, event=None):
         self.running = False
-        try:
-            self._stop_voice_poll()
-        except Exception:
-            pass
         try:
             self.leave_vision_mode()
         except Exception:

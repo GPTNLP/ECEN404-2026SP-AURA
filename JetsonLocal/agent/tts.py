@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import subprocess
 import shutil
@@ -15,6 +16,15 @@ ENV_PATH = JETSONLOCAL_DIR / ".env"
 
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
+
+TTS_SETTINGS_PATH = Path(
+    os.path.expanduser(
+        os.getenv(
+            "AURA_TTS_SETTINGS_PATH",
+            str(JETSONLOCAL_DIR / "storage" / "tts_settings.json"),
+        )
+    )
+)
 
 
 class TTSService:
@@ -33,6 +43,19 @@ class TTSService:
         self.aplay_bin = shutil.which("aplay")
         self.espeak_bin = shutil.which("espeak-ng")
 
+    def _read_volume_percent(self) -> int:
+        try:
+            with open(TTS_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            percent = int(float(data.get("volume_percent", 50)))
+            return max(0, min(100, percent))
+        except Exception:
+            return 50
+
+    def _volume_multiplier(self, volume_percent: int) -> float:
+        volume_percent = max(0, min(100, int(volume_percent)))
+        return max(0.0, volume_percent / 100.0)
+
     # ---------------------------
     # INTERNAL PLAYBACK HELPERS
     # ---------------------------
@@ -47,9 +70,11 @@ class TTSService:
 
         subprocess.run(cmd, check=True)
 
-    def _decode_mp3_to_wav(self, mp3_path: str, wav_path: str) -> None:
+    def _decode_mp3_to_wav(self, mp3_path: str, wav_path: str, volume_percent: int = 50) -> None:
         if not self.ffmpeg_bin:
             raise RuntimeError("ffmpeg is not installed or not found in PATH.")
+
+        multiplier = self._volume_multiplier(volume_percent)
 
         subprocess.run(
             [
@@ -59,6 +84,8 @@ class TTSService:
                 "quiet",
                 "-i",
                 mp3_path,
+                "-filter:a",
+                f"volume={multiplier:.3f}",
                 wav_path,
             ],
             check=True,
@@ -67,7 +94,7 @@ class TTSService:
     # ---------------------------
     # ONLINE (ElevenLabs)
     # ---------------------------
-    def _speak_elevenlabs(self, text: str) -> bool:
+    def _speak_elevenlabs(self, text: str, volume_percent: int = 50) -> bool:
         if not self.api_key:
             raise RuntimeError("ELEVENLABS_API_KEY is missing.")
         if not self.voice_id:
@@ -104,10 +131,10 @@ class TTSService:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
                 wav_tmp = f.name
 
-            self._decode_mp3_to_wav(mp3_tmp, wav_tmp)
+            self._decode_mp3_to_wav(mp3_tmp, wav_tmp, volume_percent=volume_percent)
             self._play_wav_on_device(wav_tmp)
 
-            print(f"[TTS] ElevenLabs: {text}")
+            print(f"[TTS] ElevenLabs: {text} | volume={volume_percent}%")
             return True
 
         finally:
@@ -119,7 +146,7 @@ class TTSService:
     # ---------------------------
     # OFFLINE (espeak-ng -> aplay)
     # ---------------------------
-    def _speak_offline(self, text: str) -> bool:
+    def _speak_offline(self, text: str, volume_percent: int = 50) -> bool:
         if not self.espeak_bin:
             print("[TTS ERROR] offline failed: espeak-ng not found in PATH")
             return False
@@ -129,7 +156,8 @@ class TTSService:
             return False
 
         try:
-            espeak_cmd = [self.espeak_bin, "--stdout", text]
+            amplitude = max(0, min(200, int(round((max(0, min(100, volume_percent)) / 100.0) * 200))))
+            espeak_cmd = [self.espeak_bin, "-a", str(amplitude), "--stdout", text]
             aplay_cmd = [self.aplay_bin]
 
             if self.device:
@@ -162,7 +190,7 @@ class TTSService:
             if aplay_rc != 0:
                 raise RuntimeError(f"aplay failed: {aplay_stderr.strip()}")
 
-            print(f"[TTS] Offline fallback: {text}")
+            print(f"[TTS] Offline fallback: {text} | volume={volume_percent}%")
             return True
 
         except Exception as e:
