@@ -31,6 +31,25 @@ ensure_user_owns_path() {
     fi
 }
 
+ensure_local_git_excludes() {
+    local exclude_file="$PROJECT_DIR/.git/info/exclude"
+
+    if [ ! -d "$PROJECT_DIR/.git" ]; then
+        echo "[setup] no .git directory found, skipping local exclude setup"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$exclude_file")"
+    touch "$exclude_file"
+
+    grep -qxF 'start_aura.sh' "$exclude_file" || echo 'start_aura.sh' >> "$exclude_file"
+    grep -qxF 'aura_env/' "$exclude_file" || echo 'aura_env/' >> "$exclude_file"
+    grep -qxF 'storage/logs/' "$exclude_file" || echo 'storage/logs/' >> "$exclude_file"
+    grep -qxF 'storage/queue/' "$exclude_file" || echo 'storage/queue/' >> "$exclude_file"
+
+    echo "[setup] ensured local git excludes for Jetson-only files"
+}
+
 echo "Installing system dependencies..."
 sudo apt-get update
 
@@ -104,6 +123,8 @@ else
     ensure_user_owns_path "$VENV_DIR"
 fi
 
+ensure_local_git_excludes
+
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
@@ -147,8 +168,8 @@ wait_for_github() {
 }
 
 repo_has_changes() {
-  ! git diff --quiet || \
-  ! git diff --cached --quiet || \
+  ! git diff --quiet || \\
+  ! git diff --cached --quiet || \\
   [ -n "\$(git ls-files --others --exclude-standard)" ]
 }
 
@@ -159,10 +180,10 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   if wait_for_github; then
     if repo_has_changes; then
       STASH_MSG="auto-start stash \$(date '+%Y-%m-%d %H:%M:%S')"
-      echo "[start_aura] local changes detected, stashing them..."
+      echo "[start_aura] local changes detected, stashing tracked changes..."
       git status --short || true
-      if git stash push --include-untracked -m "\$STASH_MSG"; then
-        echo "[start_aura] stashed local changes as: \$STASH_MSG"
+      if git stash push -m "\$STASH_MSG"; then
+        echo "[start_aura] stashed tracked changes as: \$STASH_MSG"
       else
         echo "[start_aura] stash failed, continuing anyway"
       fi
@@ -263,15 +284,17 @@ echo "2. Never deletes aura_env"
 echo "3. Updates packages inside the existing venv"
 echo "4. Rewrites start_aura.sh"
 echo "5. Auto-starts agent/main.py on boot"
-echo "6. Stashes local git changes on boot before pull"
-echo "7. Tries git fetch/pull on boot"
-echo "8. Auto-applies /dev/ttyACM0 permissions"
-echo "9. Auto-rotates display left on login"
+echo "6. Stashes tracked git changes on boot before pull"
+echo "7. Leaves untracked Jetson-only files alone"
+echo "8. Tries git fetch/pull on boot"
+echo "9. Auto-applies /dev/ttyACM0 permissions"
+echo "10. Auto-rotates display left on login"
 echo ""
 echo "Useful commands:"
 echo "systemctl status $SERVICE_NAME"
 echo "journalctl -u $SERVICE_NAME -f"
 echo "git -C $PROJECT_DIR stash list"
+echo "git -C $PROJECT_DIR check-ignore -v start_aura.sh aura_env storage/logs storage/queue"
 echo "cat $PROJECT_DIR/start_aura.sh"
 echo ""
 echo "No reboot required. This script already restarts the service."
