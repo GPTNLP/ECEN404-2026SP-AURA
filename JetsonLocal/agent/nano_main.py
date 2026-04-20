@@ -180,41 +180,75 @@ class AuraConsoleApp:
         )
         self.header.pack(fill="x", pady=(0, 10))
 
-        header_inner = tk.Frame(self.header, bg="#0b0f14", height=82)
+        header_inner = tk.Frame(self.header, bg="#0b0f14", height=88)
         header_inner.pack(fill="x")
         header_inner.pack_propagate(False)
+        header_inner.grid_columnconfigure(0, minsize=max(170, int(sw * 0.15)))
+        header_inner.grid_columnconfigure(1, weight=1)
+        header_inner.grid_columnconfigure(2, minsize=max(170, int(sw * 0.15)))
 
-        icon_font = tkfont.Font(
-            family="Courier", size=max(18, int(sw * 0.0215)), weight="bold"
+        control_icon_font = tkfont.Font(
+            family="Courier", size=max(18, int(sw * 0.0205)), weight="bold"
         )
-        settings_icon_font = tkfont.Font(
-            family="Courier", size=max(20, int(sw * 0.024)), weight="bold"
-        )
-
         version_font = tkfont.Font(
-            family="Courier", size=max(11, int(sw * 0.0135)), weight="bold"
+            family="Courier", size=max(11, int(sw * 0.0130)), weight="bold"
         )
 
-        version_wrap = tk.Frame(header_inner, bg="#0b0f14")
-        version_wrap.pack(side="left", padx=(10, 0), pady=10)
+        left_slot = tk.Frame(header_inner, bg="#0b0f14", height=64, width=max(170, int(sw * 0.15)))
+        left_slot.grid(row=0, column=0, sticky="w", padx=(12, 0), pady=12)
+        left_slot.grid_propagate(False)
+
+        center_slot = tk.Frame(header_inner, bg="#0b0f14", height=64)
+        center_slot.grid(row=0, column=1, sticky="nsew", padx=12, pady=12)
+        center_slot.grid_propagate(False)
+
+        right_slot = tk.Frame(header_inner, bg="#0b0f14", height=64, width=max(170, int(sw * 0.15)))
+        right_slot.grid(row=0, column=2, sticky="e", padx=(0, 12), pady=12)
+        right_slot.grid_propagate(False)
 
         self.version_badge = tk.Label(
-            version_wrap,
+            left_slot,
             textvariable=self.version_text,
-            fg="#14f195",
+            fg="#bbf7d0",
             bg="#052e1c",
             font=version_font,
             anchor="center",
-            padx=12,
-            pady=8,
+            padx=14,
+            pady=10,
             highlightthickness=1,
             highlightbackground="#14f195",
             highlightcolor="#14f195",
         )
-        self.version_badge.pack()
+        self.version_badge.pack(side="left", anchor="w")
 
-        header_actions = tk.Frame(header_inner, bg="#0b0f14")
-        header_actions.pack(side="right", padx=(0, 10), pady=10)
+        self.header_label = tk.Label(
+            center_slot,
+            textvariable=self.banner_text,
+            fg="#14f195",
+            bg="#0b0f14",
+            font=title_font,
+            anchor="center",
+        )
+        self.header_label.place(relx=0.5, rely=0.5, anchor="center")
+
+        controls_wrap = tk.Frame(right_slot, bg="#0b0f14")
+        controls_wrap.pack(side="right", anchor="e")
+
+        button_shell_common = {
+            "bg": "#0b0f14",
+            "highlightthickness": 0,
+            "bd": 0,
+            "width": 58,
+            "height": 52,
+        }
+
+        self.reboot_shell = tk.Frame(controls_wrap, **button_shell_common)
+        self.reboot_shell.pack(side="right", padx=(0, 8))
+        self.reboot_shell.pack_propagate(False)
+
+        self.settings_shell = tk.Frame(controls_wrap, **button_shell_common)
+        self.settings_shell.pack(side="right")
+        self.settings_shell.pack_propagate(False)
 
         button_common = {
             "bg": "#0b0f14",
@@ -224,44 +258,28 @@ class AuraConsoleApp:
             "relief": "flat",
             "bd": 0,
             "cursor": "hand2",
-            "width": 3,
-            "height": 1,
-            "padx": 8,
-            "pady": 10,
             "highlightthickness": 1,
             "highlightbackground": "#14f195",
             "highlightcolor": "#14f195",
         }
 
         self.settings_button = tk.Button(
-            header_actions,
+            self.settings_shell,
             text="⚙",
             command=self.open_settings,
-            font=settings_icon_font,
+            font=control_icon_font,
             **button_common,
         )
-        self.settings_button.pack(side="right")
+        self.settings_button.pack(fill="both", expand=True)
 
         self.reboot_button = tk.Button(
-            header_actions,
+            self.reboot_shell,
             text="↻",
             command=self._tap_reboot,
-            font=icon_font,
+            font=control_icon_font,
             **button_common,
         )
-        self.reboot_button.pack(side="right", padx=(0, 8))
-
-        self.header_label = tk.Label(
-            header_inner,
-            textvariable=self.banner_text,
-            fg="#14f195",
-            bg="#0b0f14",
-            font=title_font,
-            anchor="center",
-        )
-        self.header_label.place(relx=0.5, rely=0.5, anchor="center")
-        header_actions.lift()
-
+        self.reboot_button.pack(fill="both", expand=True)
         self.content = tk.Frame(outer, bg="#05070a")
         self.content.pack(fill="both", expand=True)
 
@@ -299,18 +317,18 @@ class AuraConsoleApp:
             except Exception:
                 return None
 
-        commit_count = _git_out(["git", "-C", repo_root, "rev-list", "--count", "HEAD"])
+        inside_repo = _git_out(["git", "-C", repo_root, "rev-parse", "--is-inside-work-tree"])
+        if inside_repo != "true":
+            return "BUILD LOCAL"
+
+        commit_count = _git_out(["git", "-C", repo_root, "rev-list", "--count", "--first-parent", "HEAD"])
         if commit_count:
             try:
-                return f"V.{int(commit_count):04d}"
+                return f"BUILD {int(commit_count):04d}"
             except Exception:
                 pass
 
-        short_hash = _git_out(["git", "-C", repo_root, "rev-parse", "--short", "HEAD"])
-        if short_hash:
-            return f"V.{short_hash.upper()}"
-
-        return "V.LOCAL"
+        return "BUILD LOCAL"
 
     def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
         try:
