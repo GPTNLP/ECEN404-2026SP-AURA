@@ -95,6 +95,7 @@ class AuraConsoleApp:
         self.status_text = tk.StringVar(value="BOOTING")
         self.sub_text = tk.StringVar(value=STATUS_STYLES["BOOTING"]["sub"])
         self.banner_text = tk.StringVar(value="AURA")
+        self.version_text = tk.StringVar(value=self._compute_version_label())
         self.vision_title_text = tk.StringVar(value="")
         self.vision_status_text = tk.StringVar(value="Waiting for camera...")
         self.vision_meta_text = tk.StringVar(value="")
@@ -190,6 +191,28 @@ class AuraConsoleApp:
             family="Courier", size=max(20, int(sw * 0.024)), weight="bold"
         )
 
+        version_font = tkfont.Font(
+            family="Courier", size=max(11, int(sw * 0.0135)), weight="bold"
+        )
+
+        version_wrap = tk.Frame(header_inner, bg="#0b0f14")
+        version_wrap.pack(side="left", padx=(10, 0), pady=10)
+
+        self.version_badge = tk.Label(
+            version_wrap,
+            textvariable=self.version_text,
+            fg="#14f195",
+            bg="#052e1c",
+            font=version_font,
+            anchor="center",
+            padx=12,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.version_badge.pack()
+
         header_actions = tk.Frame(header_inner, bg="#0b0f14")
         header_actions.pack(side="right", padx=(0, 10), pady=10)
 
@@ -257,6 +280,37 @@ class AuraConsoleApp:
         )
 
         self._show_home()
+
+    def _compute_version_label(self) -> str:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+        def _git_out(args):
+            try:
+                proc = subprocess.run(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                value = (proc.stdout or "").strip()
+                return value or None
+            except Exception:
+                return None
+
+        commit_count = _git_out(["git", "-C", repo_root, "rev-list", "--count", "HEAD"])
+        if commit_count:
+            try:
+                return f"V.{int(commit_count):04d}"
+            except Exception:
+                pass
+
+        short_hash = _git_out(["git", "-C", repo_root, "rev-parse", "--short", "HEAD"])
+        if short_hash:
+            return f"V.{short_hash.upper()}"
+
+        return "V.LOCAL"
 
     def _is_scrolled_near_bottom(self, widget, threshold: float = 0.04) -> bool:
         try:
