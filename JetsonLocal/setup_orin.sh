@@ -23,9 +23,6 @@ if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     exit 1
 fi
 
-# -----------------------------
-# Helpers
-# -----------------------------
 ensure_user_owns_path() {
     local path="$1"
     if [ -e "$path" ]; then
@@ -34,9 +31,6 @@ ensure_user_owns_path() {
     fi
 }
 
-# -----------------------------
-# System packages
-# -----------------------------
 echo "Installing system dependencies..."
 sudo apt-get update
 
@@ -56,9 +50,6 @@ sudo apt-get install -y \
 
 echo "System dependencies installed"
 
-# -----------------------------
-# Install Ollama if missing
-# -----------------------------
 if ! command -v ollama >/dev/null 2>&1; then
     echo "Installing Ollama..."
     curl -fsSL https://ollama.com/install.sh | sh
@@ -101,14 +92,11 @@ ollama pull llama3.2:latest
 ollama pull llama3.2:1b-instruct-q4_K_M
 ollama pull nomic-embed-text
 
-# -----------------------------
-# Reuse existing venv only
-# -----------------------------
 VENV_DIR="$PROJECT_DIR/aura_env"
 
 if [ -d "$VENV_DIR" ]; then
     echo "Existing aura_env detected"
-    echo "Reusing existing virtual environment (will not delete it)"
+    echo "Reusing existing virtual environment"
     ensure_user_owns_path "$VENV_DIR"
 else
     echo "No aura_env found, creating a fresh virtual environment..."
@@ -132,9 +120,6 @@ python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 echo "Installing Jetson-specific Python libraries..."
 python -m pip install --no-user jetson-stats SpeechRecognition Pillow sounddevice
 
-# -----------------------------
-# Create startup launcher
-# -----------------------------
 echo "Creating startup launcher..."
 cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 #!/usr/bin/env bash
@@ -161,10 +146,10 @@ wait_for_github() {
   return 1
 }
 
-repo_is_clean() {
-  git diff --quiet &&
-  git diff --cached --quiet &&
-  [ -z "\$(git ls-files --others --exclude-standard)" ]
+repo_has_changes() {
+  ! git diff --quiet || \
+  ! git diff --cached --quiet || \
+  [ -n "\$(git ls-files --others --exclude-standard)" ]
 }
 
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -172,18 +157,24 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
   echo "[start_aura] current branch: \$CURRENT_BRANCH"
 
   if wait_for_github; then
+    if repo_has_changes; then
+      STASH_MSG="auto-start stash \$(date '+%Y-%m-%d %H:%M:%S')"
+      echo "[start_aura] local changes detected, stashing them..."
+      git status --short || true
+      if git stash push --include-untracked -m "\$STASH_MSG"; then
+        echo "[start_aura] stashed local changes as: \$STASH_MSG"
+      else
+        echo "[start_aura] stash failed, continuing anyway"
+      fi
+    fi
+
     echo "[start_aura] fetching latest code..."
     if git fetch origin "\$CURRENT_BRANCH"; then
-      if repo_is_clean; then
-        echo "[start_aura] repo clean, pulling latest code..."
-        if git pull --ff-only origin "\$CURRENT_BRANCH"; then
-          echo "[start_aura] git pull complete"
-        else
-          echo "[start_aura] git pull failed, continuing with local files"
-        fi
+      echo "[start_aura] pulling latest code..."
+      if git pull --ff-only origin "\$CURRENT_BRANCH"; then
+        echo "[start_aura] git pull complete"
       else
-        echo "[start_aura] repo has local changes; skipping auto-pull"
-        git status --short || true
+        echo "[start_aura] git pull failed, continuing with local files"
       fi
     else
       echo "[start_aura] git fetch failed, continuing with local files"
@@ -202,9 +193,6 @@ EOF
 chmod +x "$PROJECT_DIR/start_aura.sh"
 ensure_user_owns_path "$PROJECT_DIR/start_aura.sh"
 
-# -----------------------------
-# Serial permissions via udev
-# -----------------------------
 echo "Creating udev rule for /dev/ttyACM0..."
 sudo tee /etc/udev/rules.d/99-aura-serial.rules > /dev/null <<'EOF'
 SUBSYSTEM=="tty", KERNEL=="ttyACM0", MODE="0666"
@@ -213,9 +201,6 @@ EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
-# -----------------------------
-# Systemd service
-# -----------------------------
 echo "Creating systemd service..."
 sudo tee "/etc/systemd/system/$SERVICE_NAME" > /dev/null <<EOF
 [Unit]
@@ -251,9 +236,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 sudo systemctl restart "$SERVICE_NAME"
 
-# -----------------------------
-# Display rotate helper
-# -----------------------------
 echo "Creating display rotation autostart..."
 mkdir -p "$USER_HOME/.config/autostart"
 
@@ -267,15 +249,9 @@ EOF
 
 sudo chown -R "$USER_NAME:$USER_NAME" "$USER_HOME/.config"
 
-# -----------------------------
-# Final ownership cleanup
-# -----------------------------
 ensure_user_owns_path "$PROJECT_DIR"
 ensure_user_owns_path "$VENV_DIR"
 
-# -----------------------------
-# Done
-# -----------------------------
 echo ""
 echo "===================================="
 echo "Setup Complete"
@@ -287,13 +263,15 @@ echo "2. Never deletes aura_env"
 echo "3. Updates packages inside the existing venv"
 echo "4. Rewrites start_aura.sh"
 echo "5. Auto-starts agent/main.py on boot"
-echo "6. Attempts git fetch/pull on boot only if repo is clean"
-echo "7. Auto-applies /dev/ttyACM0 permissions"
-echo "8. Auto-rotates display left on login"
+echo "6. Stashes local git changes on boot before pull"
+echo "7. Tries git fetch/pull on boot"
+echo "8. Auto-applies /dev/ttyACM0 permissions"
+echo "9. Auto-rotates display left on login"
 echo ""
 echo "Useful commands:"
 echo "systemctl status $SERVICE_NAME"
 echo "journalctl -u $SERVICE_NAME -f"
+echo "git -C $PROJECT_DIR stash list"
 echo "cat $PROJECT_DIR/start_aura.sh"
 echo ""
 echo "No reboot required. This script already restarts the service."
