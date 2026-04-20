@@ -637,18 +637,51 @@ class AuraConsoleApp:
             pady=2,
         ).pack(fill="x")
 
-        tk.Label(
+        voice_result_wrap = tk.Frame(
             self.voice_card,
-            textvariable=self.voice_result_text,
-            fg="#94a3b8",
-            bg="#0b0f14",
+            bg="#04130b",
+            highlightbackground="#14f195",
+            highlightthickness=1,
+        )
+        voice_result_wrap.pack(fill="x", padx=12, pady=(4, 12))
+        voice_result_wrap.pack_propagate(False)
+        voice_result_wrap.configure(height=max(112, int(self.root.winfo_screenheight() * 0.14)))
+
+        voice_scroll = tk.Scrollbar(
+            voice_result_wrap,
+            orient="vertical",
+            width=18,
+            troughcolor="#04130b",
+            activebackground="#14f195",
+            bg="#0b1a11",
+            highlightthickness=0,
+            relief="flat",
+        )
+        voice_scroll.pack(side="right", fill="y")
+
+        self.voice_result_box = tk.Text(
+            voice_result_wrap,
+            bg="#04130b",
+            fg="#bbf7d0",
+            insertbackground="#bbf7d0",
+            relief="flat",
+            wrap="word",
             font=info_font,
-            anchor="w",
-            justify="left",
-            wraplength=max(600, int(self.root.winfo_screenwidth() * 0.88)),
-            padx=14,
-            pady=0,
-        ).pack(fill="x", pady=(0, 12))
+            padx=12,
+            pady=10,
+            spacing1=2,
+            spacing2=2,
+            spacing3=2,
+            state="disabled",
+            yscrollcommand=voice_scroll.set,
+        )
+        self.voice_result_box.pack(side="left", fill="both", expand=True)
+        voice_scroll.config(command=self.voice_result_box.yview)
+        self._make_text_passive(self.voice_result_box)
+        self.voice_result_box.tag_configure("voice_label", foreground="#14f195")
+        self.voice_result_box.tag_configure("voice_body", foreground="#dcfce7")
+        self.voice_result_box.tag_configure("voice_muted", foreground="#86efac")
+        self._set_voice_result("Voice results will appear here.")
 
         self.home_console_panel = tk.Frame(self.home_dashboard, bg="#05070a")
         self.home_console_panel.pack(fill="both", expand=True)
