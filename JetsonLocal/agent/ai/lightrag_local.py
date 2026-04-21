@@ -1422,26 +1422,41 @@ class LightRAG:
                     sources.append(src)
 
         # ── 5. Build context + generate answer ───────────────────────────
+        # The system prompt and prompt format are split by whether retrieval found
+        # anything.  When context is non-empty the model has no "not covered" escape
+        # hatch — small models (1b) mis-fire that path far too often when passages
+        # exist but lack a clean single-sentence definition.  The Python code decides
+        # which branch to take; the LLM only needs to answer from what it is given.
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
-        system = (
-            "You are AURA, a helpful lab assistant robot. "
-            "Answer the question using the retrieved passages as your primary source. "
-            "If the passages directly answer the question, answer from them. "
-            "If the passages only partially answer or mention the topic indirectly, "
-            "combine what the passages say with your general knowledge to give a complete answer — "
-            "briefly note which parts come from the documents vs. your general knowledge. "
-            "If the passages contain no relevant information at all, answer from your general knowledge "
-            "and say 'The loaded documents do not cover this topic, but generally:' before your answer. "
-            "Never invent specific measurements, values, formulas, or technical specifications "
-            "not stated in the passages. "
-            "Never expand an acronym unless its full form is explicitly written in the passages. "
-            "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
-            "Stop after fully answering the question."
-        )
-        prompt = (
-            f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
-            f"Question: {query}\n\nAnswer:"
-        )
+
+        if context.strip():
+            system = (
+                "You are AURA, a helpful lab assistant robot. "
+                "Answer the question using the retrieved passages below. "
+                "Use every relevant passage, including indirect mentions, comparisons, and background. "
+                "If the passages fully answer the question, answer from them. "
+                "If they only partially cover it, use what they say and fill in gaps from your "
+                "general knowledge — briefly note 'based on the documents and general knowledge'. "
+                "Never invent specific measurements, values, formulas, or technical specifications "
+                "not present in the passages. "
+                "Never expand an acronym unless its full form appears in the passages. "
+                "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
+                "Stop after answering."
+            )
+            prompt = (
+                f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
+                f"Question: {query}\n\nAnswer:"
+            )
+        else:
+            # Retrieval returned nothing — no DB loaded or query too dissimilar.
+            # Tell the model explicitly and let it use general knowledge.
+            system = (
+                "You are AURA, a helpful lab assistant robot. "
+                "No relevant passages were retrieved from the knowledge base for this question. "
+                "Answer from your general knowledge and begin your response with exactly: "
+                "'The loaded documents do not cover this topic, but generally:'"
+            )
+            prompt = f"Question: {query}\n\nAnswer:"
         answer = await self.client.generate(
             prompt=prompt, system=system, timeout_s=AURA_OLLAMA_TIMEOUT_S,
             on_token=on_token,
