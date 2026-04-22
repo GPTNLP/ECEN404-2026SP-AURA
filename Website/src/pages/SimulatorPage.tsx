@@ -688,7 +688,7 @@ export default function SimulatorPage() {
                 </div>
               )}
 
-              {history.map((msg, i) => {
+              {history.filter(msg => !(msg.role === "assistant" && msg.content === "")).map((msg, i) => {
                 const isUser = msg.role === "user";
                 const isError = msg.role === "error";
 
@@ -712,7 +712,7 @@ export default function SimulatorPage() {
                       </div>
 
                       <div className="simulator-message-content">
-                        {msg.content || (loading && !isUser ? "Thinking..." : "")}
+                        {msg.content}
                       </div>
                     </div>
                   </div>

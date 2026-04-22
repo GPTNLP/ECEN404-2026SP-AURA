@@ -251,6 +251,13 @@ def _is_conversational(query: str) -> bool:
     stripped = query.strip()
     if len(stripped) <= 2:
         return True
+    # Single-token strings > 20 chars with no spaces are keyboard mash.
+    # No real technical question (MOSFET, oscilloscope, microcontroller) exceeds
+    # ~20 chars as a single word. Sending keyboard mash through FAISS retrieves
+    # random high-scoring passages and the LLM produces a coherent-sounding but
+    # entirely hallucinated answer drawn from whatever document is loaded.
+    if len(stripped.split()) == 1 and len(stripped) > 20:
+        return True
     return bool(_CONVERSATIONAL_RE.match(stripped))
 
 

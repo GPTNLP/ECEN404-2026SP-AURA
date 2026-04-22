@@ -2550,7 +2550,10 @@ class AuraConsoleApp:
                 ready = bool(result.get("ready"))
                 self.root.after(0, lambda: self._update_dataset_label(db_name, ready))
             except Exception:
-                self.root.after(0, lambda: self._update_dataset_label(None, False))
+                # Preserve last known state on transient errors (agent busy with LLM
+                # query, brief network hiccup). Updating to "None" on every timeout
+                # causes the label to flicker whenever the Jetson is processing a query.
+                pass
 
         threading.Thread(target=_fetch, daemon=True).start()
         if self.running:

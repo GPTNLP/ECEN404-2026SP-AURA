@@ -2160,14 +2160,33 @@ async def _warmup_llm():
     num_gpu    = int(os.getenv("AURA_NUM_GPU", "99"))
     keep_alive = os.getenv("AURA_KEEP_ALIVE", "2h")
 
+    # num_ctx MUST match production value — if warmup uses a different num_ctx,
+    # Ollama reloads the model (reallocates KV cache) on the first real query,
+    # paying the full 10-30s load penalty and negating the warmup entirely.
+    # Also prime the system prompt KV cache so real queries skip those ~150 tokens.
+    num_ctx = int(os.getenv("AURA_NUM_CTX", "4096"))
+    _AURA_WARMUP_SYSTEM = (
+        "You are AURA, a helpful lab assistant robot. "
+        "Answer the question using the retrieved passages below. "
+        "Use every relevant passage, including indirect mentions, comparisons, and background. "
+        "If the passages fully answer the question, answer from them. "
+        "If they only partially cover it, use what they say and fill in gaps from your "
+        "general knowledge — briefly note 'based on the documents and general knowledge'. "
+        "Never invent specific measurements, values, formulas, or technical specifications "
+        "not present in the passages. "
+        "Never expand an acronym unless its full form appears in the passages. "
+        "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
+        "Stop after answering."
+    )
     body = {
         "model":      DEFAULT_MODEL,
-        "prompt":     "Hi",
+        "prompt":     "Question: What is a resistor?\n\nAnswer:",
+        "system":     _AURA_WARMUP_SYSTEM,
         "stream":     False,
         "keep_alive": keep_alive,
         "options": {
             "num_predict": 1,
-            "num_ctx":     128,
+            "num_ctx":     num_ctx,
             "num_gpu":     num_gpu,
             "temperature": 0.0,
             "mirostat":    0,
