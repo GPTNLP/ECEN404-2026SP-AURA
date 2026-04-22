@@ -2780,6 +2780,9 @@ class AuraConsoleApp:
                 return f"Error: {detail}" if detail else "Error"
             return None
 
+        if line.startswith("[WS]"):
+            return None
+
         if line.startswith("=") or line.startswith("-" * 10):
             return None
         if line.startswith("RAW TEXT:"):
@@ -2796,6 +2799,23 @@ class AuraConsoleApp:
             if value and value != "None":
                 return "Move: " + value.upper()
             return None
+
+        if line.startswith("[COMMAND] movement requested:"):
+            cmd = line.split(":", 1)[1].strip().upper()
+            return f"Move requested: {cmd}"
+        if line.startswith("[COMMAND] sent "):
+            cmd = line.split("[COMMAND] sent ", 1)[1].strip().upper()
+            return f"Move sent: {cmd}"
+        if line.startswith("[COMMAND] ok "):
+            cmd = line.split("[COMMAND] ok ", 1)[1].strip().upper()
+            return f"Move complete: {cmd}"
+        if line.startswith("[COMMAND] failed "):
+            return line[:120]
+
+        if line.startswith("[SERIAL] sent ->"):
+            payload = line.split("->", 1)[1].strip()
+            payload = payload.replace("MOVE:", "").replace(":", " ").strip().upper()
+            return f"ESP sent: {payload}"
 
         if "[VOICE] question received:" in line:
             return None
@@ -2959,6 +2979,8 @@ class AuraConsoleApp:
         lower = line.lower()
         clean = self._clean_event(line)
 
+        if "[ws]" in lower:
+            return
         if "[startup]" in lower or "telemetry agent running" in lower:
             self._set_status("READY", "AURA services are up")
             return
@@ -2979,6 +3001,9 @@ class AuraConsoleApp:
                 self._set_status("READY", "RAG build complete")
             else:
                 self._set_status("VECTORIZING", clean[:80])
+            return
+        if "[command] ok" in lower:
+            self._set_status("READY", clean)
             return
         if "[command]" in lower:
             self._set_status("COMMAND", clean)

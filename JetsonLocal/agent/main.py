@@ -389,28 +389,39 @@ class AutoFaceCenteringManager:
             print(f"[AUTO_FACE] snapshot save warning: {exc}")
             return None
 
+    def _extract_face_detections(self, detections: list[dict]) -> list[dict]:
+        face_hits = []
+        for det in detections or []:
+            label = str(det.get("label") or "").strip().lower()
+            if "face" in label:
+                face_hits.append(det)
+        return face_hits
+
     async def _check_current_frame(self, tag: str = "check") -> tuple[bool, dict]:
         deadline = time.time() + self.check_window_seconds
         latest_frame = None
         latest_detections = []
+        latest_face_detections = []
         last_error = ""
 
         while time.time() < deadline:
             status = camera_service.get_status()
             last_error = str(status.get("last_error") or "")
             latest_detections = camera_service.get_detections() or []
+            latest_face_detections = self._extract_face_detections(latest_detections)
             frame_bytes = camera_service.get_jpeg()
             if frame_bytes:
                 latest_frame = frame_bytes
 
-            if latest_detections:
+            if latest_face_detections:
                 snapshot_path = self._save_snapshot(latest_frame, f"{tag}_found")
                 print(
-                    f"[AUTO_FACE] face found tag={tag} count={len(latest_detections)} "
+                    f"[AUTO_FACE] face found tag={tag} count={len(latest_face_detections)} "
                     f"snapshot={snapshot_path or 'none'}"
                 )
                 return True, {
-                    "detections": latest_detections,
+                    "detections": latest_face_detections,
+                    "raw_detections": latest_detections,
                     "snapshot_path": snapshot_path,
                     "last_error": last_error,
                 }
@@ -423,7 +434,8 @@ class AutoFaceCenteringManager:
         else:
             print(f"[AUTO_FACE] no face tag={tag}")
         return False, {
-            "detections": latest_detections,
+            "detections": latest_face_detections,
+            "raw_detections": latest_detections,
             "snapshot_path": snapshot_path,
             "last_error": last_error,
         }
@@ -494,15 +506,16 @@ async def dispatch_movement_command(cmd: str, value: str = "") -> str:
     value = value or ""
 
     if cmd == "stop":
-        quiet_print("command_stop_requested", "[COMMAND] stop override requested")
+        print("[COMMAND] stop override requested")
         set_ui_state("COMMAND", "stop override")
         await asyncio.to_thread(serial_link.send_command, cmd, value)
-        quiet_print("command_stop_sent", "[COMMAND] stop override sent")
+        print("[COMMAND] stop override sent")
         return "Sent stop override: ESP should stop and return home"
 
-    quiet_print("command_move_requested", f"[COMMAND] movement requested: {cmd}")
+    print(f"[COMMAND] movement requested: {cmd}")
     set_ui_state("COMMAND", cmd)
     await asyncio.to_thread(serial_link.send_command, cmd, value)
+    print(f"[COMMAND] sent {cmd}")
     return f"Sent movement command: {cmd}"
 
 
@@ -746,8 +759,7 @@ async def handle_voice_text(
 
         if movement and movement in MOVEMENT_COMMANDS:
             try:
-                serial_link.send_command(movement, "")
-                set_ui_state("COMMAND", movement)
+                await dispatch_movement_command(movement, "")
                 quiet_print("voice_move", f"[VOICE] movement command: {movement}")
 
                 send_or_queue_log(
@@ -1337,7 +1349,7 @@ async def command_loop():
                                 "note": note,
                             },
                         )
-                        quiet_print("command", f"[COMMAND] ok {cmd}")
+                        print(f"[COMMAND] ok {cmd}")
                         if cmd == "stop":
                             set_ui_state("READY", "Stop sent")
                         else:
@@ -1353,7 +1365,7 @@ async def command_loop():
                                 "note": f"Movement failed: {e}",
                             },
                         )
-                        quiet_print("command", f"[COMMAND] failed {cmd}: {e}")
+                        print(f"[COMMAND] failed {cmd}: {e}")
 
                 elif cmd == "camera_activate_raw":
                     try:
