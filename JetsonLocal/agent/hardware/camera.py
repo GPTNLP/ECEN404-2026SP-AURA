@@ -91,6 +91,9 @@ class CameraService:
         self.last_inference_time = 0.0
         self.inference_interval_s = 0.12
         self.last_frame_ts = 0.0
+        self.last_raw_encode_time = 0.0
+        self.last_raw_frame: Optional[np.ndarray] = None
+        self.min_raw_encode_interval_s = 1.0 / max(10.0, min(float(self.fps or 15), 20.0))
 
         if YOLO is None:
             self.last_error = "ultralytics is not installed; detection modes disabled"
@@ -232,6 +235,8 @@ class CameraService:
         self.last_annotated_frame = None
         self.last_mode_for_annotation = None
         self.active_source = None
+        self.last_raw_frame = None
+        self.last_raw_encode_time = 0.0
 
     def activate(self, mode: str = "raw") -> None:
         mode = (mode or "raw").strip().lower()
@@ -343,12 +348,12 @@ class CameraService:
         if model is None:
             return frame.copy(), []
 
-        sharp = cv2.filter2D(frame, -1, self.kernel)
-        h, w = sharp.shape[:2]
-        infer = cv2.resize(sharp, (self.infer_size, self.infer_size))
+        working = frame
+        h, w = working.shape[:2]
+        infer = cv2.resize(working, (self.infer_size, self.infer_size))
 
         results = model(infer, verbose=False, conf=self.detect_conf)
-        annotated = sharp.copy()
+        annotated = working.copy()
         detections: list[dict] = []
 
         scale_x = w / self.infer_size
@@ -437,21 +442,30 @@ class CameraService:
 
                 self.consecutive_failures = 0
                 frame = self._rotate_frame(frame)
-                self.last_frame_ts = time.time()
-
-                raw_jpeg = self._encode_jpeg(frame)
+                now = time.time()
+                self.last_frame_ts = now
 
                 with self.lock:
                     current_mode = self.mode
+
+                raw_jpeg = None
+                if (
+                    self.latest_raw_jpeg is None
+                    or current_mode == "raw"
+                    or (now - self.last_raw_encode_time) >= self.min_raw_encode_interval_s
+                ):
+                    raw_jpeg = self._encode_jpeg(frame)
+                    if raw_jpeg is not None:
+                        self.last_raw_encode_time = now
 
                 annotated_jpeg = None
                 detections: list[dict] = []
 
                 if current_mode != "raw":
-                    now = time.time()
                     should_run_inference = (
                         self.last_mode_for_annotation != current_mode
                         or self.last_annotated_frame is None
+                        or self.latest_annotated_jpeg is None
                         or (now - self.last_inference_time) >= self.inference_interval_s
                     )
 
@@ -465,12 +479,11 @@ class CameraService:
                             self.latest_annotated_jpeg = annotated_jpeg
                             self.latest_detections = detections
                     else:
-                        if self.last_annotated_frame is not None:
-                            annotated_jpeg = self._encode_jpeg(self.last_annotated_frame)
                         detections = self.latest_detections
 
                 with self.lock:
-                    self.latest_raw_jpeg = raw_jpeg
+                    if raw_jpeg is not None:
+                        self.latest_raw_jpeg = raw_jpeg
                     if current_mode == "raw":
                         self.latest_annotated_jpeg = None
                         self.latest_detections = []

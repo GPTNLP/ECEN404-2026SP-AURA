@@ -107,6 +107,9 @@ VOICE_TTS_TIMEOUT_SECONDS = 20.0
 
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
+_last_uploaded_ts: float = 0.0
+CAMERA_UPLOAD_MIN_INTERVAL_S = 0.20
+CAMERA_UPLOAD_TIMEOUT_S = 0.60
 
 
 AUTO_FACE_SETTINGS_PATH = os.path.expanduser(
@@ -2053,7 +2056,7 @@ def _reset_uploaded_signature():
 
 
 def upload_latest_frame_once():
-    global _last_uploaded_signature
+    global _last_uploaded_signature, _last_uploaded_ts
 
     if not API_BASE_URL:
         return
@@ -2062,12 +2065,16 @@ def upload_latest_frame_once():
     if not status.get("enabled") or not status.get("running"):
         return
 
+    now = time.time()
+    if _last_uploaded_ts and (now - _last_uploaded_ts) < CAMERA_UPLOAD_MIN_INTERVAL_S:
+        return
+
     frame = camera_service.get_jpeg()
     if not frame:
         return
 
     mode = camera_service.get_mode()
-    signature = f"{mode}:{len(frame)}:{frame[:32]!r}"
+    signature = f"{mode}:{len(frame)}:{frame[:64]!r}"
 
     if signature == _last_uploaded_signature:
         return
@@ -2082,9 +2089,16 @@ def upload_latest_frame_once():
         "mode": mode,
     }
 
-    resp = requests.post(url, params=params, headers=headers, data=frame, timeout=2.0)
+    resp = requests.post(
+        url,
+        params=params,
+        headers=headers,
+        data=frame,
+        timeout=CAMERA_UPLOAD_TIMEOUT_S,
+    )
     resp.raise_for_status()
     _last_uploaded_signature = signature
+    _last_uploaded_ts = now
 
 
 async def camera_upload_loop():
@@ -2094,7 +2108,7 @@ async def camera_upload_loop():
         except Exception as e:
             quiet_print("camera_upload", f"[CAMERA_UPLOAD] failed: {e}")
 
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.08)
 
 
 # -------------------------------------------------------------------

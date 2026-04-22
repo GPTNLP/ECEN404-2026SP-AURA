@@ -28,8 +28,8 @@ API_BASE = "http://127.0.0.1:8000"
 MAX_LOG_LINES = 220
 MAX_RAW_LOG_LINES = 600
 POLL_MS = 150
-FRAME_MS = 70
-DETECTION_EVERY_N_POLLS = 2
+FRAME_MS = 50
+DETECTION_EVERY_N_POLLS = 6
 CAMERA_ERROR_THRESHOLD = 4
 
 VISION_MODES = {
@@ -141,6 +141,8 @@ class AuraConsoleApp:
 
         self._vision_poll_counter = 0
         self._camera_fail_count = 0
+        self._vision_frame_fetch_inflight = False
+        self._vision_detections_fetch_inflight = False
 
         self._rag_dataset_var = tk.StringVar(value="None")
         self._rag_dataset_loaded = False
@@ -3129,8 +3131,12 @@ class AuraConsoleApp:
     def _poll_vision(self):
         if self.running and self.ui_mode == "vision" and self.active_vision_mode:
             self._vision_poll_counter += 1
-            self._refresh_vision_frame()
-            if self._vision_poll_counter % DETECTION_EVERY_N_POLLS == 0:
+            if not self._vision_frame_fetch_inflight:
+                self._refresh_vision_frame()
+            if (
+                self._vision_poll_counter % DETECTION_EVERY_N_POLLS == 0
+                and not self._vision_detections_fetch_inflight
+            ):
                 self._refresh_detections()
 
         if self.running:
@@ -3140,45 +3146,82 @@ class AuraConsoleApp:
         if not self.active_vision_mode:
             return
 
-        try:
-            frame_bytes = self._http_bytes(
-                f"/camera/frame.jpg?ts={int(datetime.now().timestamp() * 1000)}",
-                timeout=1.6,
-            )
-            image = Image.open(io.BytesIO(frame_bytes))
+        mode = self.active_vision_mode
+        self._vision_frame_fetch_inflight = True
 
-            max_w = max(640, int(self.root.winfo_screenwidth() * 0.94))
-            max_h = max(360, int(self.root.winfo_screenheight() * 0.56))
-            image.thumbnail((max_w, max_h))
+        def _worker():
+            try:
+                frame_bytes = self._http_bytes(
+                    f"/camera/frame.jpg?ts={int(datetime.now().timestamp() * 1000)}",
+                    timeout=0.45,
+                )
+                image = Image.open(io.BytesIO(frame_bytes))
+                image.load()
 
-            photo = ImageTk.PhotoImage(image)
-            self.current_frame_image = photo
-            self.camera_label.configure(image=photo, text="")
-            self._camera_fail_count = 0
+                max_w = max(640, int(self.root.winfo_screenwidth() * 0.94))
+                max_h = max(360, int(self.root.winfo_screenheight() * 0.56))
+                image.thumbnail((max_w, max_h))
+                self.root.after(0, lambda img=image, m=mode: self._apply_vision_frame(img, m))
+            except error.HTTPError as exc:
+                self.root.after(0, lambda e=exc, m=mode: self._handle_vision_frame_error(e, m))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc, m=mode: self._handle_vision_frame_error(e, m))
 
-        except error.HTTPError as exc:
-            self._camera_fail_count += 1
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_vision_frame(self, image, mode: str):
+        self._vision_frame_fetch_inflight = False
+        if not self.active_vision_mode or self.active_vision_mode != mode or self.ui_mode != "vision":
+            return
+
+        photo = ImageTk.PhotoImage(image)
+        self.current_frame_image = photo
+        self.camera_label.configure(image=photo, text="")
+        self._camera_fail_count = 0
+
+    def _handle_vision_frame_error(self, exc, mode: str):
+        self._vision_frame_fetch_inflight = False
+        if not self.active_vision_mode or self.active_vision_mode != mode:
+            return
+
+        self._camera_fail_count += 1
+        if isinstance(exc, error.HTTPError):
             if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
                 self.camera_label.configure(image="", text=f"Camera HTTP error: {exc.code}")
                 self.current_frame_image = None
+            return
 
-        except Exception as exc:
-            self._camera_fail_count += 1
-            if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
-                self.camera_label.configure(image="", text=f"Waiting for camera...\n{exc}")
-                self.current_frame_image = None
-            else:
-                self.vision_status_text.set("Camera reconnecting...")
+        if self._camera_fail_count >= CAMERA_ERROR_THRESHOLD:
+            self.camera_label.configure(image="", text=f"Waiting for camera...\n{exc}")
+            self.current_frame_image = None
+        else:
+            self.vision_status_text.set("Camera reconnecting...")
 
     def _refresh_detections(self):
         if not self.active_vision_mode:
             return
 
-        try:
-            status = self._http_json("GET", "/camera/status")
-            detections = self._http_json("GET", "/camera/detections")
-        except Exception as exc:
+        mode = self.active_vision_mode
+        self._vision_detections_fetch_inflight = True
+
+        def _worker():
+            try:
+                status = self._http_json("GET", "/camera/status", timeout=0.40)
+                detections = self._http_json("GET", "/camera/detections", timeout=0.40)
+                self.root.after(0, lambda s=status, d=detections, m=mode: self._apply_vision_detections(s, d, m))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc, m=mode: self._handle_vision_detections_error(e, m))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_vision_detections_error(self, exc, mode: str):
+        self._vision_detections_fetch_inflight = False
+        if self.active_vision_mode == mode:
             self.vision_meta_text.set(f"Status unavailable: {exc}")
+
+    def _apply_vision_detections(self, status: dict, detections: dict, mode: str):
+        self._vision_detections_fetch_inflight = False
+        if not self.active_vision_mode or self.active_vision_mode != mode:
             return
 
         model_loaded = status.get("models_loaded", {}).get(self.active_vision_mode)
