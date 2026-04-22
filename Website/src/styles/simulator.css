@@ -210,32 +210,20 @@
 }
 
 .simulator-session-search {
+  all: unset;
+  display: block;
   width: 100%;
   min-width: 0;
   height: 100%;
-  border: none;
-  outline: none;
-  background: transparent;
-  box-shadow: none;
-  appearance: none;
-  -webkit-appearance: none;
-  border-radius: 0;
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
-  padding: 0;
-  margin: 0;
+  line-height: 1;
 }
 
 .simulator-session-search::placeholder {
   color: var(--muted-text);
-}
-
-.simulator-session-search::-webkit-search-decoration,
-.simulator-session-search::-webkit-search-cancel-button,
-.simulator-session-search::-webkit-search-results-button,
-.simulator-session-search::-webkit-search-results-decoration {
-  -webkit-appearance: none;
+  opacity: 1;
 }
 
 /* ================= SESSION LIST ================= */

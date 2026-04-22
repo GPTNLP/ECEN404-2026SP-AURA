@@ -598,11 +598,14 @@ export default function SimulatorPage() {
 
             <div className="simulator-search-wrap">
               <input
+                type="text"
                 className="simulator-session-search"
                 value={sessionSearch}
                 onChange={(e) => setSessionSearch(e.target.value)}
                 placeholder="Search chats"
                 aria-label="Search chats"
+                autoComplete="off"
+                spellCheck={false}
               />
             </div>
 
