@@ -86,7 +86,19 @@ runtime_config = {
 # so it wakes immediately on push rather than sleeping the full poll interval.
 _ws_notify_event: asyncio.Event = asyncio.Event()
 
-MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
+MOVEMENT_COMMANDS = {
+    "forward",
+    "backward",
+    "left",
+    "right",
+    "stop",
+    "left90",
+    "right90",
+    "left180",
+    "right180",
+    "left360",
+    "right360",
+}
 CAMERA_MODE_PATTERN = "^(raw|detection|colorcode|face)$"
 
 VOICE_RAG_TIMEOUT_SECONDS = 1000.0
@@ -1004,7 +1016,7 @@ async def command_loop():
                         if cmd == "stop":
                             set_ui_state("READY", "Stop sent")
                         else:
-                            set_ui_state("READY", "Ready")
+                            set_ui_state("READY", f"{cmd} sent")
                     except Exception as e:
                         set_ui_state("ERROR", truncate_for_ui(str(e)))
                         await asyncio.to_thread(

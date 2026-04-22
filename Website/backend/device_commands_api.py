@@ -22,12 +22,16 @@ ALLOWED_COMMANDS = {
     "left",
     "right",
     "stop",
+    "left90",
+    "right90",
+    "left180",
+    "right180",
+    "left360",
+    "right360",
     "build_rag",
     "chat_prompt",
     "sync_vectors",
     "delete_vectors",
-    "pitch",
-    "yaw",
     "camera_activate_raw",
     "camera_activate_detection",
     "camera_deactivate",
@@ -35,7 +39,19 @@ ALLOWED_COMMANDS = {
     "reload_llm",
 }
 
-MOVEMENT_COMMANDS = {"forward", "backward", "left", "right", "stop"}
+MOVEMENT_COMMANDS = {
+    "forward",
+    "backward",
+    "left",
+    "right",
+    "stop",
+    "left90",
+    "right90",
+    "left180",
+    "right180",
+    "left360",
+    "right360",
+}
 
 STORAGE_DIR = Path(
     os.getenv("AURA_STORAGE_DIR")

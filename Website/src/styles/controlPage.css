@@ -14,9 +14,9 @@
 
 .control-grid {
   display: grid;
-  grid-template-columns: 420px 1fr;
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (max-width: 1100px) {
@@ -44,7 +44,11 @@
   margin: 10px 0 16px;
 }
 
-/* D-pad wrapper: center it + give it a "panel" look */
+.movement-card,
+.preset-card {
+  min-height: 100%;
+}
+
 .dpad-wrap {
   display: flex;
   justify-content: center;
@@ -60,41 +64,46 @@
   justify-items: center;
 }
 
-/* Base button style */
 .dpad-btn,
-.stop-btn {
+.stop-btn,
+.preset-btn {
   border-radius: 14px;
-  height: 86px;
-  width: 86px;
   border: 1px solid var(--card-border);
   background: var(--bg);
   color: var(--text);
   box-shadow: var(--shadow);
   cursor: pointer;
   transition: 0.15s ease;
-  display: grid;
-  place-items: center;
   user-select: none;
 }
 
-.dpad-btn:hover {
+.dpad-btn,
+.stop-btn {
+  height: 86px;
+  width: 86px;
+  display: grid;
+  place-items: center;
+}
+
+.dpad-btn:hover,
+.preset-btn:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-hover);
   border-color: var(--accent);
 }
 
-.dpad-btn:active {
+.dpad-btn:active,
+.stop-btn:active,
+.preset-btn:active {
   transform: translateY(0px);
 }
 
-/* Make arrows look better */
 .dpad-btn span {
   font-size: 28px;
   font-weight: 900;
   line-height: 1;
 }
 
-/* STOP ALL: bigger + centered */
 .stop-btn {
   grid-column: 2;
   grid-row: 2;
@@ -113,44 +122,63 @@
   opacity: 0.95;
 }
 
-.stop-btn:active {
-  transform: translateY(0px);
+.up {
+  grid-column: 2;
+  grid-row: 1;
 }
 
-.up    { grid-column: 2; grid-row: 1; }
-.left  { grid-column: 1; grid-row: 2; }
-.right { grid-column: 3; grid-row: 2; }
-.down  { grid-column: 2; grid-row: 3; }
+.left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.right {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 700px) {
+  .preset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.preset-btn {
+  min-height: 94px;
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  text-align: left;
+}
+
+.preset-title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.preset-meta {
+  font-size: 12px;
+  opacity: 0.72;
+}
 
 .control-hint {
-  margin-top: 10px;
+  margin-top: 14px;
   font-size: 13px;
   opacity: 0.7;
   text-align: center;
-}
-
-/* Actions list */
-.actions-list {
-  display: grid;
-  gap: 10px;
-}
-
-.action-btn {
-  width: 100%;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--card-border);
-  background: var(--bg);
-  color: var(--text);
-  box-shadow: var(--shadow);
-  cursor: pointer;
-  transition: 0.15s ease;
-  text-align: left;
-  font-weight: 600;
-}
-
-.action-btn:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-hover);
-  border-color: var(--accent);
 }

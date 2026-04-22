@@ -24,8 +24,12 @@ class SerialLink:
             "left",
             "right",
             "stop",
-            "pitch",
-            "yaw",
+            "left90",
+            "right90",
+            "left180",
+            "right180",
+            "left360",
+            "right360",
         }
 
     def connect(self) -> bool:
@@ -111,9 +115,6 @@ class SerialLink:
             self.esp_serial.flush()
             print(f"[SERIAL] sent -> {serial_msg.strip()}")
 
-            # Debug-read only. We no longer require a strict legacy ACK line.
-            # The ESP firmware now emits sequence/status messages like:
-            # ACK:SEQ:FORWARD:START, ACK:SEQ:DONE, ACK:STOP:HOME, etc.
             deadline = time.time() + 0.25
             debug_lines = []
 
@@ -152,6 +153,7 @@ class SerialLink:
             "connected": is_open,
             "last_connect_ok": self.last_connect_ok,
             "last_error": self.last_error or "",
-        }    
+        }
+
 
 serial_link = SerialLink()
