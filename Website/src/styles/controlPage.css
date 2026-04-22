@@ -7,14 +7,13 @@
   margin-bottom: 14px;
 }
 
-.control-subtitle {
+.control-header h1 {
   margin: 0;
-  opacity: 0.75;
 }
 
 .control-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(320px, 1fr));
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
   gap: 18px;
   align-items: stretch;
 }
@@ -33,8 +32,15 @@
   box-shadow: var(--shadow);
 }
 
+.control-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .control-card h2 {
-  margin: 0 0 12px 0;
+  margin: 0;
   font-size: 18px;
 }
 
@@ -49,17 +55,24 @@
   min-height: 100%;
 }
 
+.movement-body {
+  min-height: 360px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .dpad-wrap {
   display: flex;
   justify-content: center;
-  padding: 10px 0 6px;
+  padding: 4px 0;
 }
 
 .dpad {
   display: grid;
-  grid-template-columns: 86px 118px 86px;
+  grid-template-columns: 86px 128px 86px;
   grid-template-rows: 86px 86px 86px;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
   justify-items: center;
 }
@@ -67,13 +80,16 @@
 .dpad-btn,
 .stop-btn,
 .preset-btn {
-  border-radius: 14px;
+  border-radius: 16px;
   border: 1px solid var(--card-border);
-  background: var(--bg);
-  color: var(--text);
   box-shadow: var(--shadow);
   cursor: pointer;
-  transition: 0.15s ease;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.15s ease,
+    filter 0.15s ease;
   user-select: none;
 }
 
@@ -85,8 +101,12 @@
   place-items: center;
 }
 
-.dpad-btn:hover,
-.preset-btn:hover {
+.dpad-btn {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.dpad-btn:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-hover);
   border-color: var(--accent);
@@ -95,7 +115,7 @@
 .dpad-btn:active,
 .stop-btn:active,
 .preset-btn:active {
-  transform: translateY(0px);
+  transform: translateY(0);
 }
 
 .dpad-btn span {
@@ -107,19 +127,30 @@
 .stop-btn {
   grid-column: 2;
   grid-row: 2;
-  width: 118px;
+  width: 128px;
   height: 86px;
-  border: none;
-  background: #8b0000;
-  color: white;
+  border: 1px solid var(--control-maroon-border, #6c0b0b);
+  background:
+    linear-gradient(
+      180deg,
+      var(--control-maroon-top, #b31616) 0%,
+      var(--control-maroon-mid, #920b0b) 52%,
+      var(--control-maroon-bottom, #6f0505) 100%
+    );
+  color: #ffffff;
   font-weight: 900;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.08em;
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .stop-btn:hover {
   transform: translateY(-2px);
-  box-shadow: var(--shadow-hover);
-  opacity: 0.95;
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  filter: brightness(1.03);
 }
 
 .up {
@@ -145,7 +176,8 @@
 .preset-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 14px;
+  align-content: start;
 }
 
 @media (max-width: 700px) {
@@ -155,30 +187,52 @@
 }
 
 .preset-btn {
-  min-height: 94px;
-  padding: 14px 12px;
+  min-height: 98px;
+  padding: 16px 14px;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   gap: 6px;
-  text-align: left;
+  text-align: center;
+  border: 1px solid var(--control-maroon-border, #6c0b0b);
+  background:
+    linear-gradient(
+      180deg,
+      var(--control-maroon-top, #b31616) 0%,
+      var(--control-maroon-mid, #920b0b) 52%,
+      var(--control-maroon-bottom, #6f0505) 100%
+    );
+  color: #ffffff;
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.preset-btn:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 14px 28px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.24);
+  filter: brightness(1.03);
+}
+
+.preset-btn:focus-visible,
+.stop-btn:focus-visible,
+.dpad-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .preset-title {
-  font-size: 16px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 800;
   line-height: 1.1;
 }
 
 .preset-meta {
   font-size: 12px;
-  opacity: 0.72;
-}
-
-.control-hint {
-  margin-top: 14px;
-  font-size: 13px;
-  opacity: 0.7;
-  text-align: center;
+  opacity: 0.9;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }

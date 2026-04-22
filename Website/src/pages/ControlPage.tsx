@@ -68,7 +68,7 @@ export default function ControlPage() {
     void sendMove(cmd);
   }, []);
 
-  const handleStop = useCallback(() => {
+  const handleHome = useCallback(() => {
     void sendMove("stop");
   }, []);
 
@@ -86,72 +86,71 @@ export default function ControlPage() {
     <div className="page">
       <div className="control-header">
         <h1>Robot Control</h1>
-        <p className="control-subtitle">
-          Command the robot&apos;s movement and preset turn sequences.
-        </p>
       </div>
 
       <div className="control-grid">
         <section className="control-card movement-card">
-          <h2>Movement</h2>
+          <div className="control-section-head">
+            <h2>Movement</h2>
+          </div>
           <div className="control-divider" />
 
-          <div className="dpad-wrap">
-            <div className="dpad">
-              <button
-                type="button"
-                className="dpad-btn up"
-                {...bindMoveButton("forward")}
-                aria-label="Move forward"
-              >
-                <span>▲</span>
-              </button>
+          <div className="movement-body">
+            <div className="dpad-wrap">
+              <div className="dpad">
+                <button
+                  type="button"
+                  className="dpad-btn up"
+                  {...bindMoveButton("forward")}
+                  aria-label="Move forward"
+                >
+                  <span>▲</span>
+                </button>
 
-              <button
-                type="button"
-                className="dpad-btn left"
-                {...bindMoveButton("left")}
-                aria-label="Move left"
-              >
-                <span>◀</span>
-              </button>
+                <button
+                  type="button"
+                  className="dpad-btn left"
+                  {...bindMoveButton("left")}
+                  aria-label="Move left"
+                >
+                  <span>◀</span>
+                </button>
 
-              <button
-                type="button"
-                className="stop-btn"
-                onClick={handleStop}
-                aria-label="Stop all"
-              >
-                STOP
-              </button>
+                <button
+                  type="button"
+                  className="stop-btn"
+                  onClick={handleHome}
+                  aria-label="Send home override"
+                >
+                  HOME
+                </button>
 
-              <button
-                type="button"
-                className="dpad-btn right"
-                {...bindMoveButton("right")}
-                aria-label="Move right"
-              >
-                <span>▶</span>
-              </button>
+                <button
+                  type="button"
+                  className="dpad-btn right"
+                  {...bindMoveButton("right")}
+                  aria-label="Move right"
+                >
+                  <span>▶</span>
+                </button>
 
-              <button
-                type="button"
-                className="dpad-btn down"
-                {...bindMoveButton("backward")}
-                aria-label="Move backward"
-              >
-                <span>▼</span>
-              </button>
+                <button
+                  type="button"
+                  className="dpad-btn down"
+                  {...bindMoveButton("backward")}
+                  aria-label="Move backward"
+                >
+                  <span>▼</span>
+                </button>
+              </div>
             </div>
           </div>
-
-          <p className="control-hint">
-            Use the D-pad for single movement steps. Tap STOP to send the home/stop override.
-          </p>
         </section>
 
         <section className="control-card preset-card">
-          <h2>Preset Turns</h2>
+          <div className="control-section-head">
+            <h2>Preset Turns</h2>
+          </div>
           <div className="control-divider" />
 
           <div className="preset-grid">
@@ -163,16 +162,13 @@ export default function ControlPage() {
                 onClick={() => {
                   void sendMove(preset.command);
                 }}
+                aria-label={preset.title}
               >
                 <span className="preset-title">{preset.title}</span>
                 <span className="preset-meta">{preset.meta}</span>
               </button>
             ))}
           </div>
-
-          <p className="control-hint">
-            Preset turn buttons send fixed left/right rotation commands directly to the Jetson.
-          </p>
         </section>
       </div>
     </div>
