@@ -1,6 +1,14 @@
+:root {
+  --db-maroon-top: #a51b1b;
+  --db-maroon-mid: #7f0909;
+  --db-maroon-bottom: #620404;
+  --db-maroon-border: #570202;
+  --db-maroon-shadow: rgba(98, 4, 4, 0.28);
+}
+
 /* Database Page Layout */
 .db-page-header {
-  margin-bottom: 18px;
+  display: none;
 }
 
 .db-grid {
@@ -94,10 +102,13 @@ textarea.db-input {
   max-height: 640px;
 }
 
-/* Strong button styling for this page */
+/* Strong maroon button styling for this page */
 .db-panel .btn,
 .db-panel button.btn,
-.db-link {
+.db-link,
+.db-tree-toggle,
+.db-delete-modal .btn,
+.db-modal-actions .btn {
   min-height: 44px;
   padding: 0 16px;
   border-radius: 12px;
@@ -113,45 +124,67 @@ textarea.db-input {
   transition:
     transform 0.18s ease,
     box-shadow 0.18s ease,
-    background 0.18s ease,
+    filter 0.18s ease,
     border-color 0.18s ease,
-    color 0.18s ease;
+    color 0.18s ease,
+    background 0.18s ease;
 }
 
 .db-panel .btn,
-.db-panel button.btn {
-  border: 1px solid color-mix(in srgb, var(--card-border) 72%, var(--accent));
-  background: color-mix(in srgb, var(--card-bg) 82%, var(--accent-soft));
-  color: var(--accent);
-  box-shadow: var(--shadow);
+.db-panel button.btn,
+.db-link,
+.db-tree-toggle,
+.db-delete-modal .btn,
+.db-modal-actions .btn {
+  border: 1px solid var(--db-maroon-border);
+  background: linear-gradient(
+    180deg,
+    var(--db-maroon-top) 0%,
+    var(--db-maroon-mid) 58%,
+    var(--db-maroon-bottom) 100%
+  );
+  color: #fff;
+  box-shadow:
+    0 12px 24px var(--db-maroon-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .db-panel .btn:hover,
 .db-panel button.btn:hover,
-.db-link:hover {
+.db-link:hover,
+.db-tree-toggle:hover,
+.db-delete-modal .btn:hover,
+.db-modal-actions .btn:hover {
   transform: translateY(-1px);
-  box-shadow: var(--shadow-hover);
+  filter: brightness(1.06);
+  box-shadow:
+    0 14px 28px rgba(98, 4, 4, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .db-panel .btn-primary,
 .db-panel button.btn-primary {
-  background: var(--accent);
-  color: white;
-  border-color: transparent;
-}
-
-.db-panel .btn-primary:hover,
-.db-panel button.btn-primary:hover {
-  filter: brightness(1.04);
+  border: 1px solid var(--db-maroon-border);
+  background: linear-gradient(
+    180deg,
+    var(--db-maroon-top) 0%,
+    var(--db-maroon-mid) 58%,
+    var(--db-maroon-bottom) 100%
+  );
+  color: #fff;
 }
 
 .db-panel .btn:disabled,
 .db-panel button.btn:disabled,
-.db-link:disabled {
+.db-link:disabled,
+.db-tree-toggle:disabled,
+.db-delete-modal .btn:disabled,
+.db-modal-actions .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
   transform: none;
-  box-shadow: var(--shadow);
+  box-shadow: none;
+  filter: none;
 }
 
 /* Search row */
@@ -223,21 +256,11 @@ textarea.db-input {
   height: 42px;
   border-radius: 12px;
   font-weight: 900;
-  border: 1px solid color-mix(in srgb, var(--card-border) 70%, var(--accent));
-  background: color-mix(in srgb, var(--card-bg) 74%, var(--accent-soft));
-  color: var(--accent);
   cursor: pointer;
-  box-shadow: var(--shadow);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-}
-
-.db-tree-toggle:hover {
-  background: var(--accent);
-  color: white;
-  border-color: transparent;
 }
 
 .db-tree-main {
@@ -405,15 +428,12 @@ textarea.db-input {
 }
 
 .db-link {
-  background: transparent;
-  border: 1px solid transparent;
-  color: var(--accent);
-  font-weight: 900;
   padding: 0 14px;
+  color: #fff;
 }
 
 .db-link:hover {
-  background: color-mix(in srgb, var(--card-bg) 75%, var(--accent-soft));
+  color: #fff;
 }
 
 /* Boxes */
@@ -631,37 +651,6 @@ textarea.db-input {
 .db-modal-actions .btn {
   min-height: 46px;
   padding: 0 18px;
-  border-radius: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 900;
-  font-size: 14px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    background 0.18s ease,
-    border-color 0.18s ease,
-    color 0.18s ease;
-  border: 1px solid color-mix(in srgb, var(--card-border) 72%, var(--accent));
-  box-shadow: var(--shadow);
-}
-
-.db-delete-modal .btn:hover,
-.db-modal-actions .btn:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-hover);
-}
-
-.db-delete-modal .btn:disabled,
-.db-modal-actions .btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-  transform: none;
-  box-shadow: var(--shadow);
 }
 
 .db-modal-actions {
@@ -671,27 +660,24 @@ textarea.db-input {
   margin-top: 26px;
 }
 
-.db-modal-cancel-btn {
-  background: color-mix(in srgb, var(--card-bg) 88%, var(--accent-soft));
-  color: var(--text);
-  border: 1px solid var(--card-border);
-}
-
-.db-modal-cancel-btn:hover {
-  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
-}
-
+.db-modal-cancel-btn,
 .db-modal-danger-btn {
-  background: linear-gradient(180deg, #b91c1c 0%, #8f1111 100%);
+  border: 1px solid var(--db-maroon-border);
+  background: linear-gradient(
+    180deg,
+    var(--db-maroon-top) 0%,
+    var(--db-maroon-mid) 58%,
+    var(--db-maroon-bottom) 100%
+  );
   color: #fff;
-  border: 1px solid #7f1d1d;
   box-shadow:
-    0 12px 26px rgba(127, 29, 29, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.10);
+    0 12px 24px var(--db-maroon-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
+.db-modal-cancel-btn:hover,
 .db-modal-danger-btn:hover {
-  filter: brightness(1.04);
+  filter: brightness(1.06);
 }
 
 /* Context menu */
