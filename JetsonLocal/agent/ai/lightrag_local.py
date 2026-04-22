@@ -1445,6 +1445,7 @@ class LightRAG:
             system = (
                 "You are AURA, a helpful lab assistant robot. "
                 "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
+                "Do not describe, analyze, or summarize what the passages are about — use them directly to answer. "
                 "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
                 "a detailed technical question may need more explanation. "
                 "If the passages fully answer the question, answer from them. "
@@ -1457,7 +1458,7 @@ class LightRAG:
                 "Stop after answering."
             )
             prompt = (
-                f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
+                f"Background knowledge:\n\n{context}\n\n"
                 f"Question: {query}\n\nAnswer:"
             )
         else:

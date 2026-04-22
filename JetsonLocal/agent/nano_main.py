@@ -7,6 +7,7 @@ import subprocess
 import os
 import shutil
 import threading
+import time
 import tkinter as tk
 from collections import Counter
 from datetime import datetime
@@ -2454,6 +2455,8 @@ class AuraConsoleApp:
         self._llm_history.append(("assistant", ""))
         self._llm_redraw()
 
+        self._llm_query_start = time.time()
+
         def _call():
             try:
                 # SSE streaming: update the panel sentence-by-sentence so the
@@ -2498,6 +2501,7 @@ class AuraConsoleApp:
             self._llm_redraw()
 
     def _llm_got_response(self, answer, err):
+        elapsed = time.time() - getattr(self, "_llm_query_start", time.time())
         self._llm_thinking = False
         if err:
             if self._llm_history and self._llm_history[-1][0] == "assistant":
@@ -2505,10 +2509,11 @@ class AuraConsoleApp:
             else:
                 self._llm_history.append(("error", err))
         else:
+            timed_answer = f"{answer}\n[{elapsed:.1f}s]"
             if self._llm_history and self._llm_history[-1][0] == "assistant":
-                self._llm_history[-1] = ("assistant", answer)
+                self._llm_history[-1] = ("assistant", timed_answer)
             else:
-                self._llm_history.append(("assistant", answer))
+                self._llm_history.append(("assistant", timed_answer))
         self._llm_redraw()
         self.llm_send_btn.configure(state="normal", bg="#14f195")
         self.root.focus_set()
