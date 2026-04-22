@@ -2169,10 +2169,6 @@ async def _warmup_llm():
     # Ollama caches the KV for these tokens; any mismatch defeats the prime.
     _AURA_WARMUP_SYSTEM = (
         "You are AURA, a helpful lab assistant robot. "
-<<<<<<< HEAD
-        "Do not describe, analyze, or summarize what the passages are about — use them directly to answer. "
-=======
->>>>>>> parent of 55e53a0 (Updates to throughput)
         "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
         "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
         "a detailed technical question may need more explanation. "
