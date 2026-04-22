@@ -1793,12 +1793,12 @@ async def command_loop():
                             except Exception as _fe:
                                 print(f"[FLUSH] '{_flush_model}' unload skipped: {_fe}")
 
-                        # Unload Whisper STT models (both small.en and tiny.en wake model)
+                        # Unload Whisper STT model
                         if stt_service is not None:
                             try:
-                                await asyncio.to_thread(stt_service.unload_model, True)
+                                await asyncio.to_thread(stt_service.unload_model)
                                 flushed.append("stt")
-                                print("[FLUSH] Whisper STT models unloaded (command + wake)")
+                                print("[FLUSH] Whisper STT model unloaded")
                             except Exception as _fe:
                                 print(f"[FLUSH] STT unload skipped: {_fe}")
 
@@ -2169,7 +2169,10 @@ async def _warmup_llm():
     # Ollama caches the KV for these tokens; any mismatch defeats the prime.
     _AURA_WARMUP_SYSTEM = (
         "You are AURA, a helpful lab assistant robot. "
+<<<<<<< HEAD
         "Do not describe, analyze, or summarize what the passages are about — use them directly to answer. "
+=======
+>>>>>>> parent of 55e53a0 (Updates to throughput)
         "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
         "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
         "a detailed technical question may need more explanation. "

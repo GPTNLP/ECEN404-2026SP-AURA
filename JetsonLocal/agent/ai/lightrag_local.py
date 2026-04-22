@@ -1443,7 +1443,10 @@ class LightRAG:
         if context.strip():
             system = (
                 "You are AURA, a helpful lab assistant robot. "
+<<<<<<< HEAD
                 "Do not describe, analyze, or summarize what the passages are about — use them directly to answer. "
+=======
+>>>>>>> parent of 55e53a0 (Updates to throughput)
                 "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
                 "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
                 "a detailed technical question may need more explanation. "
@@ -1457,9 +1460,14 @@ class LightRAG:
                 "Stop after answering."
             )
             prompt = (
+<<<<<<< HEAD
                 f"Question: {query}\n\n"
                 f"{context}\n\n"
                 f"Answer the question above using only what is relevant from the text. Answer:"
+=======
+                f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
+                f"Question: {query}\n\nAnswer:"
+>>>>>>> parent of 55e53a0 (Updates to throughput)
             )
         else:
             # Retrieval returned nothing — no DB loaded or query too dissimilar.
