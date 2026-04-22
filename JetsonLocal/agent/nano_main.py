@@ -126,6 +126,10 @@ class AuraConsoleApp:
         self._wifi_networks = []
         self._wifi_status_text = tk.StringVar(value="Checking Wi-Fi...")
         self._wifi_toggle_text = tk.StringVar(value="OFF")
+        self._auto_face_enabled = False
+        self._auto_face_busy = False
+        self._auto_face_status_text = tk.StringVar(value="Checking auto face sweep...")
+        self._auto_face_toggle_text = tk.StringVar(value="OFF")
 
         self._llm_thinking = False
         self._llm_history = []
@@ -1516,7 +1520,79 @@ class AuraConsoleApp:
         )
         self.wifi_connect_button.pack(side="right", padx=(0, 8))
 
+        auto_face_section = tk.Frame(settings_card, bg="#0b0f14")
+        auto_face_section.pack(fill="x", padx=14, pady=(0, 14))
+
+        auto_face_row = tk.Frame(auto_face_section, bg="#0b0f14")
+        auto_face_row.pack(fill="x", pady=(8, 8))
+
+        tk.Label(
+            auto_face_row,
+            text="Auto Face Sweep",
+            fg="#e2e8f0",
+            bg="#0b0f14",
+            font=value_font,
+            anchor="w",
+        ).pack(side="left")
+
+        auto_face_buttons = tk.Frame(auto_face_row, bg="#0b0f14")
+        auto_face_buttons.pack(side="right")
+
+        self.auto_face_test_button = tk.Button(
+            auto_face_buttons,
+            text="Test Sweep",
+            command=self._run_auto_face_test,
+            font=slider_font,
+            bg="#14f195",
+            fg="#04130b",
+            activebackground="#22c55e",
+            activeforeground="#04130b",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=16,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.auto_face_test_button.pack(side="right")
+
+        self.auto_face_toggle_button = tk.Button(
+            auto_face_buttons,
+            textvariable=self._auto_face_toggle_text,
+            command=self._toggle_auto_face,
+            font=slider_font,
+            bg="#111827",
+            fg="#cbd5e1",
+            activebackground="#1f2937",
+            activeforeground="#ffffff",
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            padx=16,
+            pady=10,
+            width=8,
+            highlightthickness=1,
+            highlightbackground="#14f195",
+            highlightcolor="#14f195",
+        )
+        self.auto_face_toggle_button.pack(side="right", padx=(0, 8))
+
+        tk.Label(
+            auto_face_section,
+            textvariable=self._auto_face_status_text,
+            fg="#cbd5e1",
+            bg="#0b0f14",
+            font=slider_font,
+            anchor="w",
+            justify="left",
+            wraplength=max(520, int(self.root.winfo_screenwidth() * 0.72)),
+            pady=2,
+        ).pack(fill="x", pady=(0, 2))
+
         self._set_wifi_toggle_visual(False)
+        self._set_auto_face_toggle_visual(False)
 
     # =========================
     # View switching / actions
@@ -2057,6 +2133,110 @@ class AuraConsoleApp:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+
+    def _set_auto_face_toggle_visual(self, enabled: bool):
+        self._auto_face_enabled = bool(enabled)
+        self._auto_face_toggle_text.set("ON" if enabled else "OFF")
+        if hasattr(self, "auto_face_toggle_button"):
+            self.auto_face_toggle_button.configure(
+                bg="#14f195" if enabled else "#111827",
+                fg="#04130b" if enabled else "#cbd5e1",
+                activebackground="#22c55e" if enabled else "#1f2937",
+                activeforeground="#04130b" if enabled else "#ffffff",
+                textvariable=self._auto_face_toggle_text,
+            )
+
+    def _apply_auto_face_status(self, snapshot):
+        snapshot = snapshot or {}
+        self._auto_face_busy = bool(snapshot.get("busy"))
+        self._set_auto_face_toggle_visual(bool(snapshot.get("enabled")))
+
+        status_line = (
+            snapshot.get("status_line")
+            or snapshot.get("last_message")
+            or "Auto face sweep status unavailable."
+        )
+        self._auto_face_status_text.set(status_line)
+
+        toggle_state = "disabled" if self._auto_face_busy else "normal"
+        test_state = "disabled" if self._auto_face_busy else "normal"
+
+        if hasattr(self, "auto_face_toggle_button"):
+            self.auto_face_toggle_button.configure(state=toggle_state)
+        if hasattr(self, "auto_face_test_button"):
+            self.auto_face_test_button.configure(state=test_state)
+
+    def _refresh_auto_face_status(self, message: str = ""):
+        if message:
+            self._auto_face_status_text.set(message)
+
+        if hasattr(self, "auto_face_toggle_button"):
+            self.auto_face_toggle_button.configure(state="disabled")
+        if hasattr(self, "auto_face_test_button"):
+            self.auto_face_test_button.configure(state="disabled")
+
+        def _worker():
+            try:
+                snap = self._http_json("GET", "/auto_face/status", timeout=5.0)
+            except Exception as exc:
+                snap = {
+                    "enabled": self._auto_face_enabled,
+                    "busy": False,
+                    "status_line": f"Auto face sweep unavailable: {exc}",
+                }
+            self.root.after(0, lambda s=snap: self._apply_auto_face_status(s))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _toggle_auto_face(self):
+        target_on = not self._auto_face_enabled
+        self._auto_face_status_text.set(
+            "Enabling auto face sweep..." if target_on else "Disabling auto face sweep..."
+        )
+
+        if hasattr(self, "auto_face_toggle_button"):
+            self.auto_face_toggle_button.configure(state="disabled")
+        if hasattr(self, "auto_face_test_button"):
+            self.auto_face_test_button.configure(state="disabled")
+
+        def _worker():
+            try:
+                snap = self._http_json_post(
+                    "/auto_face/enabled",
+                    {"enabled": target_on},
+                    timeout=10.0,
+                )
+            except Exception as exc:
+                snap = {
+                    "enabled": self._auto_face_enabled,
+                    "busy": False,
+                    "status_line": f"Auto face toggle failed: {exc}",
+                }
+            self.root.after(0, lambda s=snap: self._apply_auto_face_status(s))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_auto_face_test(self):
+        self._auto_face_status_text.set("Running test sweep...")
+
+        if hasattr(self, "auto_face_toggle_button"):
+            self.auto_face_toggle_button.configure(state="disabled")
+        if hasattr(self, "auto_face_test_button"):
+            self.auto_face_test_button.configure(state="disabled")
+
+        def _worker():
+            try:
+                snap = self._http_json_post("/auto_face/test", {}, timeout=120.0)
+            except Exception as exc:
+                snap = {
+                    "enabled": self._auto_face_enabled,
+                    "busy": False,
+                    "status_line": f"Test sweep failed: {exc}",
+                }
+            self.root.after(0, lambda s=snap: self._apply_auto_face_status(s))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _load_tts_volume_setting(self):
         try:
             with open(TTS_SETTINGS_PATH, "r", encoding="utf-8") as f:
@@ -2095,6 +2275,7 @@ class AuraConsoleApp:
 
         self._settings_status_text.set("Adjust volume and brightness for the touchscreen.")
         self._refresh_wifi_async(rescan=False, message="Checking Wi-Fi...")
+        self._refresh_auto_face_status(message="Checking auto face sweep...")
 
     def _on_volume_change(self, value):
         try:

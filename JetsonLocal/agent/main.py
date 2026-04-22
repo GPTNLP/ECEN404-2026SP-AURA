@@ -108,6 +108,330 @@ VOICE_TTS_TIMEOUT_SECONDS = 20.0
 _last_messages = {}
 _last_uploaded_signature: Optional[str] = None
 
+
+AUTO_FACE_SETTINGS_PATH = os.path.expanduser(
+    "~/SDP/AURA/JetsonLocal/storage/auto_face_settings.json"
+)
+AUTO_FACE_SNAPSHOT_DIR = os.path.expanduser(
+    "~/SDP/AURA/JetsonLocal/storage/auto_face_snapshots"
+)
+AUTO_FACE_INTERVAL_SECONDS = 300.0
+AUTO_FACE_CAMERA_WARMUP_SECONDS = 1.2
+AUTO_FACE_CHECK_WINDOW_SECONDS = 2.2
+AUTO_FACE_MOVE_SETTLE_SECONDS = 0.9
+AUTO_FACE_FINAL_STOP = True
+
+
+class _AutoFaceEnabledRequest(_BaseModel):
+    enabled: bool
+
+
+class AutoFaceCenteringManager:
+    def __init__(self):
+        self.settings_path = Path(AUTO_FACE_SETTINGS_PATH)
+        self.snapshot_dir = Path(AUTO_FACE_SNAPSHOT_DIR)
+        self.interval_seconds = float(AUTO_FACE_INTERVAL_SECONDS)
+        self.camera_warmup_seconds = float(AUTO_FACE_CAMERA_WARMUP_SECONDS)
+        self.check_window_seconds = float(AUTO_FACE_CHECK_WINDOW_SECONDS)
+        self.move_settle_seconds = float(AUTO_FACE_MOVE_SETTLE_SECONDS)
+        self.enabled = self._load_enabled()
+        self.busy = False
+        self.last_reason = ""
+        self.last_result = "idle"
+        self.last_message = "Auto face sweep is idle."
+        self.last_detection_count = 0
+        self.last_run_started_ts: Optional[float] = None
+        self.last_run_finished_ts: Optional[float] = None
+        self.next_due_ts: Optional[float] = (
+            time.time() + self.interval_seconds if self.enabled else None
+        )
+        self._lock: Optional[asyncio.Lock] = None
+
+    def attach_lock(self, lock: asyncio.Lock):
+        self._lock = lock
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _load_enabled(self) -> bool:
+        try:
+            data = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            return bool(data.get("enabled", False))
+        except Exception:
+            return False
+
+    def _save_enabled(self) -> None:
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            self.settings_path.write_text(
+                json.dumps({"enabled": bool(self.enabled)}, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[AUTO_FACE] failed saving settings: {exc}")
+
+    def set_enabled(self, enabled: bool) -> dict:
+        self.enabled = bool(enabled)
+        self._save_enabled()
+        self.next_due_ts = time.time() + self.interval_seconds if self.enabled else None
+        if self.enabled:
+            self.last_message = "Auto face sweep enabled. Next automatic check in 5 minutes."
+        else:
+            self.last_message = "Auto face sweep disabled."
+            self.last_result = "disabled"
+        return self.status()
+
+    def _format_last_run(self) -> Optional[str]:
+        if not self.last_run_finished_ts:
+            return None
+        try:
+            return _datetime.fromtimestamp(self.last_run_finished_ts).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+
+    def status(self) -> dict:
+        now = time.time()
+        next_in = None
+        if self.enabled and self.next_due_ts is not None:
+            next_in = max(0.0, self.next_due_ts - now)
+
+        status_line = self.last_message or "Auto face sweep idle."
+        if self.busy:
+            status_line = "Running face sweep..."
+        elif self.enabled and next_in is not None:
+            mins = int(next_in // 60)
+            secs = int(next_in % 60)
+            if self.last_run_finished_ts:
+                status_line = f"{self.last_message} Next auto check in {mins:02d}:{secs:02d}."
+            else:
+                status_line = f"Enabled. First auto check in {mins:02d}:{secs:02d}."
+
+        return {
+            "ok": True,
+            "enabled": self.enabled,
+            "busy": self.busy,
+            "interval_seconds": self.interval_seconds,
+            "next_run_in_seconds": next_in,
+            "last_reason": self.last_reason,
+            "last_result": self.last_result,
+            "last_message": self.last_message,
+            "last_detection_count": self.last_detection_count,
+            "last_run_started_ts": self.last_run_started_ts,
+            "last_run_finished_ts": self.last_run_finished_ts,
+            "last_run_finished_at": self._format_last_run(),
+            "status_line": status_line,
+        }
+
+    async def loop(self):
+        await asyncio.sleep(8.0)
+        while True:
+            try:
+                if not self.enabled:
+                    await asyncio.sleep(1.0)
+                    continue
+
+                if self.busy:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                now = time.time()
+                if self.next_due_ts is None:
+                    self.next_due_ts = now + self.interval_seconds
+
+                if now < self.next_due_ts:
+                    await asyncio.sleep(min(1.0, max(0.1, self.next_due_ts - now)))
+                    continue
+
+                await self.run_once(reason="scheduled", force=False)
+            except Exception as exc:
+                self.last_result = "error"
+                self.last_message = f"Auto face sweep loop error: {exc}"
+                self.last_run_finished_ts = time.time()
+                self.next_due_ts = time.time() + self.interval_seconds
+                print(f"[AUTO_FACE] loop error: {exc}")
+                await asyncio.sleep(2.0)
+
+    async def run_once(self, reason: str = "manual", force: bool = False) -> dict:
+        lock = self._ensure_lock()
+        async with lock:
+            self.busy = True
+            self.last_reason = (reason or "manual").strip()
+            self.last_run_started_ts = time.time()
+            self.last_detection_count = 0
+            set_ui_state("VISION", "Auto face sweep running")
+            print(f"[AUTO_FACE] starting run reason={self.last_reason}")
+
+            try:
+                result = await self._run_once_locked(reason=self.last_reason, force=force)
+                self.last_result = result.get("result", "completed")
+                self.last_message = result.get("message", "Auto face sweep completed.")
+                self.last_detection_count = int(result.get("detection_count") or 0)
+                return self.status()
+            except Exception as exc:
+                self.last_result = "error"
+                self.last_message = f"Auto face sweep failed: {exc}"
+                print(f"[AUTO_FACE] run failed: {exc}")
+                raise
+            finally:
+                self.busy = False
+                self.last_run_finished_ts = time.time()
+                self.next_due_ts = self.last_run_finished_ts + self.interval_seconds
+                if not voice_running:
+                    set_ui_state("READY", "AURA online")
+                print(f"[AUTO_FACE] finished run result={self.last_result}")
+
+    async def _run_once_locked(self, reason: str, force: bool = False) -> dict:
+        if not force and (
+            voice_running
+            or button_stt_service is not None
+            or voice_button_phase in {"loading", "listening", "processing", "speaking"}
+        ):
+            return {
+                "result": "skipped_voice_busy",
+                "message": "Skipped auto face sweep because voice is currently active.",
+                "detection_count": 0,
+            }
+
+        status = camera_service.get_status()
+        if not force and status.get("stream_clients", 0) > 0:
+            return {
+                "result": "skipped_camera_busy",
+                "message": "Skipped auto face sweep because the camera stream is currently in use.",
+                "detection_count": 0,
+            }
+
+        ctx = await self._prepare_camera()
+        try:
+            found, details = await self._check_current_frame(tag="center")
+            if found:
+                return {
+                    "result": "face_found_center",
+                    "message": "Face found in the starting position. No movement needed.",
+                    "detection_count": len(details.get("detections") or []),
+                }
+
+            sweep_moves = ["left", "left", "right", "right", "right", "right"]
+            move_labels = ["left 1", "left 2", "right 1", "right 2", "right 3", "right 4"]
+
+            for idx, move_cmd in enumerate(sweep_moves):
+                await self._move_once(move_cmd)
+                found, details = await self._check_current_frame(tag=f"step_{idx+1}")
+                if found:
+                    return {
+                        "result": "face_found_after_move",
+                        "message": f"Face found after {move_labels[idx]}.",
+                        "detection_count": len(details.get("detections") or []),
+                    }
+
+            await self._move_once("left")
+            await self._move_once("left")
+            if AUTO_FACE_FINAL_STOP:
+                try:
+                    await dispatch_movement_command("stop")
+                except Exception as stop_exc:
+                    print(f"[AUTO_FACE] final stop warning: {stop_exc}")
+
+            return {
+                "result": "not_found_recentered",
+                "message": "No face found during sweep. Returned to the starting position.",
+                "detection_count": 0,
+            }
+        finally:
+            await self._restore_camera(ctx)
+
+    async def _move_once(self, cmd: str) -> None:
+        print(f"[AUTO_FACE] move {cmd}")
+        await dispatch_movement_command(cmd)
+        await asyncio.sleep(self.move_settle_seconds)
+
+    async def _prepare_camera(self) -> dict:
+        prev_status = camera_service.get_status()
+        ctx = {
+            "enabled": bool(prev_status.get("enabled")),
+            "mode": prev_status.get("mode") or "raw",
+            "stream_clients": int(prev_status.get("stream_clients") or 0),
+        }
+
+        if not ctx["enabled"]:
+            camera_service.activate("face")
+        elif ctx["mode"] != "face":
+            camera_service.set_mode("face")
+
+        _reset_uploaded_signature()
+        await asyncio.sleep(self.camera_warmup_seconds)
+        return ctx
+
+    async def _restore_camera(self, ctx: dict) -> None:
+        try:
+            if not ctx.get("enabled"):
+                camera_service.deactivate()
+            else:
+                prev_mode = (ctx.get("mode") or "raw").strip().lower()
+                if prev_mode != "face":
+                    camera_service.set_mode(prev_mode)
+            _reset_uploaded_signature()
+        except Exception as exc:
+            print(f"[AUTO_FACE] camera restore warning: {exc}")
+
+    def _save_snapshot(self, frame_bytes: Optional[bytes], tag: str) -> Optional[str]:
+        if not frame_bytes:
+            return None
+
+        try:
+            self.snapshot_dir.mkdir(parents=True, exist_ok=True)
+            stamp = _datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = self.snapshot_dir / f"{stamp}_{tag}.jpg"
+            path.write_bytes(frame_bytes)
+            return str(path)
+        except Exception as exc:
+            print(f"[AUTO_FACE] snapshot save warning: {exc}")
+            return None
+
+    async def _check_current_frame(self, tag: str = "check") -> tuple[bool, dict]:
+        deadline = time.time() + self.check_window_seconds
+        latest_frame = None
+        latest_detections = []
+        last_error = ""
+
+        while time.time() < deadline:
+            status = camera_service.get_status()
+            last_error = str(status.get("last_error") or "")
+            latest_detections = camera_service.get_detections() or []
+            frame_bytes = camera_service.get_jpeg()
+            if frame_bytes:
+                latest_frame = frame_bytes
+
+            if latest_detections:
+                snapshot_path = self._save_snapshot(latest_frame, f"{tag}_found")
+                print(
+                    f"[AUTO_FACE] face found tag={tag} count={len(latest_detections)} "
+                    f"snapshot={snapshot_path or 'none'}"
+                )
+                return True, {
+                    "detections": latest_detections,
+                    "snapshot_path": snapshot_path,
+                    "last_error": last_error,
+                }
+
+            await asyncio.sleep(0.2)
+
+        snapshot_path = self._save_snapshot(latest_frame, f"{tag}_none")
+        if last_error:
+            print(f"[AUTO_FACE] no face tag={tag} last_error={last_error}")
+        else:
+            print(f"[AUTO_FACE] no face tag={tag}")
+        return False, {
+            "detections": latest_detections,
+            "snapshot_path": snapshot_path,
+            "last_error": last_error,
+        }
+
+
+auto_face_manager = AutoFaceCenteringManager()
+
+
 # -------------------------------------------------------------------
 # VOICE / TTS STATE
 # -------------------------------------------------------------------
@@ -909,6 +1233,7 @@ async def status_loop():
             "button_detail": voice_button_detail,
         }
         payload["extra"]["esp32"] = serial_link.get_health()
+        payload["extra"]["auto_face"] = auto_face_manager.status()
 
         try:
             await asyncio.to_thread(api.status, payload)
@@ -1878,6 +2203,7 @@ async def lifespan(app_instance: FastAPI):
 
     quiet_print("tts", f"[TTS] ready device={tts_service.device}")
     voice_request_lock = asyncio.Lock()
+    auto_face_manager.attach_lock(asyncio.Lock())
     set_voice_button_state("idle", "Press the mic to talk.")
 
     try:
@@ -1920,6 +2246,7 @@ async def lifespan(app_instance: FastAPI):
     asyncio.create_task(command_loop())
     asyncio.create_task(rag_build_loop())
     asyncio.create_task(camera_upload_loop())
+    asyncio.create_task(auto_face_manager.loop())
     asyncio.create_task(_warmup_llm())
 
     set_ui_state("READY", "AURA online")
@@ -1963,6 +2290,7 @@ async def health():
         "db_name": LOCAL_DB_NAME,
         "rag": rag_manager.stats(),
         "camera": camera_service.get_status(),
+        "auto_face": auto_face_manager.status(),
         "voice": {
             "enabled": voice_enabled,
             "running": voice_running,
@@ -2057,6 +2385,24 @@ async def voice_button_stop():
         set_ui_state("ERROR", truncate_for_ui(str(e)))
         set_voice_button_state("idle", f"Voice stop failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to stop button voice capture: {e}")
+
+
+@app.get("/auto_face/status")
+async def auto_face_status():
+    return auto_face_manager.status()
+
+
+@app.post("/auto_face/enabled")
+async def auto_face_enabled(req: _AutoFaceEnabledRequest):
+    return auto_face_manager.set_enabled(req.enabled)
+
+
+@app.post("/auto_face/test")
+async def auto_face_test():
+    try:
+        return await auto_face_manager.run_once(reason="manual_test", force=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Auto face sweep failed: {e}")
 
 
 # -------------------------------------------------------------------
@@ -2237,6 +2583,7 @@ async def status():
         "button_phase": voice_button_phase,
         "button_detail": voice_button_detail,
     }
+    payload["extra"]["auto_face"] = auto_face_manager.status()
     return payload
 
 
