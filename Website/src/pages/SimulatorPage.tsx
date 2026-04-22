@@ -139,7 +139,6 @@ export default function SimulatorPage() {
     });
   }, [sessions, sessionSearch]);
 
-
   const writeLog = async (payload: {
     event: string;
     prompt?: string;
@@ -208,8 +207,6 @@ export default function SimulatorPage() {
       setActiveSessionTitle(session.title || "New chat");
       setHistory(normalizeHistory(session.history));
       localStorage.setItem("aura_active_session_id", session.session_id);
-
-      // Context keeps loadedDb in sync automatically — no manual refresh needed here.
 
       const nextUrl = new URL(window.location.href);
       nextUrl.searchParams.set("session_id", session.session_id);
@@ -310,9 +307,6 @@ export default function SimulatorPage() {
     const userMsg: ChatMsg = { role: "user", content: q, ts: Math.floor(Date.now() / 1000) };
     const optimisticHistory = [...history, userMsg];
 
-    // Show placeholder assistant bubble immediately — before any network ops so the
-    // user sees feedback instantly. The typing indicator shows until the first SSE
-    // text arrives (detected by placeholder content still being "").
     const placeholderTs = Math.floor(Date.now() / 1000);
     const placeholderMsg: ChatMsg = { role: "assistant", content: "", ts: placeholderTs };
     setHistory([...optimisticHistory, placeholderMsg]);
@@ -325,10 +319,6 @@ export default function SimulatorPage() {
       const headers = new Headers(authHeaders);
       headers.set("Content-Type", "application/json");
 
-      // Fire SSE immediately — do NOT await session create/save first.
-      // Session persistence happens after streaming completes so the RTT to Azure
-      // does not block time-to-first-text. We pass the existing sessionId if we have
-      // one (Jetson uses it for local chat logging); null for new chats is fine.
       const res = await fetch(`${API_URL}/device/admin/chat/stream`, {
         method: "POST",
         headers,
@@ -347,12 +337,15 @@ export default function SimulatorPage() {
 
       if (!res.ok) {
         let errDetail = `Request failed (${res.status})`;
-        try { const e = await res.json(); errDetail = e?.detail || e?.message || errDetail; } catch { /* */ }
+        try {
+          const e = await res.json();
+          errDetail = e?.detail || e?.message || errDetail;
+        } catch {
+          // ignore
+        }
         throw new Error(errDetail);
       }
 
-      // Read the SSE stream and progressively update the placeholder bubble.
-      // The typing indicator disappears automatically once content !== "" (see render).
       let accumulated = "";
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
@@ -364,20 +357,36 @@ export default function SimulatorPage() {
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split("\n");
         buf = lines.pop() ?? "";
+
         for (const line of lines) {
           if (!line.startsWith("data:")) continue;
           const raw = line.slice(5).trim();
           if (!raw) continue;
+
           try {
-            const obj = JSON.parse(raw) as { text?: string; done?: boolean; answer?: string; error?: string };
+            const obj = JSON.parse(raw) as {
+              text?: string;
+              done?: boolean;
+              answer?: string;
+              error?: string;
+            };
+
             if (obj.error) throw new Error(obj.error);
-            if (obj.done) { if (obj.answer) accumulated = obj.answer; break outer; }
+            if (obj.done) {
+              if (obj.answer) accumulated = obj.answer;
+              break outer;
+            }
+
             if (obj.text) {
               accumulated += obj.text;
               const current = accumulated;
-              setHistory(prev => {
+              setHistory((prev) => {
                 const next = [...prev];
-                next[next.length - 1] = { role: "assistant", content: current, ts: placeholderTs };
+                next[next.length - 1] = {
+                  role: "assistant",
+                  content: current,
+                  ts: placeholderTs,
+                };
                 return next;
               });
             }
@@ -388,11 +397,13 @@ export default function SimulatorPage() {
       }
 
       const answer = accumulated.trim() || "(No answer returned)";
-      const finalHistory = [...optimisticHistory, { role: "assistant" as const, content: answer, ts: placeholderTs }];
+      const finalHistory = [
+        ...optimisticHistory,
+        { role: "assistant" as const, content: answer, ts: placeholderTs },
+      ];
       setHistory(finalHistory);
       setActiveSessionTitle(inferredTitle);
 
-      // Session persistence after streaming — no longer on the critical latency path.
       if (!sessionId) {
         sessionId = await createSession(inferredTitle, finalHistory);
       } else {
@@ -425,7 +436,11 @@ export default function SimulatorPage() {
       setHistory(erroredHistory);
 
       if (sessionId) {
-        try { await saveSession(sessionId, erroredHistory, inferredTitle); } catch { /* */ }
+        try {
+          await saveSession(sessionId, erroredHistory, inferredTitle);
+        } catch {
+          // ignore
+        }
       }
 
       const latency = Math.round(performance.now() - t0);
@@ -452,7 +467,6 @@ export default function SimulatorPage() {
       behavior: "smooth",
     });
   }, [history, loading]);
-
 
   useEffect(() => {
     let timer: number | null = null;
@@ -532,9 +546,6 @@ export default function SimulatorPage() {
         <div className="page-header simulator-header">
           <div>
             <h1 className="page-title">Simulator</h1>
-            <div className="page-subtitle">
-              Jetson chat, saved sessions, and database-backed Q&A
-            </div>
           </div>
 
           <div className="simulator-header-actions">
@@ -585,12 +596,27 @@ export default function SimulatorPage() {
               </div>
             </div>
 
-            <input
-              className="input simulator-session-search"
-              value={sessionSearch}
-              onChange={(e) => setSessionSearch(e.target.value)}
-              placeholder="Search chats..."
-            />
+            <div className="simulator-search-wrap">
+              <span className="simulator-search-icon" aria-hidden="true">
+                🔎
+              </span>
+              <input
+                className="simulator-session-search"
+                value={sessionSearch}
+                onChange={(e) => setSessionSearch(e.target.value)}
+                placeholder="Search chats"
+              />
+              {sessionSearch && (
+                <button
+                  type="button"
+                  className="simulator-search-clear"
+                  onClick={() => setSessionSearch("")}
+                  aria-label="Clear search"
+                >
+                  ×
+                </button>
+              )}
+            </div>
 
             <div className="simulator-session-list">
               {filteredSessions.map((s) => {
@@ -634,7 +660,9 @@ export default function SimulatorPage() {
               })}
 
               {!sessionsLoading && filteredSessions.length === 0 && (
-                <div className="simulator-empty-sessions">No saved chats yet.</div>
+                <div className="simulator-empty-sessions">
+                  {sessionSearch ? "No chats match your search." : "No saved chats yet."}
+                </div>
               )}
             </div>
           </aside>
@@ -644,7 +672,7 @@ export default function SimulatorPage() {
               <div>
                 <h2 className="simulator-thread-title">{activeSessionTitle}</h2>
                 <div className="simulator-thread-subtitle">
-                  {activeSessionId ? `Session: ${activeSessionId}` : "Unsaved draft chat"}
+                  {activeSessionId ? `Session: ${activeSessionId}` : "Fresh draft"}
                 </div>
               </div>
 
@@ -654,21 +682,17 @@ export default function SimulatorPage() {
               </div>
             </div>
 
-            <div className="simulator-thread-note">
-              Ask questions using the database currently loaded from the Database page.
-            </div>
-
             {statusText && <div className="simulator-alert">{statusText}</div>}
 
             <div ref={scrollRef} className="simulator-thread-body">
               {history.length === 0 && !loading && (
                 <div className="simulator-empty-chat">
-                  <div className="simulator-empty-icon">AURA</div>
-                  <div className="simulator-empty-title">Ready.</div>
+                  <div className="simulator-empty-chip">NEW CHAT</div>
+                  <div className="simulator-empty-title">Start a conversation</div>
                   <div className="simulator-empty-text">
                     {loadedDb
-                      ? `Using ${loadedDb}. Ask something like: "Explain Ohm's law with units."`
-                      : "Go to Database page and push a DB to Jetson first."}
+                      ? `Connected to ${loadedDb}. Ask your first question to begin this chat.`
+                      : "Push a database from the Database page first, then start chatting here."}
                   </div>
                 </div>
               )}
@@ -689,40 +713,47 @@ export default function SimulatorPage() {
                     >
                       <div className="simulator-message-top">
                         <span className="simulator-message-role">
-                          {isUser ? "User" : isError ? "Error" : "AURA"}
+                          {isUser ? "You" : isError ? "Error" : "AURA"}
                         </span>
                         {msg.ts && (
                           <span className="simulator-message-time">{fmtTime(msg.ts)}</span>
                         )}
                       </div>
 
-                      <div className="simulator-message-content">{msg.content}</div>
+                      <div className="simulator-message-content">
+                        {msg.content || (loading && !isUser ? "Thinking..." : "")}
+                      </div>
                     </div>
                   </div>
                 );
               })}
 
-              {loading && (history.length === 0 || history[history.length - 1].content === "") && (
-                <div className="simulator-message-row assistant">
-                  <div className="simulator-message assistant typing">
-                    <div className="simulator-message-top">
-                      <span className="simulator-message-role">AURA</span>
-                    </div>
-                    <div className="simulator-typing">
-                      <span />
-                      <span />
-                      <span />
+              {loading &&
+                (history.length === 0 || history[history.length - 1].content === "") && (
+                  <div className="simulator-message-row assistant">
+                    <div className="simulator-message assistant typing">
+                      <div className="simulator-message-top">
+                        <span className="simulator-message-role">AURA</span>
+                      </div>
+                      <div className="simulator-typing">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
             </div>
 
             <div className="simulator-composer">
               <textarea
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={loadedDb ? `Ask ${loadedDb}...` : "Push a database from Database page first..."}
+                placeholder={
+                  loadedDb
+                    ? `Ask ${loadedDb}...`
+                    : "Push a database from Database page first..."
+                }
                 disabled={loading || !loadedDb}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
