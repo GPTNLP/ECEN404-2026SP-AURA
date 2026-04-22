@@ -1793,12 +1793,12 @@ async def command_loop():
                             except Exception as _fe:
                                 print(f"[FLUSH] '{_flush_model}' unload skipped: {_fe}")
 
-                        # Unload Whisper STT model
+                        # Unload Whisper STT models (both small.en and tiny.en wake model)
                         if stt_service is not None:
                             try:
-                                await asyncio.to_thread(stt_service.unload_model)
+                                await asyncio.to_thread(stt_service.unload_model, True)
                                 flushed.append("stt")
-                                print("[FLUSH] Whisper STT model unloaded")
+                                print("[FLUSH] Whisper STT models unloaded (command + wake)")
                             except Exception as _fe:
                                 print(f"[FLUSH] STT unload skipped: {_fe}")
 
