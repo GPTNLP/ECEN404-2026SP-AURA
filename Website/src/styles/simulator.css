@@ -191,15 +191,14 @@
 
 /* ================= SEARCH ================= */
 .simulator-search-wrap {
-  position: relative;
   display: flex;
   align-items: center;
-  min-height: 48px;
-  border-radius: 15px;
+  min-height: 50px;
+  padding: 0 14px;
+  border-radius: 16px;
   border: 1px solid var(--card-border);
   background: color-mix(in srgb, var(--card-bg) 94%, var(--accent-soft));
   box-shadow: var(--shadow);
-  overflow: hidden;
 }
 
 .simulator-search-wrap:focus-within {
@@ -209,19 +208,8 @@
     0 0 0 4px color-mix(in srgb, var(--accent-soft) 55%, transparent);
 }
 
-.simulator-search-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 42px;
-  color: var(--muted-text);
-  font-size: 14px;
-  flex: 0 0 auto;
-}
-
 .simulator-session-search {
   width: 100%;
-  flex: 1;
   min-width: 0;
   border: 0;
   outline: 0;
@@ -229,32 +217,11 @@
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
-  padding: 0 10px 0 0;
+  padding: 0;
 }
 
 .simulator-session-search::placeholder {
   color: var(--muted-text);
-}
-
-.simulator-search-clear {
-  width: 38px;
-  height: 38px;
-  margin-right: 5px;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--muted-text);
-  font-size: 22px;
-  line-height: 1;
-  cursor: pointer;
-  transition:
-    background 0.18s ease,
-    color 0.18s ease;
-}
-
-.simulator-search-clear:hover {
-  background: color-mix(in srgb, var(--card-bg) 80%, var(--accent-soft));
-  color: var(--text);
 }
 
 /* ================= SESSION LIST ================= */
@@ -605,6 +572,7 @@
   border-top: 1px solid var(--card-border);
   background: color-mix(in srgb, var(--card-bg) 94%, var(--accent-soft));
   flex: 0 0 auto;
+  align-items: stretch;
 }
 
 .simulator-input {
@@ -632,8 +600,12 @@
 }
 
 .simulator-send-btn {
-  min-width: 96px;
-  align-self: flex-end;
+  min-width: 118px;
+  width: 118px;
+  height: 56px;
+  align-self: auto;
+  flex: 0 0 118px;
+  border-radius: 16px;
   background: linear-gradient(
     180deg,
     var(--sim-maroon-top) 0%,
@@ -642,6 +614,7 @@
   );
   border: 1px solid var(--sim-maroon-border);
   color: #fff;
+  font-weight: 900;
   box-shadow:
     0 12px 24px var(--sim-maroon-shadow),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
@@ -696,5 +669,7 @@
   .simulator-send-btn,
   .simulator-action-btn {
     width: 100%;
+    min-width: 100%;
+    flex: 1 1 auto;
   }
 }

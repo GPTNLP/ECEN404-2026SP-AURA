@@ -597,25 +597,13 @@ export default function SimulatorPage() {
             </div>
 
             <div className="simulator-search-wrap">
-              <span className="simulator-search-icon" aria-hidden="true">
-                🔎
-              </span>
               <input
                 className="simulator-session-search"
                 value={sessionSearch}
                 onChange={(e) => setSessionSearch(e.target.value)}
                 placeholder="Search chats"
+                aria-label="Search chats"
               />
-              {sessionSearch && (
-                <button
-                  type="button"
-                  className="simulator-search-clear"
-                  onClick={() => setSessionSearch("")}
-                  aria-label="Clear search"
-                >
-                  ×
-                </button>
-              )}
             </div>
 
             <div className="simulator-session-list">
