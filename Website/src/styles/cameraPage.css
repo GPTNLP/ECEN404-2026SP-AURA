@@ -3,9 +3,17 @@
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 24px 28px;
+  padding: 20px 22px 28px;
+  box-sizing: border-box;
+  background: transparent;
 }
 
 .camera-page > * {
-  width: min(1300px, 100%);
+  width: min(1380px, 100%);
+}
+
+@media (max-width: 980px) {
+  .camera-page {
+    padding: 16px;
+  }
 }

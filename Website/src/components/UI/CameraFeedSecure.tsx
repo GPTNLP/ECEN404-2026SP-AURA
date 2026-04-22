@@ -22,7 +22,6 @@ export default function CameraFeedSecure() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [streamNonce, setStreamNonce] = useState(0);
-  const [statusText, setStatusText] = useState("Starting camera...");
 
   const mountedRef = useRef(true);
   const metaTimerRef = useRef<number | null>(null);
@@ -52,7 +51,6 @@ export default function CameraFeedSecure() {
 
     setBusy(true);
     setErr(null);
-    setStatusText("Starting raw camera...");
 
     try {
       const res = await fetch(
@@ -76,12 +74,10 @@ export default function CameraFeedSecure() {
 
       setOk(false);
       setErr(null);
-      setStatusText("Raw camera active");
       setStreamNonce((n) => n + 1);
     } catch (e: any) {
       if (!mountedRef.current) return;
       setErr(e?.message || "Failed to activate camera");
-      setStatusText("Camera start failed");
       setOk(false);
     } finally {
       if (!mountedRef.current) return;
@@ -109,7 +105,6 @@ export default function CameraFeedSecure() {
     } finally {
       if (!mountedRef.current) return;
       setOk(false);
-      setStatusText("Camera off");
     }
   };
 
@@ -164,7 +159,6 @@ export default function CameraFeedSecure() {
 
         if (!data?.available) {
           setOk(false);
-          setStatusText("Waiting for camera frame...");
           return;
         }
 
@@ -173,13 +167,11 @@ export default function CameraFeedSecure() {
             ? Date.now() / 1000 - data.updated_at < 2
             : false;
 
-        setStatusText(isFresh ? "Raw camera active" : "Camera paused");
         setOk(isFresh && !!data.available);
         setErr(null);
       } catch {
         if (!mountedRef.current) return;
         setOk(false);
-        setStatusText("Camera disconnected");
       }
     };
 
@@ -190,6 +182,14 @@ export default function CameraFeedSecure() {
       if (metaTimerRef.current) window.clearInterval(metaTimerRef.current);
     };
   }, [base, metaUrl, token]);
+
+  const connectionLabel = busy
+    ? "Connecting"
+    : ok
+    ? "Connected"
+    : "Disconnected";
+
+  const connectionClass = busy ? "busy" : ok ? "ok" : "error";
 
   if (!API_BASE) {
     return (
@@ -212,13 +212,12 @@ export default function CameraFeedSecure() {
         <div className="cam-topbar">
           <div className="cam-left">
             <h2 className="cam-title">Live Camera Feed</h2>
-            <div className="cam-substatus">{statusText}</div>
           </div>
 
           <div className="cam-right">
-            <div className={`cam-connection ${ok ? "ok" : "error"}`}>
+            <div className={`cam-connection ${connectionClass}`}>
               <span className="cam-connection-dot" />
-              {ok ? "Connected" : "Disconnected"}
+              {connectionLabel}
             </div>
           </div>
         </div>
@@ -238,15 +237,11 @@ export default function CameraFeedSecure() {
               onError={() => {
                 if (!mountedRef.current) return;
                 setOk(false);
-                setErr("Stream unavailable");
               }}
             />
           ) : (
             <div className="cam-placeholder">
-              <div>Waiting for camera frame...</div>
-              <div className="cam-placeholder-sub">
-                The Jetson camera is starting up.
-              </div>
+              <div>Waiting for Jetson stream...</div>
             </div>
           )}
 
