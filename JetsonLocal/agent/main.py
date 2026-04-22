@@ -2165,10 +2165,13 @@ async def _warmup_llm():
     # paying the full 10-30s load penalty and negating the warmup entirely.
     # Also prime the system prompt KV cache so real queries skip those ~150 tokens.
     num_ctx = int(os.getenv("AURA_NUM_CTX", "4096"))
+    # Must match the system prompt in lightrag_local.py aquery() exactly.
+    # Ollama caches the KV for these tokens; any mismatch defeats the prime.
     _AURA_WARMUP_SYSTEM = (
         "You are AURA, a helpful lab assistant robot. "
-        "Answer the question using the retrieved passages below. "
-        "Use every relevant passage, including indirect mentions, comparisons, and background. "
+        "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
+        "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
+        "a detailed technical question may need more explanation. "
         "If the passages fully answer the question, answer from them. "
         "If they only partially cover it, use what they say and fill in gaps from your "
         "general knowledge — briefly note 'based on the documents and general knowledge'. "
@@ -2225,6 +2228,37 @@ async def _warmup_llm():
         quiet_print("llm_warmup", f"[STARTUP] Embed model '{EMBEDDING_MODEL}' loaded into GPU VRAM")
     except Exception as exc:
         quiet_print("llm_warmup", f"[STARTUP] Embed warmup skipped (non-fatal): {exc}")
+
+    # Warm up the fast (1b) keyword extraction model.
+    # _extract_query_keywords uses num_ctx=512; the conversational path also uses
+    # num_ctx=512.  Loading with the same num_ctx here ensures the first real
+    # keyword extraction call hits a warm model with the right KV cache size,
+    # rather than triggering a model reload from the default num_ctx.
+    fast_llm = os.getenv("AURA_INTENT_MODEL", "llama3.2:1b")
+    fast_body = {
+        "model":      fast_llm,
+        "prompt":     "Hi",
+        "stream":     False,
+        "keep_alive": keep_alive,
+        "options": {
+            "num_predict": 1,
+            "num_ctx":     512,
+            "num_gpu":     num_gpu,
+            "temperature": 0.0,
+            "mirostat":    0,
+        },
+    }
+    try:
+        await asyncio.to_thread(
+            lambda: requests.post(
+                f"{ollama_url}/api/generate",
+                json=fast_body,
+                timeout=60.0,
+            )
+        )
+        quiet_print("llm_warmup", f"[STARTUP] Fast model '{fast_llm}' loaded into GPU VRAM")
+    except Exception as exc:
+        quiet_print("llm_warmup", f"[STARTUP] Fast model warmup skipped (non-fatal): {exc}")
 
 
 # -------------------------------------------------------------------

@@ -436,11 +436,15 @@ class OllamaClient:
         self.base_url = (base_url or AURA_OLLAMA_URL).rstrip("/")
         self.embed_model = embed_model
         self.llm_model = llm_model
+        # Persistent session reuses the TCP connection to localhost:11434 across
+        # calls instead of opening a new connection for every request. urllib3's
+        # connection pool is thread-safe so this is safe with asyncio.to_thread.
+        self._session = requests.Session()
 
     def _post_json(
         self, path: str, payload: Dict[str, Any], timeout_s: float
     ) -> Dict[str, Any]:
-        resp = requests.post(
+        resp = self._session.post(
             f"{self.base_url}{path}",
             json=payload,
             timeout=timeout_s,
@@ -576,9 +580,10 @@ class OllamaClient:
         loop = asyncio.get_running_loop()
         token_q: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=1024)
 
+        session = self._session
         def _stream_worker() -> None:
             try:
-                with requests.post(
+                with session.post(
                     f"{self.base_url}/api/generate",
                     json=payload,
                     stream=True,
@@ -1214,7 +1219,7 @@ class LightRAG:
                 system=_KEYWORD_EXTRACT_SYSTEM,
                 timeout_s=15.0,
                 num_predict=60,
-                num_ctx=256,
+                num_ctx=512,
                 temperature=0.0,
             )
             parsed = _parse_json_from_llm(raw)
@@ -1439,8 +1444,9 @@ class LightRAG:
         if context.strip():
             system = (
                 "You are AURA, a helpful lab assistant robot. "
-                "Answer the question using the retrieved passages below. "
-                "Use every relevant passage, including indirect mentions, comparisons, and background. "
+                "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
+                "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
+                "a detailed technical question may need more explanation. "
                 "If the passages fully answer the question, answer from them. "
                 "If they only partially cover it, use what they say and fill in gaps from your "
                 "general knowledge — briefly note 'based on the documents and general knowledge'. "
