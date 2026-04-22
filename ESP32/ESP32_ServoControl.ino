@@ -30,7 +30,14 @@ const uint16_t ARM_RETURN_OVERSHOOT_US = 150;
 // Forward-only left shoulder trim.
 // Positive value moves PWM1 farther downward.
 // If this makes the robot turn more left, change it to a negative value.
-const int16_t FORWARD_LEFT_SHOULDER_TRIM_US = 30;
+const int16_t FORWARD_LEFT_SHOULDER_TRIM_US = 20;
+
+// Tilt pose tuning
+const uint16_t TILT_SHOULDER_MARGIN_US = 40;
+
+// Near-maximum downward shoulder positions for tabletop-facing tilt
+const uint16_t RIGHT_SHOULDER_TILT_US = SERVO_MIN[0] + TILT_SHOULDER_MARGIN_US;
+const uint16_t LEFT_SHOULDER_TILT_US  = SERVO_MAX[1] - TILT_SHOULDER_MARGIN_US;
 
 uint16_t currentUs[NUM_SERVOS];
 uint16_t targetUs[NUM_SERVOS];
@@ -77,6 +84,9 @@ enum SequencePhase {
 SequenceType activeSequence = SEQ_NONE;
 SequencePhase activePhase = PHASE_IDLE;
 unsigned long phaseStartMs = 0;
+uint8_t sequenceCyclesRemaining = 0;
+
+bool tiltModeActive = false;
 
 // -------------------- Utility --------------------
 uint16_t usToTicks(uint16_t us) {
@@ -115,6 +125,8 @@ bool allTargetsReached() {
 void cancelSequenceAndHome() {
   activeSequence = SEQ_NONE;
   activePhase = PHASE_IDLE;
+  sequenceCyclesRemaining = 0;
+  tiltModeActive = false;
   setHomeTargets();
   Serial.println("ACK:STOP:HOME");
 }
@@ -146,6 +158,10 @@ void printStatus() {
   Serial.println((int)activeSequence);
   Serial.print("Phase = ");
   Serial.println((int)activePhase);
+  Serial.print("Cycles remaining = ");
+  Serial.println(sequenceCyclesRemaining);
+  Serial.print("Tilt mode = ");
+  Serial.println(tiltModeActive ? "ON" : "OFF");
   Serial.println("----------------------");
 }
 
@@ -156,6 +172,13 @@ void printHelp() {
   Serial.println("  backward      -> one slow backward step");
   Serial.println("  left          -> one slow left turn step");
   Serial.println("  right         -> one slow right turn step");
+  Serial.println("  left90        -> 4 left-step sequences");
+  Serial.println("  right90       -> 4 right-step sequences");
+  Serial.println("  left180       -> 8 left-step sequences");
+  Serial.println("  right180      -> 8 right-step sequences");
+  Serial.println("  left360       -> 16 left-step sequences");
+  Serial.println("  right360      -> 16 right-step sequences");
+  Serial.println("  tilt          -> tilt forward and hold until home/stop");
   Serial.println("  stop          -> cancel active sequence and return true home");
   Serial.println("  home          -> same as stop");
   Serial.println();
@@ -248,6 +271,12 @@ void applyReadyPoseTargets() {
   setTarget(1, LEFT_SHOULDER_READY_US);
 }
 
+void applyShouldersDownTargets() {
+  // Max downward depth
+  setTarget(0, SERVO_MIN[0]);  // right shoulder down
+  setTarget(1, SERVO_MAX[1]);  // left shoulder down
+}
+
 void applyForwardArmTargets() {
   setTarget(2, RIGHT_ARM_FORWARD_US);
   setTarget(3, LEFT_ARM_FORWARD_US);
@@ -272,47 +301,71 @@ void applyRightTurnArmTargets() {
 
 void applyOppositeArmTargets() {
   if (activeSequence == SEQ_FORWARD) {
-    // After forward, move partway toward backward
     setTarget(2, RIGHT_ARM_FORWARD_US - ARM_RETURN_OVERSHOOT_US);
     setTarget(3, LEFT_ARM_FORWARD_US + ARM_RETURN_OVERSHOOT_US);
     Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_FORWARD");
   }
   else if (activeSequence == SEQ_BACKWARD) {
-    // After backward, move partway toward forward
-    setTarget(2, RIGHT_ARM_BACKWARD_US + ARM_RETURN_OVERSHOOT_US);
-    setTarget(3, LEFT_ARM_BACKWARD_US - ARM_RETURN_OVERSHOOT_US);
-    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_BACKWARD");
+    setTarget(2, RIGHT_ARM_FORWARD_US - ARM_RETURN_OVERSHOOT_US);
+    setTarget(3, LEFT_ARM_FORWARD_US + ARM_RETURN_OVERSHOOT_US);
+    Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_BACKWARD_FORWARD_STYLE");
   }
   else if (activeSequence == SEQ_TURN_LEFT) {
-    // Left turn = right arm forward, left arm backward
     setTarget(2, RIGHT_ARM_FORWARD_US - ARM_RETURN_OVERSHOOT_US);
     setTarget(3, LEFT_ARM_BACKWARD_US - ARM_RETURN_OVERSHOOT_US);
     Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_LEFT");
   }
   else if (activeSequence == SEQ_TURN_RIGHT) {
-    // Right turn = right arm backward, left arm forward
     setTarget(2, RIGHT_ARM_BACKWARD_US + ARM_RETURN_OVERSHOOT_US);
     setTarget(3, LEFT_ARM_FORWARD_US + ARM_RETURN_OVERSHOOT_US);
     Serial.println("ACK:PHASE:ARMS_OPPOSITE_AFTER_RIGHT");
   }
 }
 
-void startSequence(SequenceType seq) {
-  activeSequence = seq;
+void applyTiltPoseTargets() {
+  // Lower shoulders deeply and move arms forward to face the tabletop
+  setTarget(0, RIGHT_SHOULDER_TILT_US);
+  setTarget(1, LEFT_SHOULDER_TILT_US);
+  setTarget(2, RIGHT_ARM_FORWARD_US);
+  setTarget(3, LEFT_ARM_FORWARD_US);
+}
+
+void beginSequenceCycle() {
   activePhase = PHASE_SHOULDERS_UP;
   phaseStartMs = millis();
 
-  applyShouldersUpTargets();
+  // Forward/backward start by pushing shoulders down deeply.
+  // Turns keep the original lifted-shoulder behavior.
+  if (activeSequence == SEQ_BACKWARD) {
+    applyShouldersDownTargets();
+  } else {
+    applyShouldersUpTargets();
+  }
+
   applyArmsHomeTargets();
+}
+
+void startSequence(SequenceType seq, uint8_t cycles = 1) {
+  if (cycles == 0) cycles = 1;
+
+  tiltModeActive = false;
+  activeSequence = seq;
+  sequenceCyclesRemaining = cycles;
+
+  beginSequenceCycle();
 
   if (seq == SEQ_FORWARD) {
-    Serial.println("ACK:SEQ:FORWARD:START");
+    Serial.print("ACK:SEQ:FORWARD:START:CYCLES=");
+    Serial.println(sequenceCyclesRemaining);
   } else if (seq == SEQ_BACKWARD) {
-    Serial.println("ACK:SEQ:BACKWARD:START");
+    Serial.print("ACK:SEQ:BACKWARD:START:CYCLES=");
+    Serial.println(sequenceCyclesRemaining);
   } else if (seq == SEQ_TURN_LEFT) {
-    Serial.println("ACK:SEQ:LEFT:START");
+    Serial.print("ACK:SEQ:LEFT:START:CYCLES=");
+    Serial.println(sequenceCyclesRemaining);
   } else if (seq == SEQ_TURN_RIGHT) {
-    Serial.println("ACK:SEQ:RIGHT:START");
+    Serial.print("ACK:SEQ:RIGHT:START:CYCLES=");
+    Serial.println(sequenceCyclesRemaining);
   }
 }
 
@@ -326,8 +379,8 @@ void advanceSequencePhase() {
       Serial.println("ACK:PHASE:ARMS_FORWARD");
     }
     else if (activeSequence == SEQ_BACKWARD) {
-      applyBackwardArmTargets();
-      Serial.println("ACK:PHASE:ARMS_BACKWARD");
+      applyForwardArmTargets();
+      Serial.println("ACK:PHASE:ARMS_BACKWARD_USING_FORWARD_TARGETS");
     }
     else if (activeSequence == SEQ_TURN_LEFT) {
       applyLeftTurnArmTargets();
@@ -339,7 +392,7 @@ void advanceSequencePhase() {
     }
   }
   else if (activePhase == PHASE_SHOULDERS_HOME) {
-    if (activeSequence == SEQ_FORWARD) {
+    if (activeSequence == SEQ_FORWARD || activeSequence == SEQ_BACKWARD) {
       applyForwardShouldersHomeTargets();
       Serial.println("ACK:PHASE:SHOULDERS_HOME_FORWARD_TRIM");
     } else {
@@ -363,9 +416,17 @@ void advanceSequencePhase() {
     Serial.println("ACK:PHASE:FINAL_HOME");
   }
   else if (activePhase == PHASE_DONE) {
-    Serial.println("ACK:SEQ:DONE");
-    activeSequence = SEQ_NONE;
-    activePhase = PHASE_IDLE;
+    if (sequenceCyclesRemaining > 1) {
+      sequenceCyclesRemaining--;
+      beginSequenceCycle();
+      Serial.print("ACK:SEQ:REPEAT_REMAINING=");
+      Serial.println(sequenceCyclesRemaining);
+    } else {
+      Serial.println("ACK:SEQ:DONE");
+      activeSequence = SEQ_NONE;
+      activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+    }
   }
 }
 
@@ -402,16 +463,42 @@ void handleCommand(String raw) {
   Serial.println(cmd);
 
   if (cmd == "forward") {
-    startSequence(SEQ_FORWARD);
+    startSequence(SEQ_FORWARD, 1);
   }
   else if (cmd == "backward") {
-    startSequence(SEQ_BACKWARD);
+    startSequence(SEQ_BACKWARD, 1);
   }
   else if (cmd == "left") {
-    startSequence(SEQ_TURN_LEFT);
+    startSequence(SEQ_TURN_LEFT, 1);
   }
   else if (cmd == "right") {
-    startSequence(SEQ_TURN_RIGHT);
+    startSequence(SEQ_TURN_RIGHT, 1);
+  }
+  else if (cmd == "left90") {
+    startSequence(SEQ_TURN_LEFT, 4);
+  }
+  else if (cmd == "right90") {
+    startSequence(SEQ_TURN_RIGHT, 2;
+  }
+  else if (cmd == "left180") {
+    startSequence(SEQ_TURN_LEFT, 8);
+  }
+  else if (cmd == "right180") {
+    startSequence(SEQ_TURN_RIGHT, 4);
+  }
+  else if (cmd == "left360") {
+  startSequence(SEQ_TURN_LEFT, 16);
+  }
+  else if (cmd == "right360") {
+  startSequence(SEQ_TURN_RIGHT, 8);
+  }
+  else if (cmd == "tilt") {
+    activeSequence = SEQ_NONE;
+    activePhase = PHASE_IDLE;
+    sequenceCyclesRemaining = 0;
+    tiltModeActive = true;
+    applyTiltPoseTargets();
+    Serial.println("ACK:POSE:TILT");
   }
   else if (cmd == "stop" || cmd == "home") {
     cancelSequenceAndHome();
@@ -429,6 +516,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightShoulderUp(delta);
       moveLeftShoulderUp(delta);
     } else {
@@ -440,6 +529,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightShoulderDown(delta);
       moveLeftShoulderDown(delta);
     } else {
@@ -451,6 +542,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightShoulderUp(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -461,6 +554,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightShoulderDown(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -471,6 +566,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveLeftShoulderUp(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -481,6 +578,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveLeftShoulderDown(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -493,6 +592,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightArmForward(delta);
       moveLeftArmForward(delta);
     } else {
@@ -504,6 +605,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightArmBackward(delta);
       moveLeftArmBackward(delta);
     } else {
@@ -515,6 +618,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightArmForward(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -525,6 +630,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveRightArmBackward(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -535,6 +642,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveLeftArmForward(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -545,6 +654,8 @@ void handleCommand(String raw) {
     if (delta > 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       moveLeftArmBackward(delta);
     } else {
       Serial.println("ERR:BAD_VALUE");
@@ -557,6 +668,8 @@ void handleCommand(String raw) {
     if (value >= 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       setTarget(0, value);
       Serial.print("ACK:SERVO0:TARGET=");
       Serial.println(targetUs[0]);
@@ -569,6 +682,8 @@ void handleCommand(String raw) {
     if (value >= 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       setTarget(1, value);
       Serial.print("ACK:SERVO1:TARGET=");
       Serial.println(targetUs[1]);
@@ -581,6 +696,8 @@ void handleCommand(String raw) {
     if (value >= 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       setTarget(2, value);
       Serial.print("ACK:SERVO2:TARGET=");
       Serial.println(targetUs[2]);
@@ -593,6 +710,8 @@ void handleCommand(String raw) {
     if (value >= 0) {
       activeSequence = SEQ_NONE;
       activePhase = PHASE_IDLE;
+      sequenceCyclesRemaining = 0;
+      tiltModeActive = false;
       setTarget(3, value);
       Serial.print("ACK:SERVO3:TARGET=");
       Serial.println(targetUs[3]);
