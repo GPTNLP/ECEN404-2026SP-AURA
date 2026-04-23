@@ -2533,33 +2533,43 @@ async def rag_chat(req: _ChatRequest, stream: bool = Query(False)):
         async def _event_generator():
             sentence_buf: List[str] = []
             token_q: asyncio.Queue = asyncio.Queue(maxsize=512)
+            _had_chunk = False  # set True when _on_tok queues a complete sentence
 
             async def _on_tok(tok: str) -> None:
+                nonlocal _had_chunk
                 sentence_buf.append(tok)
                 sentence, remainder = _pop_sentence("".join(sentence_buf))
                 if sentence:
                     sentence_buf.clear()
                     sentence_buf.append(remainder)
                     await token_q.put(sentence)
+                    _had_chunk = True
 
             async def _run():
+                ans = ""
                 try:
-                    ans = await asyncio.wait_for(
+                    raw = await asyncio.wait_for(
                         rag_manager.query(req.query, on_token=_on_tok),
                         timeout=CHAT_RAG_TIMEOUT_SECONDS,
                     )
-                    if isinstance(ans, dict):
-                        ans = ans.get("answer") or ans.get("response") or str(ans)
-                    ans = str(ans or "").strip() or "No response generated from model."
+                    if isinstance(raw, dict):
+                        raw = raw.get("answer") or raw.get("response") or str(raw)
+                    ans = str(raw or "").strip() or "No response generated from model."
                     chat_manager.add_message("assistant", ans, api, DEVICE_ID)
                 except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    pass
+                    ans = "I timed out while generating a response."
+                except Exception as e:
+                    ans = f"Error: {e}"
                 finally:
                     leftover = "".join(sentence_buf).strip()
                     if leftover:
                         await token_q.put(leftover)
+                    # When on_token was never called (rag_system is None, early-return
+                    # error string, or exception), ans was never streamed via _on_tok
+                    # and nothing landed in the leftover either.  Surface it directly
+                    # so the client always receives some text instead of "(no response)".
+                    if not _had_chunk and not leftover and ans:
+                        await token_q.put(ans)
                     await token_q.put(None)
 
             asyncio.create_task(_run())
