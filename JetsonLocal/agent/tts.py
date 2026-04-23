@@ -15,7 +15,7 @@ JETSONLOCAL_DIR = BASE_DIR.parent
 ENV_PATH = JETSONLOCAL_DIR / ".env"
 
 if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
+    load_dotenv(ENV_PATH, override=True)
 
 TTS_SETTINGS_PATH = Path(
     os.path.expanduser(
@@ -205,10 +205,12 @@ class TTSService:
         if not text:
             return False
 
+        volume = self._read_volume_percent()
+
         if self.api_key and self.voice_id:
             try:
-                return self._speak_elevenlabs(text)
+                return self._speak_elevenlabs(text, volume_percent=volume)
             except Exception as e:
                 print(f"[TTS] ElevenLabs failed -> fallback: {e}")
 
-        return self._speak_offline(text)
+        return self._speak_offline(text, volume_percent=volume)

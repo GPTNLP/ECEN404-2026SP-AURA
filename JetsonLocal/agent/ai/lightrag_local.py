@@ -577,8 +577,11 @@ class OllamaClient:
 
         # Streaming path: run the blocking HTTP stream in a thread, feed tokens
         # back to the event loop via a queue so on_token() can be awaited safely.
+        # Unbounded queue: put_nowait via call_soon_threadsafe would raise QueueFull
+        # and silently drop tokens if bounded. Tokens are small strings (~5 chars) so
+        # memory is not a concern at any generation length on the Jetson.
         loop = asyncio.get_running_loop()
-        token_q: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=1024)
+        token_q: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
         session = self._session
         def _stream_worker() -> None:

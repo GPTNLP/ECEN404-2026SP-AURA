@@ -72,6 +72,27 @@ def _read_logs(limit: int, offset: int) -> List[Dict[str, Any]]:
     return out
 
 
+def _read_all_logs() -> List[Dict[str, Any]]:
+    """Read every log entry (no limit/offset). Used by filter-then-paginate paths."""
+    if not LOG_FILE.exists():
+        return []
+
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    lines.reverse()  # newest first
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
 def _require_device_secret(x_device_secret: Optional[str]) -> None:
     if not DEVICE_SECRET:
         raise HTTPException(
@@ -237,7 +258,7 @@ def my_logs(request: Request, limit: int = 200, offset: int = 0):
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
 
-    items = _read_logs(limit=5000, offset=0)
+    items = _read_all_logs()
     mine = [
         it
         for it in items
@@ -269,7 +290,7 @@ def list_logs(
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
 
-    items = _read_logs(limit=5000, offset=0)
+    items = _read_all_logs()
 
     q_l = (q or "").strip().lower()
     role_l = (role or "").strip().lower()

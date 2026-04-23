@@ -511,6 +511,9 @@ export default function SimulatorPage() {
   useEffect(() => {
     if (!token) return;
     void fetchMySessions();
+    // fetchMySessions is intentionally omitted: it's recreated each render but
+    // only depends on `token`, which IS in the deps array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   useEffect(() => {
@@ -720,7 +723,8 @@ export default function SimulatorPage() {
               })}
 
               {loading &&
-                !history.some(m => m.role === "assistant" && m.content !== "") && (
+                history[history.length - 1]?.role === "assistant" &&
+                history[history.length - 1]?.content === "" && (
                   <div className="simulator-message-row assistant">
                     <div className="simulator-message assistant typing">
                       <div className="simulator-message-top">
