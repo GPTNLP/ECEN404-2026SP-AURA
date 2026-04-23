@@ -1793,12 +1793,12 @@ async def command_loop():
                             except Exception as _fe:
                                 print(f"[FLUSH] '{_flush_model}' unload skipped: {_fe}")
 
-                        # Unload Whisper STT model
+                        # Unload Whisper STT models (both small.en and tiny.en wake model)
                         if stt_service is not None:
                             try:
-                                await asyncio.to_thread(stt_service.unload_model)
+                                await asyncio.to_thread(stt_service.unload_model, True)
                                 flushed.append("stt")
-                                print("[FLUSH] Whisper STT model unloaded")
+                                print("[FLUSH] Whisper STT models unloaded (command + wake)")
                             except Exception as _fe:
                                 print(f"[FLUSH] STT unload skipped: {_fe}")
 
@@ -2169,21 +2169,14 @@ async def _warmup_llm():
     # Ollama caches the KV for these tokens; any mismatch defeats the prime.
     _AURA_WARMUP_SYSTEM = (
         "You are AURA, a helpful lab assistant robot. "
-        "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
-        "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
-        "a detailed technical question may need more explanation. "
-        "If the passages fully answer the question, answer from them. "
-        "If they only partially cover it, use what they say and fill in gaps from your "
-        "general knowledge — briefly note 'based on the documents and general knowledge'. "
-        "Never invent specific measurements, values, formulas, or technical specifications "
-        "not present in the passages. "
-        "Never expand an acronym unless its full form appears in the passages. "
-        "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
-        "Stop after answering."
+        "Answer questions concisely and directly. "
+        "Use the context if it covers the question. "
+        "Fill in gaps from your general knowledge when needed. "
+        "Never invent specific measurements or values not present in the context."
     )
     body = {
         "model":      DEFAULT_MODEL,
-        "prompt":     "Question: What is a resistor?\n\nAnswer:",
+        "prompt":     "Context:\n\nQuestion: What is a resistor?\n\nAnswer:",
         "system":     _AURA_WARMUP_SYSTEM,
         "stream":     False,
         "keep_alive": keep_alive,

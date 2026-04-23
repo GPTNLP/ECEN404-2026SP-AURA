@@ -141,6 +141,10 @@ python -m pip install --no-user -r "$PROJECT_DIR/requirements.txt"
 echo "Installing Jetson-specific Python libraries..."
 python -m pip install --no-user jetson-stats SpeechRecognition Pillow sounddevice
 
+echo "Pre-downloading Whisper models (tiny.en for wake detection, small.en for transcription)..."
+python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')" 2>&1 | tail -3 || echo "[WARN] tiny.en download failed — will download on first use"
+python -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')" 2>&1 | tail -3 || echo "[WARN] small.en download failed — will download on first use"
+
 echo "Creating startup launcher..."
 cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 #!/usr/bin/env bash

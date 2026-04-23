@@ -38,7 +38,8 @@ NOISE_FLOOR_SAMPLES = 6
 NOISE_FLOOR_MULTIPLIER = 1.7
 MIN_DYNAMIC_THRESHOLD = 0.008
 
-DEFAULT_MODEL_SIZE = "base.en"
+DEFAULT_MODEL_SIZE = "small.en"   # command transcription model
+WAKE_MODEL_SIZE    = "tiny.en"    # wake word detection — 5-10× faster than small.en
 DEFAULT_DEVICE = "cuda"
 DEFAULT_COMPUTE_TYPE = "float16"
 DEFAULT_LANGUAGE = "en"
@@ -397,7 +398,8 @@ class STTService:
         self.unload_after_idle_seconds = float(unload_after_idle_seconds)
         self.auto_reload_model = bool(auto_reload_model)
 
-        self.model: Optional[WhisperModel] = None
+        self.model: Optional[WhisperModel] = None        # small.en: command transcription
+        self._wake_model: Optional[WhisperModel] = None  # tiny.en: wake detection only
         self.is_running = False
         self.noise_floor = 0.0
         self.last_wake_time = 0.0
@@ -553,7 +555,64 @@ class STTService:
 
             raise
 
-    def unload_model(self) -> None:
+    def _ensure_wake_model_loaded(self) -> None:
+        """Load tiny.en for wake-word detection if not already in memory.
+
+        tiny.en (39M params, ~78 MB float16) runs at ~50-150ms per 1-second chunk
+        with beam_size=1 — 5-10× faster than small.en's ~500ms-1.5s. Since wake
+        detection only needs to recognise 2-3 words ("Hey AURA"), accuracy loss vs
+        small.en is negligible for this purpose.
+        """
+        if self._wake_model is not None:
+            return
+
+        device        = self.device
+        compute_type  = self.compute_type
+
+        try:
+            import torch
+            if not torch.cuda.is_available() and device == "cuda":
+                device       = "cpu"
+                compute_type = "int8"
+        except Exception:
+            pass
+
+        print(f"[STT] Loading wake model '{WAKE_MODEL_SIZE}' on {device} ({compute_type})...")
+        try:
+            self._wake_model = WhisperModel(
+                WAKE_MODEL_SIZE,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=2 if device == "cuda" else 4,
+                num_workers=1,
+            )
+            print("[STT] Wake model loaded.")
+        except Exception as e:
+            print(f"[STT] Wake model load on {device} failed: {e} — falling back to CPU int8")
+            self._wake_model = WhisperModel(
+                WAKE_MODEL_SIZE,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=4,
+                num_workers=1,
+            )
+            print("[STT] Wake model loaded on CPU fallback.")
+
+    def unload_model(self, also_wake: bool = False) -> None:
+        """Unload the command transcription model (small.en) to free VRAM on idle.
+
+        The wake model (tiny.en) is kept loaded by default so AURA continues to
+        respond to 'Hey AURA' while models are flushed. Pass also_wake=True when
+        flushing everything (e.g. explicit flush_models from the dashboard).
+        """
+        if also_wake and self._wake_model is not None:
+            print("[STT] Unloading wake model...")
+            try:
+                del self._wake_model
+            except Exception:
+                pass
+            self._wake_model = None
+
         if self.model is None:
             return
 
@@ -576,12 +635,16 @@ class STTService:
         print("[STT] Whisper model unloaded.")
 
     def maybe_unload_model_for_idle(self) -> None:
+        """Unload small.en on idle to reclaim VRAM for LLM inference.
+        The wake model (tiny.en) is never unloaded here — it must stay resident
+        so wake-word detection continues working while the lab is idle.
+        """
         if self.model is None:
             return
 
         idle_for = time.time() - self.last_audio_activity_ts
         if idle_for >= self.unload_after_idle_seconds:
-            self.unload_model()
+            self.unload_model(also_wake=False)
 
     def _prepare_audio(self, audio: np.ndarray) -> np.ndarray:
         if audio is None:
@@ -741,6 +804,41 @@ class STTService:
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 
+    def _transcribe_with_wake_model(self, audio: np.ndarray) -> str:
+        """Fast wake-word transcription using tiny.en + greedy decode.
+
+        Compared to _transcribe_audio_array (small.en, beam_size=5, best_of=3):
+        - Model: 39M params vs 244M → fits in far less VRAM, clears cache faster
+        - Decode: beam_size=1 (greedy) vs beam/best-of search → single forward pass
+        - VAD: tighter silence/pad settings for short 2-3 word phrases
+        - Result: ~50-150ms vs ~500ms-1.5s per 1-second chunk on Jetson GPU
+
+        No initial_prompt needed — 'Hey AURA' has no domain-specific vocabulary.
+        """
+        if self._wake_model is None:
+            self._ensure_wake_model_loaded()
+
+        mono = self._prepare_audio(audio)
+        audio_16k = self._resample_audio(mono, self.device_sample_rate, self.target_sample_rate)
+
+        segments, _ = self._wake_model.transcribe(
+            audio_16k,
+            task=self.task,
+            language=self.language,
+            vad_filter=True,
+            vad_parameters={
+                "min_silence_duration_ms": 100,
+                "speech_pad_ms": 50,
+            },
+            beam_size=1,
+            best_of=1,
+            temperature=0.0,
+            no_speech_threshold=0.6,
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
+
     def _transcribe_audio_array(self, audio: np.ndarray) -> str:
         if audio is None or len(audio) == 0:
             return ""
@@ -872,7 +970,9 @@ class STTService:
 
         self.last_audio_activity_ts = time.time()
 
-        text = self._transcribe_audio_array(audio)
+        # Use tiny.en + greedy decode for wake detection: ~50-150ms vs ~500ms-1.5s
+        # with the full small.en beam search used for command transcription.
+        text = self._transcribe_with_wake_model(audio)
         if not text:
             return False, "", "", "no_text"
 
@@ -940,6 +1040,9 @@ class STTService:
 
     async def continuous_stt_loop(self) -> None:
         self.is_running = True
+        # Load wake model first (tiny.en) — small and fast; stays loaded through idle.
+        # Load command model second (small.en) — larger; may be unloaded on idle.
+        self._ensure_wake_model_loaded()
         self._ensure_model_loaded()
         self.calibrate_noise_floor()
 

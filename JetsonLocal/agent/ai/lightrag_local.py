@@ -1258,20 +1258,19 @@ class LightRAG:
             parts.append("\n".join(graph_lines))
 
         if chunk_hits:
-            parts.append("=== Source Passages ===")
             # Track chars used so far (joining with \n\n between each part).
             # Stop adding passages once the next one would push past MAX_CTX_CHARS
             # so the LLM always sees complete passages — a mid-cut paragraph is
             # worse than one fewer complete paragraph.
+            # No "Passage N" labels — numbered headers trigger document-summarization
+            # mode in the 3b model, causing it to list/describe passages instead of answering.
             used = len("\n\n".join(parts))
-            for i, hit in enumerate(chunk_hits, 1):
-                src = (hit.get("meta") or {}).get("source", "")
-                label = f"--- Passage {i} (from: {src}) ---" if src else f"--- Passage {i} ---"
-                passage = f"{label}\n{hit.get('text', '')}"
-                needed = len(passage) + 2  # +2 for the \n\n joiner
+            for hit in chunk_hits:
+                text = hit.get("text", "")
+                needed = len(text) + 2  # +2 for the \n\n joiner
                 if used + needed > MAX_CTX_CHARS:
                     break
-                parts.append(passage)
+                parts.append(text)
                 used += needed
 
         return "\n\n".join(parts)
@@ -1442,23 +1441,20 @@ class LightRAG:
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
 
         if context.strip():
+            # Short system prompt — the 3b model ignores long instruction lists.
+            # "Context: / Question: / Answer:" is the standard fine-tuning format
+            # for Q&A with context; the model pattern-matches to it and answers directly.
             system = (
                 "You are AURA, a helpful lab assistant robot. "
-                "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
-                "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
-                "a detailed technical question may need more explanation. "
-                "If the passages fully answer the question, answer from them. "
-                "If they only partially cover it, use what they say and fill in gaps from your "
-                "general knowledge — briefly note 'based on the documents and general knowledge'. "
-                "Never invent specific measurements, values, formulas, or technical specifications "
-                "not present in the passages. "
-                "Never expand an acronym unless its full form appears in the passages. "
-                "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
-                "Stop after answering."
+                "Answer questions concisely and directly. "
+                "Use the context if it covers the question. "
+                "Fill in gaps from your general knowledge when needed. "
+                "Never invent specific measurements or values not present in the context."
             )
             prompt = (
-                f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
-                f"Question: {query}\n\nAnswer:"
+                f"Context:\n{context}\n\n"
+                f"Question: {query}\n\n"
+                f"Answer:"
             )
         else:
             # Retrieval returned nothing — no DB loaded or query too dissimilar.
