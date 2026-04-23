@@ -106,6 +106,20 @@ AURA_CACHE_CTX_THRESH   = float(os.getenv("AURA_CACHE_CTX_THRESH",   "0.82"))
 AURA_CACHE_MAX_ENTRIES  = int(os.getenv("AURA_CACHE_MAX_ENTRIES",    "64"))
 AURA_CACHE_TTL_S        = float(os.getenv("AURA_CACHE_TTL_S",        "3600"))  # 1 h
 
+# Cross-encoder re-ranking
+# After FAISS+BM25 hybrid retrieval narrows to top_k candidates, the cross-encoder
+# scores each (query, passage) pair jointly.  Unlike embedding cosine similarity
+# (which measures "topic overlap"), a cross-encoder can distinguish "this passage
+# mentions the topic" from "this passage directly answers the question."
+# Model: ms-marco-MiniLM-L-6 — 65 MB, ~80 ms for 8 pairs on Jetson CPU.
+# AURA_RERANK_TOP_N: how many chunks to keep after re-ranking and pass to the LLM.
+#   With 4800-char chunks and MAX_CTX_CHARS=12000, the LLM can fit ≈2-3 chunks
+#   anyway; keeping 3 re-ranked chunks removes noisy candidates while preserving
+#   breadth.
+AURA_RERANK_ENABLED = os.getenv("AURA_RERANK_ENABLED", "true").lower() == "true"
+AURA_RERANK_MODEL   = os.getenv("AURA_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+AURA_RERANK_TOP_N   = int(os.getenv("AURA_RERANK_TOP_N", "3"))
+
 
 # ─── Data structures ─────────────────────────────────────────────────────────
 
@@ -213,6 +227,68 @@ class _QueryCache:
 
     def clear(self):
         self._entries.clear()
+
+
+class _CrossEncoderReranker:
+    """Lazy-loaded cross-encoder re-ranker.
+
+    Loaded on first query (not at import time) so startup latency and RAM
+    are not affected on Jetsons where sentence-transformers is unavailable.
+    Falls back to the original hybrid-score order on any error.
+
+    Context ordering — "lost in the middle":
+    LLM attention when generating the first output token is concentrated on
+    the tokens immediately before "Answer:".  The highest-scoring chunk is
+    placed LAST in chunk_hits (closest to the question) so the model starts
+    its answer grounded in the most relevant passage.  Lower-scored chunks
+    are placed first as supporting background.
+    """
+
+    def __init__(self) -> None:
+        self._model: Any = None  # None = not loaded; False = load failed
+
+    def _load(self) -> bool:
+        if self._model is not None:
+            return self._model is not False
+        try:
+            from sentence_transformers import CrossEncoder  # type: ignore
+            self._model = CrossEncoder(AURA_RERANK_MODEL, device="cpu")
+            print(f"[RERANK] cross-encoder ready: {AURA_RERANK_MODEL}")
+        except Exception as exc:
+            print(f"[RERANK] disabled — could not load '{AURA_RERANK_MODEL}': {exc}")
+            self._model = False
+        return self._model is not False
+
+    def rerank(
+        self,
+        query: str,
+        chunks: List[Dict[str, Any]],
+        top_n: int,
+    ) -> List[Dict[str, Any]]:
+        """Return top_n chunks sorted for context insertion (best chunk last)."""
+        if not AURA_RERANK_ENABLED or not chunks or not self._load():
+            return chunks[:top_n]
+
+        try:
+            pairs  = [(query, c.get("text", "")) for c in chunks]
+            scores = self._model.predict(pairs, show_progress_bar=False)
+
+            # Sort descending by cross-encoder score, keep top_n
+            ranked = sorted(zip(scores.tolist(), chunks), key=lambda x: x[0], reverse=True)
+            top    = [c for _, c in ranked[:top_n]]
+
+            # Reverse so the highest-scoring chunk ends up last in the LLM prompt
+            # (immediately before "Answer:"), maximising its influence on the first
+            # generated tokens.
+            top.reverse()
+            return top
+
+        except Exception as exc:
+            print(f"[RERANK] predict failed, using hybrid order: {exc}")
+            return chunks[:top_n]
+
+
+_reranker = _CrossEncoderReranker()
 
 
 # Matches conversational inputs that should bypass RAG retrieval entirely.
@@ -1439,6 +1515,22 @@ class LightRAG:
                 src = (r.get("meta") or {}).get("source")
                 if isinstance(src, str) and src and src not in sources:
                     sources.append(src)
+
+        # ── 4b. Cross-encoder re-ranking ──────────────────────────────────────
+        # Hybrid scoring (step 4) ranks by topic overlap; the cross-encoder
+        # reads (query, passage) as a pair and scores direct relevance instead.
+        # Runs in a thread (blocking CPU call), only on fresh retrievals —
+        # context-reuse cache hits already have a re-ranked chunk_hits stored.
+        if not _reuse_context and chunk_hits:
+            chunk_hits = await asyncio.to_thread(
+                _reranker.rerank, query, chunk_hits, AURA_RERANK_TOP_N
+            )
+            # Rebuild sources from the trimmed, re-ranked set
+            sources = []
+            for _c in chunk_hits:
+                _src = (_c.get("meta") or {}).get("source")
+                if isinstance(_src, str) and _src and _src not in sources:
+                    sources.append(_src)
 
         # ── 5. Build context + generate answer ───────────────────────────
         # The system prompt and prompt format are split by whether retrieval found

@@ -19,3 +19,4 @@ sounddevice
 Pillow
 pytesseract
 ultralytics
+sentence-transformers

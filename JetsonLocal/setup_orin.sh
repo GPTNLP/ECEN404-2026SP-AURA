@@ -145,6 +145,9 @@ echo "Pre-downloading Whisper models (tiny.en for wake detection, small.en for t
 python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')" 2>&1 | tail -3 || echo "[WARN] tiny.en download failed — will download on first use"
 python -c "from faster_whisper import WhisperModel; WhisperModel('small.en', device='cpu', compute_type='int8')" 2>&1 | tail -3 || echo "[WARN] small.en download failed — will download on first use"
 
+echo "Pre-downloading cross-encoder re-ranking model (~65 MB, runs on CPU)..."
+python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cpu')" 2>&1 | tail -3 || echo "[WARN] cross-encoder download failed — will attempt on first query"
+
 echo "Creating startup launcher..."
 cat > "$PROJECT_DIR/start_aura.sh" <<EOF
 #!/usr/bin/env bash
@@ -253,6 +256,8 @@ Environment=AURA_TOP_K=8
 Environment=AURA_NUM_PREDICT=512
 Environment=AURA_NUM_DRAFT=4
 Environment=AURA_TEMPERATURE=0.1
+Environment=AURA_RERANK_ENABLED=true
+Environment=AURA_RERANK_TOP_N=3
 
 [Install]
 WantedBy=multi-user.target
