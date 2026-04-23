@@ -90,7 +90,7 @@ if [ -f "$OLLAMA_SVC" ]; then
         CHANGED=1
     fi
     if ! grep -q 'OLLAMA_KV_CACHE_TYPE' "$OLLAMA_SVC"; then
-        sudo sed -i '/\[Service\]/a Environment="OLLAMA_KV_CACHE_TYPE=q8_0"' "$OLLAMA_SVC"
+        sudo sed -i '/\[Service\]/a Environment="OLLAMA_KV_CACHE_TYPE=q4_0"' "$OLLAMA_SVC"
         CHANGED=1
     fi
     if ! grep -q 'OLLAMA_DRAFT_MODEL' "$OLLAMA_SVC"; then
@@ -252,6 +252,7 @@ Environment=AURA_MAX_CTX_CHARS=12000
 Environment=AURA_TOP_K=8
 Environment=AURA_NUM_PREDICT=512
 Environment=AURA_NUM_DRAFT=4
+Environment=AURA_TEMPERATURE=0.1
 
 [Install]
 WantedBy=multi-user.target

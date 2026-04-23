@@ -54,7 +54,7 @@ AURA_FAST_LLM      = os.getenv("AURA_INTENT_MODEL", "llama3.2:1b")
 # at 4096 tokens — well within the Jetson's 8 GB alongside camera/YOLO.
 AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "512"))
 AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "4096"))
-AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
+AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.1"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 # Speculative decoding: when OLLAMA_DRAFT_MODEL is set in the Ollama service env,
 # sending num_draft>0 tells Ollama to use that model to speculatively guess N tokens
@@ -94,7 +94,7 @@ AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "400"))
 AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "30"))
 
 # Batch embedding
-AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "8"))
+AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "16"))
 
 # Semantic query cache
 # Tier-1 (exact hit): cosine sim ≥ EXACT_THRESH → return cached answer immediately.
@@ -519,6 +519,11 @@ class OllamaClient:
             "num_predict": num_predict,
             "num_ctx": num_ctx,
             "num_gpu": AURA_NUM_GPU,  # offload all layers to Jetson GPU
+            # repeat_penalty=1.1 penalizes recently-generated tokens to break
+            # looping.  The 3b model occasionally produces redundant summaries that
+            # burn num_predict tokens on garbage.  1.1 is mild enough to not harm
+            # fluency; 1.2+ starts causing word avoidance artifacts.
+            "repeat_penalty": 1.1,
         }
         if AURA_NUM_THREAD > 0:
             opts["num_thread"] = AURA_NUM_THREAD
