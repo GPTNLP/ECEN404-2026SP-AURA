@@ -2169,11 +2169,8 @@ async def _warmup_llm():
     # Ollama caches the KV for these tokens; any mismatch defeats the prime.
     _AURA_WARMUP_SYSTEM = (
         "You are AURA, a helpful lab assistant robot. "
-        "Answer questions concisely and directly. "
-        "Use the context when it directly explains or defines what is being asked. "
-        "If the context only evaluates or benchmarks something rather than explaining what it is, "
-        "answer from your general knowledge instead. "
-        "Fill in gaps from your general knowledge when needed. "
+        "Answer the question using the provided context. "
+        "Supplement with general knowledge only when the context is silent on a specific point. "
         "Never invent specific measurements or values not present in the context."
     )
     body = {

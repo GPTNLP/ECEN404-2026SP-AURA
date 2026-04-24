@@ -1477,7 +1477,12 @@ class LightRAG:
             # ── 4. Chunk-level hybrid retrieval ──────────────────────────────
             candidates: Dict[int, Dict[str, float]] = {}
 
-            for idx, score in self._search_vector(q_emb, top_k=top_k * 2):
+            # Search 3× top_k initially so the cross-encoder has a larger candidate
+            # pool to choose from. The Goals/Objectives section of a lab manual is
+            # often semantically far from the word "goal" in embedding space (it lists
+            # specific tasks like "use a DMM" rather than saying "the goal is…"), so
+            # it can rank outside the top 2× band if we don't cast a wider net.
+            for idx, score in self._search_vector(q_emb, top_k=top_k * 3):
                 candidates.setdefault(idx, {})["vec"] = score
 
             if mode in ("bm25", "hybrid", "global"):
@@ -1487,7 +1492,7 @@ class LightRAG:
                 # gives BM25 non-zero signal via those alternative terms.
                 kw_terms = (keywords.get("low") or []) + (keywords.get("high") or [])
                 bm25_q = query + (" " + " ".join(kw_terms) if kw_terms else "")
-                for idx, score in self._search_bm25(bm25_q, top_k=top_k * 2):
+                for idx, score in self._search_bm25(bm25_q, top_k=top_k * 3):
                     candidates.setdefault(idx, {})["bm25"] = score
 
             scored: List[Tuple[float, int]] = []
@@ -1509,7 +1514,13 @@ class LightRAG:
 
             chunk_hits: List[Dict[str, Any]] = []
             sources:    List[str] = []
-            for score, idx in scored[:top_k]:
+            # Pass top_k * 2 candidates to the cross-encoder instead of top_k.
+            # FAISS+BM25 hybrid scoring ranks by topic overlap; a "Goals" section
+            # that lists specific tasks (DMM, potentiometer, 9V circuit) may rank
+            # below an intro section that mentions "lab 1" repeatedly. The cross-
+            # encoder reads (query, passage) jointly and correctly prefers the
+            # section that actually answers the question — but only if it sees it.
+            for score, idx in scored[:top_k * 2]:
                 r = self._rows[idx]
                 chunk_hits.append({"score": score, "text": r.get("text", ""), "meta": r.get("meta", {})})
                 src = (r.get("meta") or {}).get("source")
@@ -1546,11 +1557,8 @@ class LightRAG:
             # for Q&A with context; the model pattern-matches to it and answers directly.
             system = (
                 "You are AURA, a helpful lab assistant robot. "
-                "Answer questions concisely and directly. "
-                "Use the context when it directly explains or defines what is being asked. "
-                "If the context only evaluates or benchmarks something rather than explaining what it is, "
-                "answer from your general knowledge instead. "
-                "Fill in gaps from your general knowledge when needed. "
+                "Answer the question using the provided context. "
+                "Supplement with general knowledge only when the context is silent on a specific point. "
                 "Never invent specific measurements or values not present in the context."
             )
             prompt = (
