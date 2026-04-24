@@ -2,7 +2,7 @@ import socket
 import time
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Dict, Any
 
 try:
     import psutil
@@ -16,25 +16,6 @@ except Exception:
 
 
 START_TIME = time.time()
-
-_THERMAL_PATHS = (
-    Path("/sys/class/thermal/thermal_zone0/temp"),
-    Path("/sys/devices/virtual/thermal/thermal_zone0/temp"),
-)
-
-_GPU_SYSFS_PATHS = (
-    Path("/sys/class/devfreq/17000000.ga10b/load"),
-    Path("/sys/class/devfreq/gpu/load"),
-    Path("/sys/devices/gpu.0/load"),
-)
-
-# psutil.cpu_percent(interval=None) returns % since the previous call.
-# This primer establishes a baseline so the first real call isn't 0.0.
-if psutil:
-    try:
-        psutil.cpu_percent(interval=None)
-    except Exception:
-        pass
 
 
 def get_hostname() -> str:
@@ -57,21 +38,29 @@ def get_uptime_seconds() -> int:
 
 
 def get_temperature_c() -> float | None:
-    for path in _THERMAL_PATHS:
+    thermal_paths = [
+        "/sys/class/thermal/thermal_zone0/temp",
+        "/sys/devices/virtual/thermal/thermal_zone0/temp",
+    ]
+
+    for thermal_path in thermal_paths:
         try:
-            value = float(path.read_text(encoding="utf-8").strip())
+            with open(thermal_path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            value = float(raw)
             if value > 1000:
                 value /= 1000.0
             return round(value, 1)
         except Exception:
             pass
+
     return None
 
 
 def get_cpu_percent() -> float | None:
     if psutil:
         try:
-            return round(psutil.cpu_percent(interval=None), 1)
+            return round(psutil.cpu_percent(interval=0.2), 1)
         except Exception:
             return None
     return None
@@ -80,43 +69,65 @@ def get_cpu_percent() -> float | None:
 def _read_gpu_from_jtop() -> float | None:
     if jtop is None:
         return None
+
     try:
         with jtop() as jetson:
             if not jetson.ok():
                 return None
+
             stats = jetson.stats
             for key in ("GPU", "GPU1", "GR3D_FREQ"):
                 if key in stats:
                     try:
                         value = float(stats[key])
                         if value > 100:
-                            value /= 10.0
+                            value = value / 10.0
                         return round(value, 1)
-                    except (ValueError, TypeError):
+                    except Exception:
                         pass
     except Exception:
         return None
+
     return None
 
 
 def _read_gpu_from_sysfs() -> float | None:
-    for path in _GPU_SYSFS_PATHS:
+    candidates = [
+        "/sys/class/devfreq/17000000.ga10b/load",
+        "/sys/class/devfreq/gpu/load",
+        "/sys/devices/gpu.0/load",
+    ]
+
+    for path_str in candidates:
         try:
+            path = Path(path_str)
             if not path.exists():
                 continue
-            value = float(path.read_text(encoding="utf-8").strip())
+
+            raw = path.read_text(encoding="utf-8").strip()
+            value = float(raw)
+
             # Jetson often reports 0..1000
             if value > 100:
-                value /= 10.0
+                value = value / 10.0
+
             return round(value, 1)
         except Exception:
             pass
+
     return None
 
 
 def get_gpu_percent() -> float | None:
-    v = _read_gpu_from_jtop()
-    return v if v is not None else _read_gpu_from_sysfs()
+    value = _read_gpu_from_jtop()
+    if value is not None:
+        return value
+
+    value = _read_gpu_from_sysfs()
+    if value is not None:
+        return value
+
+    return None
 
 
 def get_ram_percent() -> float | None:
@@ -130,7 +141,7 @@ def get_ram_percent() -> float | None:
 
 def get_disk_percent() -> float | None:
     try:
-        total, used, _ = shutil.disk_usage("/")
+        total, used, free = shutil.disk_usage("/")
         if total <= 0:
             return None
         return round((used / total) * 100.0, 1)
@@ -138,7 +149,7 @@ def get_disk_percent() -> float | None:
         return None
 
 
-def collect_device_info() -> dict[str, Any]:
+def collect_device_info() -> Dict[str, Any]:
     return {
         "hostname": get_hostname(),
         "local_ip": get_local_ip(),

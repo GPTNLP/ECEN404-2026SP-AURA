@@ -54,7 +54,7 @@ AURA_FAST_LLM      = os.getenv("AURA_INTENT_MODEL", "llama3.2:1b")
 # at 4096 tokens — well within the Jetson's 8 GB alongside camera/YOLO.
 AURA_NUM_PREDICT   = int(os.getenv("AURA_NUM_PREDICT", "512"))
 AURA_NUM_CTX       = int(os.getenv("AURA_NUM_CTX", "4096"))
-AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.1"))
+AURA_TEMPERATURE   = float(os.getenv("AURA_TEMPERATURE", "0.2"))
 AURA_NUM_THREAD    = int(os.getenv("AURA_NUM_THREAD", "0"))  # 0 = auto
 # Speculative decoding: when OLLAMA_DRAFT_MODEL is set in the Ollama service env,
 # sending num_draft>0 tells Ollama to use that model to speculatively guess N tokens
@@ -94,7 +94,7 @@ AURA_INSERT_CHUNK_OVERLAP = int(os.getenv("AURA_INSERT_CHUNK_OVERLAP", "400"))
 AURA_MIN_CHUNK_CHARS      = int(os.getenv("AURA_MIN_CHUNK_CHARS", "30"))
 
 # Batch embedding
-AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "16"))
+AURA_EMBED_BATCH_SIZE = int(os.getenv("AURA_EMBED_BATCH_SIZE", "8"))
 
 # Semantic query cache
 # Tier-1 (exact hit): cosine sim ≥ EXACT_THRESH → return cached answer immediately.
@@ -105,20 +105,6 @@ AURA_CACHE_EXACT_THRESH = float(os.getenv("AURA_CACHE_EXACT_THRESH", "0.93"))
 AURA_CACHE_CTX_THRESH   = float(os.getenv("AURA_CACHE_CTX_THRESH",   "0.82"))
 AURA_CACHE_MAX_ENTRIES  = int(os.getenv("AURA_CACHE_MAX_ENTRIES",    "64"))
 AURA_CACHE_TTL_S        = float(os.getenv("AURA_CACHE_TTL_S",        "3600"))  # 1 h
-
-# Cross-encoder re-ranking
-# After FAISS+BM25 hybrid retrieval narrows to top_k candidates, the cross-encoder
-# scores each (query, passage) pair jointly.  Unlike embedding cosine similarity
-# (which measures "topic overlap"), a cross-encoder can distinguish "this passage
-# mentions the topic" from "this passage directly answers the question."
-# Model: ms-marco-MiniLM-L-6 — 65 MB, ~80 ms for 8 pairs on Jetson CPU.
-# AURA_RERANK_TOP_N: how many chunks to keep after re-ranking and pass to the LLM.
-#   With 4800-char chunks and MAX_CTX_CHARS=12000, the LLM can fit ≈2-3 chunks
-#   anyway; keeping 3 re-ranked chunks removes noisy candidates while preserving
-#   breadth.
-AURA_RERANK_ENABLED = os.getenv("AURA_RERANK_ENABLED", "true").lower() == "true"
-AURA_RERANK_MODEL   = os.getenv("AURA_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-AURA_RERANK_TOP_N   = int(os.getenv("AURA_RERANK_TOP_N", "3"))
 
 
 # ─── Data structures ─────────────────────────────────────────────────────────
@@ -227,68 +213,6 @@ class _QueryCache:
 
     def clear(self):
         self._entries.clear()
-
-
-class _CrossEncoderReranker:
-    """Lazy-loaded cross-encoder re-ranker.
-
-    Loaded on first query (not at import time) so startup latency and RAM
-    are not affected on Jetsons where sentence-transformers is unavailable.
-    Falls back to the original hybrid-score order on any error.
-
-    Context ordering — "lost in the middle":
-    LLM attention when generating the first output token is concentrated on
-    the tokens immediately before "Answer:".  The highest-scoring chunk is
-    placed LAST in chunk_hits (closest to the question) so the model starts
-    its answer grounded in the most relevant passage.  Lower-scored chunks
-    are placed first as supporting background.
-    """
-
-    def __init__(self) -> None:
-        self._model: Any = None  # None = not loaded; False = load failed
-
-    def _load(self) -> bool:
-        if self._model is not None:
-            return self._model is not False
-        try:
-            from sentence_transformers import CrossEncoder  # type: ignore
-            self._model = CrossEncoder(AURA_RERANK_MODEL, device="cpu")
-            print(f"[RERANK] cross-encoder ready: {AURA_RERANK_MODEL}")
-        except Exception as exc:
-            print(f"[RERANK] disabled — could not load '{AURA_RERANK_MODEL}': {exc}")
-            self._model = False
-        return self._model is not False
-
-    def rerank(
-        self,
-        query: str,
-        chunks: List[Dict[str, Any]],
-        top_n: int,
-    ) -> List[Dict[str, Any]]:
-        """Return top_n chunks sorted for context insertion (best chunk last)."""
-        if not AURA_RERANK_ENABLED or not chunks or not self._load():
-            return chunks[:top_n]
-
-        try:
-            pairs  = [(query, c.get("text", "")) for c in chunks]
-            scores = self._model.predict(pairs, show_progress_bar=False)
-
-            # Sort descending by cross-encoder score, keep top_n
-            ranked = sorted(zip(scores.tolist(), chunks), key=lambda x: x[0], reverse=True)
-            top    = [c for _, c in ranked[:top_n]]
-
-            # Reverse so the highest-scoring chunk ends up last in the LLM prompt
-            # (immediately before "Answer:"), maximising its influence on the first
-            # generated tokens.
-            top.reverse()
-            return top
-
-        except Exception as exc:
-            print(f"[RERANK] predict failed, using hybrid order: {exc}")
-            return chunks[:top_n]
-
-
-_reranker = _CrossEncoderReranker()
 
 
 # Matches conversational inputs that should bypass RAG retrieval entirely.
@@ -595,11 +519,6 @@ class OllamaClient:
             "num_predict": num_predict,
             "num_ctx": num_ctx,
             "num_gpu": AURA_NUM_GPU,  # offload all layers to Jetson GPU
-            # repeat_penalty=1.1 penalizes recently-generated tokens to break
-            # looping.  The 3b model occasionally produces redundant summaries that
-            # burn num_predict tokens on garbage.  1.1 is mild enough to not harm
-            # fluency; 1.2+ starts causing word avoidance artifacts.
-            "repeat_penalty": 1.1,
         }
         if AURA_NUM_THREAD > 0:
             opts["num_thread"] = AURA_NUM_THREAD
@@ -658,11 +577,8 @@ class OllamaClient:
 
         # Streaming path: run the blocking HTTP stream in a thread, feed tokens
         # back to the event loop via a queue so on_token() can be awaited safely.
-        # Unbounded queue: put_nowait via call_soon_threadsafe would raise QueueFull
-        # and silently drop tokens if bounded. Tokens are small strings (~5 chars) so
-        # memory is not a concern at any generation length on the Jetson.
         loop = asyncio.get_running_loop()
-        token_q: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        token_q: asyncio.Queue[Optional[str]] = asyncio.Queue(maxsize=1024)
 
         session = self._session
         def _stream_worker() -> None:
@@ -1342,20 +1258,21 @@ class LightRAG:
             parts.append("\n".join(graph_lines))
 
         if chunk_hits:
-            # Collect chunks in descending score order (best first) until MAX_CTX_CHARS,
-            # then REVERSE before appending. Recency bias: LLMs attend more to text near
-            # the end of context (closest to Answer:), so the best chunk goes last.
+            parts.append("=== Source Passages ===")
+            # Track chars used so far (joining with \n\n between each part).
+            # Stop adding passages once the next one would push past MAX_CTX_CHARS
+            # so the LLM always sees complete passages — a mid-cut paragraph is
+            # worse than one fewer complete paragraph.
             used = len("\n\n".join(parts))
-            collected: List[str] = []
-            for hit in chunk_hits:
-                text = hit.get("text", "")
-                needed = len(text) + 2  # +2 for the \n\n joiner
+            for i, hit in enumerate(chunk_hits, 1):
+                src = (hit.get("meta") or {}).get("source", "")
+                label = f"--- Passage {i} (from: {src}) ---" if src else f"--- Passage {i} ---"
+                passage = f"{label}\n{hit.get('text', '')}"
+                needed = len(passage) + 2  # +2 for the \n\n joiner
                 if used + needed > MAX_CTX_CHARS:
                     break
-                collected.append(text)
+                parts.append(passage)
                 used += needed
-            for text in reversed(collected):
-                parts.append(text)
 
         return "\n\n".join(parts)
 
@@ -1477,12 +1394,7 @@ class LightRAG:
             # ── 4. Chunk-level hybrid retrieval ──────────────────────────────
             candidates: Dict[int, Dict[str, float]] = {}
 
-            # Search 3× top_k initially so the cross-encoder has a larger candidate
-            # pool to choose from. The Goals/Objectives section of a lab manual is
-            # often semantically far from the word "goal" in embedding space (it lists
-            # specific tasks like "use a DMM" rather than saying "the goal is…"), so
-            # it can rank outside the top 2× band if we don't cast a wider net.
-            for idx, score in self._search_vector(q_emb, top_k=top_k * 3):
+            for idx, score in self._search_vector(q_emb, top_k=top_k * 2):
                 candidates.setdefault(idx, {})["vec"] = score
 
             if mode in ("bm25", "hybrid", "global"):
@@ -1492,7 +1404,7 @@ class LightRAG:
                 # gives BM25 non-zero signal via those alternative terms.
                 kw_terms = (keywords.get("low") or []) + (keywords.get("high") or [])
                 bm25_q = query + (" " + " ".join(kw_terms) if kw_terms else "")
-                for idx, score in self._search_bm25(bm25_q, top_k=top_k * 3):
+                for idx, score in self._search_bm25(bm25_q, top_k=top_k * 2):
                     candidates.setdefault(idx, {})["bm25"] = score
 
             scored: List[Tuple[float, int]] = []
@@ -1514,34 +1426,12 @@ class LightRAG:
 
             chunk_hits: List[Dict[str, Any]] = []
             sources:    List[str] = []
-            # Pass top_k * 2 candidates to the cross-encoder instead of top_k.
-            # FAISS+BM25 hybrid scoring ranks by topic overlap; a "Goals" section
-            # that lists specific tasks (DMM, potentiometer, 9V circuit) may rank
-            # below an intro section that mentions "lab 1" repeatedly. The cross-
-            # encoder reads (query, passage) jointly and correctly prefers the
-            # section that actually answers the question — but only if it sees it.
-            for score, idx in scored[:top_k * 2]:
+            for score, idx in scored[:top_k]:
                 r = self._rows[idx]
                 chunk_hits.append({"score": score, "text": r.get("text", ""), "meta": r.get("meta", {})})
                 src = (r.get("meta") or {}).get("source")
                 if isinstance(src, str) and src and src not in sources:
                     sources.append(src)
-
-        # ── 4b. Cross-encoder re-ranking ──────────────────────────────────────
-        # Hybrid scoring (step 4) ranks by topic overlap; the cross-encoder
-        # reads (query, passage) as a pair and scores direct relevance instead.
-        # Runs in a thread (blocking CPU call), only on fresh retrievals —
-        # context-reuse cache hits already have a re-ranked chunk_hits stored.
-        if not _reuse_context and chunk_hits:
-            chunk_hits = await asyncio.to_thread(
-                _reranker.rerank, query, chunk_hits, AURA_RERANK_TOP_N
-            )
-            # Rebuild sources from the trimmed, re-ranked set
-            sources = []
-            for _c in chunk_hits:
-                _src = (_c.get("meta") or {}).get("source")
-                if isinstance(_src, str) and _src and _src not in sources:
-                    sources.append(_src)
 
         # ── 5. Build context + generate answer ───────────────────────────
         # The system prompt and prompt format are split by whether retrieval found
@@ -1552,19 +1442,23 @@ class LightRAG:
         context = self._build_context(chunk_hits, entity_hits, relation_hits)
 
         if context.strip():
-            # Short system prompt — the 3b model ignores long instruction lists.
-            # "Context: / Question: / Answer:" is the standard fine-tuning format
-            # for Q&A with context; the model pattern-matches to it and answers directly.
             system = (
                 "You are AURA, a helpful lab assistant robot. "
-                "Answer the question using the provided context. "
-                "Supplement with general knowledge only when the context is silent on a specific point. "
-                "Never invent specific measurements or values not present in the context."
+                "Answer the question using only the parts of the retrieved passages that are relevant to what was asked. "
+                "Match the length of your answer to the question: a simple factual question gets a 1-3 sentence answer; "
+                "a detailed technical question may need more explanation. "
+                "If the passages fully answer the question, answer from them. "
+                "If they only partially cover it, use what they say and fill in gaps from your "
+                "general knowledge — briefly note 'based on the documents and general knowledge'. "
+                "Never invent specific measurements, values, formulas, or technical specifications "
+                "not present in the passages. "
+                "Never expand an acronym unless its full form appears in the passages. "
+                "Do not create numbered lists, bullet points, or headers unless the passages use that structure. "
+                "Stop after answering."
             )
             prompt = (
-                f"Context:\n{context}\n\n"
-                f"Question: {query}\n\n"
-                f"Answer:"
+                f"Retrieved passages from the knowledge base:\n\n{context}\n\n"
+                f"Question: {query}\n\nAnswer:"
             )
         else:
             # Retrieval returned nothing — no DB loaded or query too dissimilar.
