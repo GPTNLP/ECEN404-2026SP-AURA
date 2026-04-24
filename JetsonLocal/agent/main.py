@@ -2539,9 +2539,12 @@ async def rag_chat(req: _ChatRequest, stream: bool = Query(False)):
         # progressively rather than waiting for the full answer.
         async def _event_generator():
             sentence_buf: List[str] = []
-            token_q: asyncio.Queue = asyncio.Queue(maxsize=512)
+            token_q: asyncio.Queue = asyncio.Queue()  # Unbounded queue to prevent QueueFull
+            _had_chunk = False
 
             async def _on_tok(tok: str) -> None:
+                nonlocal _had_chunk
+                _had_chunk = True
                 sentence_buf.append(tok)
                 sentence, remainder = _pop_sentence("".join(sentence_buf))
                 if sentence:
@@ -2550,6 +2553,7 @@ async def rag_chat(req: _ChatRequest, stream: bool = Query(False)):
                     await token_q.put(sentence)
 
             async def _run():
+                ans = None
                 try:
                     ans = await asyncio.wait_for(
                         rag_manager.query(req.query, on_token=_on_tok),
@@ -2560,13 +2564,20 @@ async def rag_chat(req: _ChatRequest, stream: bool = Query(False)):
                     ans = str(ans or "").strip() or "No response generated from model."
                     chat_manager.add_message("assistant", ans, api, DEVICE_ID)
                 except asyncio.TimeoutError:
-                    pass
-                except Exception:
-                    pass
+                    ans = "I timed out while generating a response."
+                    chat_manager.add_message("assistant", ans, api, DEVICE_ID)
+                except Exception as e:
+                    ans = f"An error occurred: {str(e)}"
+                    chat_manager.add_message("assistant", ans, api, DEVICE_ID)
                 finally:
                     leftover = "".join(sentence_buf).strip()
                     if leftover:
                         await token_q.put(leftover)
+                    
+                    # Ensure ans surfaces directly if no tokens were emitted
+                    if not _had_chunk and not leftover and ans:
+                        await token_q.put(ans)
+                        
                     await token_q.put(None)
 
             asyncio.create_task(_run())
