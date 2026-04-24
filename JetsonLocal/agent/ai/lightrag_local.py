@@ -1342,20 +1342,20 @@ class LightRAG:
             parts.append("\n".join(graph_lines))
 
         if chunk_hits:
-            # Track chars used so far (joining with \n\n between each part).
-            # Stop adding passages once the next one would push past MAX_CTX_CHARS
-            # so the LLM always sees complete passages — a mid-cut paragraph is
-            # worse than one fewer complete paragraph.
-            # No "Passage N" labels — numbered headers trigger document-summarization
-            # mode in the 3b model, causing it to list/describe passages instead of answering.
+            # Collect chunks in descending score order (best first) until MAX_CTX_CHARS,
+            # then REVERSE before appending. Recency bias: LLMs attend more to text near
+            # the end of context (closest to Answer:), so the best chunk goes last.
             used = len("\n\n".join(parts))
+            collected: List[str] = []
             for hit in chunk_hits:
                 text = hit.get("text", "")
                 needed = len(text) + 2  # +2 for the \n\n joiner
                 if used + needed > MAX_CTX_CHARS:
                     break
-                parts.append(text)
+                collected.append(text)
                 used += needed
+            for text in reversed(collected):
+                parts.append(text)
 
         return "\n\n".join(parts)
 
@@ -1547,7 +1547,9 @@ class LightRAG:
             system = (
                 "You are AURA, a helpful lab assistant robot. "
                 "Answer questions concisely and directly. "
-                "Use the context if it covers the question. "
+                "Use the context when it directly explains or defines what is being asked. "
+                "If the context only evaluates or benchmarks something rather than explaining what it is, "
+                "answer from your general knowledge instead. "
                 "Fill in gaps from your general knowledge when needed. "
                 "Never invent specific measurements or values not present in the context."
             )
